@@ -8,6 +8,15 @@
 //! El producto son "unos pocos hallazgos", no un informe. Por eso todo se ordena
 //! por severidad y se trunca: un motor que enumera cada detalle que ve se deja de
 //! leer a la semana.
+//!
+//! Un hallazgo no vale lo mismo que otro segun donde apunte: los **accionables**
+//! senalan una linea con un defecto concreto (una colision, un catch vacio, una
+//! ruta absoluta) y se arreglan leyendo esa linea; los de **higiene** describen
+//! un habito del robot entero ("sin trycatch", "sin else", "anidado", "variables
+//! muertas") y son ciertos pero genericos: en las dbs reales son la mayoria y un
+//! lector humano los ignora. Separarlos en dos cubos ([`evaluate_split`]) deja que
+//! el render les de secciones y topes distintos sin tocar la severidad, que sigue
+//! midiendo el dano y no la accionabilidad.
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BTreeSet};
@@ -87,6 +96,51 @@ impl<'de> Deserialize<'de> for Severity {
     }
 }
 
+/// Eje de la separacion util: si el defecto se arregla leyendo una linea.
+///
+/// El criterio objetivo es "tiene linea concreta", pero se declara por **regla**
+/// en `rules/builtin.json` y no se deduce del `line` de cada hallazgo: el render
+/// necesita saber el cubo para elegir seccion y tope antes de que exista la
+/// evaluacion, y una regla no debe cambiar de cubo porque hoy no dispare. Los
+/// accionables siempre llevan linea (hay test que lo fija); `IF_SIN_ELSE` es
+/// higiene aunque apunte a una linea, porque el defecto es el habito repetido y
+/// no ese `if` en concreto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// Senala una linea con un defecto concreto: se arregla en el sitio.
+    Accionable,
+    /// Afecta al robot entero: cierto, pero generico y masivo.
+    Higiene,
+}
+
+impl Kind {
+    /// Etiqueta para el render, en espanol y en minusculas (`accionable`, `higiene`).
+    ///
+    /// Misma razon que [`Severity::severity_label`]: derivarla del `Debug` en cada
+    /// modulo que muestre hallazgos multiplicaria el `match`.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Kind::Accionable => "accionable",
+            Kind::Higiene => "higiene",
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Kind {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Misma tolerancia que `Severity`: el JSON lo edita una persona y un
+        // espacio o una mayuscula de mas no deben tumbar el motor.
+        let raw = String::deserialize(deserializer)?;
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "accionable" => Ok(Kind::Accionable),
+            "higiene" => Ok(Kind::Higiene),
+            otro => Err(DeError::custom(format!(
+                "kind desconocido `{otro}`: usa accionable o higiene"
+            ))),
+        }
+    }
+}
+
 /// Una regla declarada en `rules/builtin.json`.
 ///
 /// `scope` y `when` son metadata para la UI/CLI: el evaluador decide con `id` y
@@ -96,6 +150,9 @@ impl<'de> Deserialize<'de> for Severity {
 pub struct RuleSpec {
     pub id: String,
     pub severity: Severity,
+    /// Cubo al que pertenece la regla. Obligatorio: un `kind` ausente es un fallo
+    /// ruidoso al parsear (y en el primer test), no una regla mal clasificada.
+    pub kind: Kind,
     pub scope: String,
     pub when: String,
     pub fix: String,
@@ -105,8 +162,13 @@ pub struct RuleSpec {
 pub struct Finding {
     pub rule_id: String,
     pub severity: Severity,
+    /// Cubo heredado de la regla: el render agrupa y trunca por aqui.
+    pub kind: Kind,
     /// Linea de Studio del nodo implicado. Vacia cuando el hallazgo afecta al
     /// robot entero (`SIN_TRY`, `ANIDAMIENTO`, `VAR_NO_USADA`).
+    ///
+    /// No es el eje de [`Kind`]: las accionables siempre traen linea, pero
+    /// `IF_SIN_ELSE` trae una y aun asi es higiene.
     pub line: String,
     pub message: String,
     pub fix: String,
@@ -124,6 +186,9 @@ pub fn builtin_rules() -> Vec<RuleSpec> {
 
 /// Evalua todas las reglas y devuelve hasta [`MAX_FINDINGS`] hallazgos,
 /// ordenados de severidad mayor a menor.
+///
+/// Los dos cubos compiten aqui por el mismo presupuesto: para darle a cada uno su
+/// tope y su seccion, usa [`evaluate_split`].
 ///
 /// - `collisions`: salida de [`crate::tree::collisions`].
 /// - `declared_unused`: variables sin uso ya filtradas por el grafo de llamadas;
@@ -166,6 +231,40 @@ pub fn evaluate_with_limit(
     out.sort_by_key(|f| Reverse(f.severity));
     out.truncate(max_findings);
     out
+}
+
+/// Devuelve (accionables, higiene), cada cubo ordenado por severidad descendente
+/// y truncado a `max_por_cubo`.
+///
+/// Es la misma evaluacion que [`evaluate_with_limit`] sin tope, repartida por
+/// [`Kind`]: filtrar despues de ordenar conserva el orden relativo dentro de cada
+/// cubo y no duplica las siete reglas, que es donde vive el coste de mantener dos
+/// motores. El tope de [`MAX_FINDINGS`] sigue existiendo para quien quiera una
+/// sola lista; aqui cada cubo tiene su presupuesto porque un hallazgo de higiene
+/// no compite con uno accionable: con un tope comun, los de higiene (mas
+/// numerosos) se comen las lineas que un humano si miraria (44 de los 122
+/// hallazgos reales eran `SIN_TRY` e `IF_SIN_ELSE`, y de ahi el 64% de precision
+/// util).
+pub fn evaluate_split(
+    nodes: &[FlatNode],
+    collisions: &BTreeMap<String, usize>,
+    declared_unused: &[String],
+    vars_total: usize,
+    max_por_cubo: usize,
+) -> (Vec<Finding>, Vec<Finding>) {
+    let mut accionables = Vec::new();
+    let mut higiene = Vec::new();
+    // `usize::MAX` desactiva el tope interno (`truncate` con un limite mayor que
+    // la lista no hace nada): el recorte se aplica luego, una vez por cubo.
+    for finding in evaluate_with_limit(nodes, collisions, declared_unused, vars_total, usize::MAX) {
+        match finding.kind {
+            Kind::Accionable => accionables.push(finding),
+            Kind::Higiene => higiene.push(finding),
+        }
+    }
+    accionables.truncate(max_por_cubo);
+    higiene.truncate(max_por_cubo);
+    (accionables, higiene)
 }
 
 fn line_collisions(rule: &RuleSpec, collisions: &BTreeMap<String, usize>, out: &mut Vec<Finding>) {
@@ -296,6 +395,9 @@ fn push_finding(rule: &RuleSpec, line: &str, message: String, out: &mut Vec<Find
     out.push(Finding {
         rule_id: rule.id.clone(),
         severity: rule.severity,
+        // El cubo lo decide la regla en el JSON, no la linea del hallazgo: asi
+        // una regla no cambia de seccion segun lo que encuentre hoy.
+        kind: rule.kind,
         line: line.to_string(),
         message,
         fix: rule.fix.clone(),
@@ -412,9 +514,69 @@ mod tests {
     }
 
     #[test]
-    fn la_severidad_acepta_texto_con_espacios_y_mayusculas() {
+    fn las_reglas_embebidas_reparten_las_siete_en_dos_cubos() {
+        let rules = builtin_rules();
+        assert_eq!(rules.len(), 7, "siete reglas declaradas");
+
+        let mut accionables: Vec<&str> = rules
+            .iter()
+            .filter(|r| r.kind == Kind::Accionable)
+            .map(|r| r.id.as_str())
+            .collect();
+        accionables.sort_unstable();
+        assert_eq!(
+            accionables,
+            vec!["CATCH_VACIO", "LINEA_COLISION", "RUTA_ABSOLUTA"],
+            "las accionables son las que senalan un defecto en una linea concreta"
+        );
+        assert_eq!(
+            rules.iter().filter(|r| r.kind == Kind::Higiene).count(),
+            4,
+            "el resto describe higiene del robot entero: {rules:?}"
+        );
+    }
+
+    #[test]
+    fn las_kinds_tienen_etiqueta_en_espanol_para_el_render() {
+        assert_eq!(Kind::Accionable.label(), "accionable");
+        assert_eq!(Kind::Higiene.label(), "higiene");
+    }
+
+    #[test]
+    fn la_kind_acepta_texto_con_espacios_y_mayusculas() {
         let rule: RuleSpec = serde_json::from_str(
-            r#"{"id":"X","severity":" ALTA ","scope":"robot","when":"w","fix":"f"}"#,
+            r#"{"id":"X","severity":"alta","kind":"  HIGIENE ","scope":"robot","when":"w","fix":"f"}"#,
+        )
+        .expect("kind valida");
+        assert_eq!(rule.kind, Kind::Higiene);
+    }
+
+    #[test]
+    fn una_kind_inventada_no_parsea_en_silencio() {
+        let err = serde_json::from_str::<RuleSpec>(
+            r#"{"id":"X","severity":"alta","kind":"urgente","scope":"robot","when":"w","fix":"f"}"#,
+        )
+        .expect_err("`urgente` no es un cubo");
+        assert!(err.to_string().contains("urgente"), "error: {err}");
+    }
+
+    #[test]
+    fn una_regla_sin_kind_no_parsea_en_silencio() {
+        // Con un `default` una regla nueva caeria en un cubo sin que nadie lo
+        // decidiera; el error de parseo es la unica senal de que falta el dato.
+        let err = serde_json::from_str::<RuleSpec>(
+            r#"{"id":"X","severity":"alta","scope":"robot","when":"w","fix":"f"}"#,
+        )
+        .expect_err("falta kind");
+        assert!(err.to_string().contains("kind"), "error: {err}");
+    }
+
+    #[test]
+    fn la_severidad_acepta_texto_con_espacios_y_mayusculas() {
+        // `kind` es obligatorio desde que los hallazgos se separan en cubos; esta
+        // prueba sigue midiendo solo la tolerancia de `severity`.
+        let rule: RuleSpec = serde_json::from_str(
+            r#"{"id":"X","severity":" ALTA ","kind":"accionable","scope":"robot","when":"w","fix":"f"}"#,
         )
         .expect("severidad valida");
         assert_eq!(rule.severity, Severity::Alta);
@@ -423,7 +585,7 @@ mod tests {
     #[test]
     fn una_severidad_inventada_no_parsea_en_silencio() {
         let err = serde_json::from_str::<RuleSpec>(
-            r#"{"id":"X","severity":"urgente","scope":"robot","when":"w","fix":"f"}"#,
+            r#"{"id":"X","severity":"urgente","kind":"accionable","scope":"robot","when":"w","fix":"f"}"#,
         )
         .expect_err("`urgente` no es una severidad");
         assert!(err.to_string().contains("urgente"), "error: {err}");
