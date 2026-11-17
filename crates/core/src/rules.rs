@@ -46,6 +46,19 @@ impl Severity {
             Severity::Alta => 2,
         }
     }
+
+    /// Etiqueta para el render, en espanol y en minusculas (`alta`, `media`, `baja`).
+    ///
+    /// El `Debug` del enum es ingles por convencion de codigo, pero el pack lo lee
+    /// un agente junto al resto del markdown, que esta en espanol; derivarlo del
+    /// enum en el render multiplicaria el `match` en cada modulo que lo muestre.
+    pub fn severity_label(&self) -> &'static str {
+        match self {
+            Severity::Alta => "alta",
+            Severity::Media => "media",
+            Severity::Baja => "baja",
+        }
+    }
 }
 
 impl Ord for Severity {
@@ -358,6 +371,13 @@ mod tests {
             ordenadas,
             vec![Severity::Baja, Severity::Media, Severity::Alta]
         );
+    }
+
+    #[test]
+    fn las_severidades_tienen_etiqueta_en_espanol_para_el_render() {
+        assert_eq!(Severity::Alta.severity_label(), "alta");
+        assert_eq!(Severity::Media.severity_label(), "media");
+        assert_eq!(Severity::Baja.severity_label(), "baja");
     }
 
     #[test]

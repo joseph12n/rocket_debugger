@@ -10,6 +10,7 @@
 //! - [`db`]      lectura de `robot.db` (solo lectura, tolerante al formato)
 //! - [`tree`]    arbol de comandos -> lista plana con linea, rama y profundidad
 //! - [`versions`] historial de snapshots + atribucion temporal
+//! - [`analysis`] grafo de llamadas + reglas: hallazgos y contratos del robot
 //! - [`pack`]    ensamblado del context pack
 //! - [`render`]  markdown + contabilidad de tokens
 //!
@@ -22,6 +23,7 @@
 //!   codigo. `line` **no** es unico: hay robots donde el `try` y el `catch` comparten
 //!   numeracion (`2.1`, `2.2`, `2.3`), asi que solo sirve como etiqueta de display.
 
+pub mod analysis;
 pub mod db;
 pub mod error;
 pub mod graph;
@@ -34,6 +36,7 @@ pub mod signature;
 pub mod tree;
 pub mod versions;
 
+pub use analysis::{analyse, Analysis};
 pub use error::{Error, Result};
 pub use pack::{build_from_conn, Pack, VarInfo};
 pub use render::{estimate_tokens, Sizing};
