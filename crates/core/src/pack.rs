@@ -5,6 +5,7 @@
 //! tests de ratio) salen todos de aqui.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use chrono::NaiveDateTime;
 use serde_json::Value;
@@ -12,6 +13,7 @@ use serde_json::Value;
 use crate::analysis::{self, Analysis};
 use crate::db::{self, Snapshot};
 use crate::error::Result;
+use crate::logs;
 use crate::redact;
 use crate::render::{estimate_tokens, Sizing};
 use crate::tree::{self, FlatNode};
@@ -65,7 +67,19 @@ impl Pack {
     }
 }
 
+/// Logs que se leen como maximo en un pack automatico.
+///
+/// Medido en el entorno real: el directorio pesa ~6,6 MB repartidos en 13
+/// ficheros, y con los 20 mas recientes entran todas las ejecuciones recientes sin
+/// que el pack dependa de logs de semanas atras.
+const DEFAULT_LOG_FILES: usize = 20;
+
 /// Construye el pack del snapshot indicado (por defecto, el ultimo).
+///
+/// La seccion de errores se rellena leyendo los logs **solo si el directorio
+/// existe**: aqui, y no en `analysis`, es donde se decide si este entorno tiene
+/// logs. Asi un pack de test no depende de `C:\Rocketbot` y un pack real no pierde
+/// la seccion por una ruta mal escrita.
 pub fn build_from_conn(
     conn: &rusqlite::Connection,
     robot: &str,
@@ -83,7 +97,9 @@ pub fn build_from_conn(
     // El analisis cruzado necesita la db entera (grafo de llamadas), no solo este
     // robot; por eso se resuelve aqui y se pasa ya hecho a `build`, que trabaja
     // unicamente con el snapshot pedido y no vuelve a tocar la conexion.
-    let analysis = analysis::analyse(conn, db_label, robot)?;
+    let logs_dir = Path::new(logs::DEFAULT_LOGS_DIR);
+    let log_source = logs_dir.is_dir().then_some((logs_dir, DEFAULT_LOG_FILES));
+    let analysis = analysis::analyse_with_logs(conn, db_label, robot, log_source)?;
     Ok(build(robot, db_label, &snaps, target, analysis))
 }
 

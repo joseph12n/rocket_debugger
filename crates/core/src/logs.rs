@@ -26,6 +26,9 @@
 //! caracter. Un byte invalido se degrada a `U+FFFD` y la linea sigue siendo
 //! parseable.
 
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
 use chrono::NaiveDateTime;
 
 /// Separador de los campos de cabecera. La fecha no lleva espacios alrededor de
@@ -34,6 +37,13 @@ const SEP: &str = " - ";
 
 /// Prefijo del bloque de peticion dentro del mensaje.
 const REQUEST: &str = "request:";
+
+/// Directorio de logs del Studio local.
+///
+/// Es la unica ruta del entorno real que conoce el motor, y la unica que decide
+/// si un pack lleva seccion de errores. Vive aqui, junto al parser, porque este
+/// es el modulo de I/O: los demas reciben rutas, nunca las inventan.
+pub const DEFAULT_LOGS_DIR: &str = r"C:\Rocketbot\logs";
 
 /// Peticion de ejecucion tal como la escribe el runner.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +209,80 @@ pub fn for_robot(entries: &[LogEntry], robot: &str) -> Vec<LogEntry> {
         })
         .cloned()
         .collect()
+}
+
+/// Ficheros `*.log` bajo `dir`, recursivo, del mas nuevo al mas viejo, como mucho
+/// `max`.
+///
+/// Un directorio inexistente o ilegible devuelve vacio en vez de fallar: un pack
+/// sin logs sigue siendo un pack valido, y "no hay logs" no es un error del
+/// robot. El recorte a `max` se hace **despues** de ordenar: quedarse con los
+/// primeros encontrados daria un fichero arbitrario -el que devuelva el sistema
+/// de ficheros-, no el mas reciente.
+///
+/// Se ordena por fecha de modificacion porque el nombre no la garantiza: el
+/// runner nombra `logfile_YYMMDD_HHMMSS.log` con la hora de **arranque**, asi que
+/// un fichero abierto toda la tarde es el mas nuevo por contenido y no por nombre.
+pub fn recent_files(dir: &Path, max: usize) -> Vec<PathBuf> {
+    if max == 0 {
+        return Vec::new();
+    }
+
+    let mut encontrados: Vec<(SystemTime, PathBuf)> = Vec::new();
+    let mut pendientes = vec![dir.to_path_buf()];
+    while let Some(actual) = pendientes.pop() {
+        let Ok(entradas) = std::fs::read_dir(&actual) else {
+            continue;
+        };
+        for entrada in entradas.flatten() {
+            // `file_type` no sigue enlaces: contar un enlace como directorio
+            // abriria la puerta a un bucle en el recorrido de `dir`.
+            let Ok(tipo) = entrada.file_type() else {
+                continue;
+            };
+            if tipo.is_dir() {
+                pendientes.push(entrada.path());
+                continue;
+            }
+            if !tipo.is_file() {
+                continue;
+            }
+            let ruta = entrada.path();
+            let es_log = ruta
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("log"));
+            if !es_log {
+                continue;
+            }
+            // Un fichero sin fecha legible no se descarta: se le da epoch para
+            // que quede al final del orden, que es donde merece estar, en vez de
+            // desaparecer del informe.
+            let modificado = entrada
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            encontrados.push((modificado, ruta));
+        }
+    }
+
+    encontrados.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    encontrados
+        .into_iter()
+        .take(max)
+        .map(|(_, ruta)| ruta)
+        .collect()
+}
+
+/// Contenido de un log ya decodificado, o `None` si no se puede leer.
+///
+/// La decodificacion ocurre en el borde de lectura y no en [`parse_text`]: asi el
+/// parser trabaja siempre sobre `&str` y un log con bytes sueltos de Windows-1252
+/// (mensajes de usuario, rutas) se degrada a `U+FFFD` en vez de tumbar el fichero
+/// entero. Un log ilegible se omite: es evidencia que falta, no un fallo del pack.
+pub fn read_text(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Cabecera estricta: la fecha tiene que ser real. `db::parse_date` degrada a
@@ -499,5 +583,77 @@ mod tests {
         assert!(parse_text("").is_empty());
         assert!(parse_text("\n\n\r\n").is_empty());
         assert!(parse_text("basura sin fecha\nmas basura").is_empty());
+    }
+
+    /// Fija la fecha de modificacion: el orden de `recent_files` no puede
+    /// depender de la resolucion del reloj ni del orden de escritura.
+    fn fechar(path: &Path, segundos: u64) {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let cuando = UNIX_EPOCH + Duration::from_secs(1_760_000_000 + segundos);
+        let fichero = std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("abro para fechar");
+        fichero.set_modified(cuando).expect("fijo la fecha");
+    }
+
+    #[test]
+    fn recent_files_ordena_por_fecha_descendente_y_recorta() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dia = tmp.path().join("261117");
+        std::fs::create_dir_all(&dia).expect("creo el subdirectorio del dia");
+        let viejo = tmp.path().join("logfile_viejo.log");
+        let medio = dia.join("logfile_medio.log");
+        let nuevo = dia.join("logfile_nuevo.log");
+        for p in [&viejo, &medio, &nuevo] {
+            std::fs::write(p, b"2026-11-17 12:43:47.000000 - rocketbot - INFO - hola\n")
+                .expect("escribo el log");
+        }
+        // Un fichero que no es `*.log` no es evidencia: no se lista.
+        std::fs::write(dia.join("notas.txt"), b"x").expect("escribo notas");
+        fechar(&viejo, 10);
+        fechar(&medio, 20);
+        fechar(&nuevo, 30);
+
+        assert_eq!(
+            recent_files(tmp.path(), 10),
+            vec![nuevo.clone(), medio.clone(), viejo.clone()],
+            "del mas nuevo al mas viejo, y recursivo"
+        );
+        assert_eq!(
+            recent_files(tmp.path(), 2),
+            vec![nuevo, medio],
+            "el recorte se hace despues de ordenar, no durante el recorrido"
+        );
+    }
+
+    #[test]
+    fn recent_files_sin_directorio_devuelve_vacio() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(recent_files(&tmp.path().join("no_existe"), 10).is_empty());
+        assert!(recent_files(tmp.path(), 0).is_empty());
+        // Un directorio vacio tampoco es un error.
+        assert!(recent_files(tmp.path(), 10).is_empty());
+    }
+
+    #[test]
+    fn read_text_degrada_los_bytes_invalidos_y_sigue_parseando() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let p = tmp.path().join("logfile.log");
+        std::fs::write(
+            &p,
+            b"2026-11-17 12:43:47.000000 - rocketbot - INFO - acento \xf1 y roto \xff\n",
+        )
+        .expect("escribo el log");
+
+        let texto = read_text(&p).expect("leo el log");
+        assert!(texto.contains('\u{fffd}'), "el byte suelto se degrada");
+        assert_eq!(
+            parse_text(&texto).len(),
+            1,
+            "el fichero sigue siendo parseable"
+        );
+        assert!(read_text(&tmp.path().join("no_existe.log")).is_none());
     }
 }
