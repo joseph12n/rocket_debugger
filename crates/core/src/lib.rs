@@ -9,12 +9,14 @@
 //!
 //! - [`db`]      lectura de `robot.db` (solo lectura, tolerante al formato)
 //! - [`tree`]    arbol de comandos -> lista plana con linea, rama y profundidad
-//! - [`versions`] historial de snapshots + atribucion temporal
-<<<<<<< HEAD
-//! - [`analysis`] grafo de llamadas + reglas: hallazgos y contratos del robot
-=======
+//! - [`versions`] historial de snapshots + indice temporal
+//! - [`logs`]    parser de los logs de ejecucion del runner
+//! - [`signature`] normalizacion de firmas de error y clasificacion del ruido
 //! - [`attribution`] atribucion de cada error al snapshot vivo (veredicto y linea)
->>>>>>> feat/attribution
+//! - [`graph`]    grafo de llamadas `execRocketBotDB` y contrato de variables
+//! - [`rules`]    motor de reglas declarativo (hallazgos)
+//! - [`analysis`] grafo + reglas cableados sobre los hechos de la db
+//! - [`redact`]   redaccion de valores cifrados y nombres sensibles
 //! - [`pack`]    ensamblado del context pack
 //! - [`render`]  markdown + contabilidad de tokens
 //!
@@ -26,8 +28,8 @@
 //! * `id` del nodo == `cmd_id` del log. Es la unica union fiable entre ejecucion y
 //!   codigo. `line` **no** es unico: hay robots donde el `try` y el `catch` comparten
 //!   numeracion (`2.1`, `2.2`, `2.3`), asi que solo sirve como etiqueta de display.
-
-<<<<<<< HEAD
+//! * Un error pertenece al snapshot que estaba vivo en su timestamp, no al ultimo:
+//!   un bug se arregla a veces anadiendo un nodo antes, sin tocar el nodo que falla.
 
 pub mod analysis;
 pub mod attribution;
@@ -43,6 +45,7 @@ pub mod signature;
 pub mod tree;
 pub mod versions;
 
+pub use analysis::{analyse, Analysis};
 pub use error::{Error, Result};
 pub use pack::{build_from_conn, Pack, VarInfo};
 pub use render::{estimate_tokens, Sizing};
