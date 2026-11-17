@@ -21,13 +21,25 @@
 //! # Por que tambien las rutas
 //!
 //! `docs/CONTEXT_PACK.md` promete que el pack no lleva rutas absolutas del
-//! usuario, y hasta ahora eso solo se cumplia en los parametros de los comandos:
-//! `project.vars` publicaba tal cual un
-//! `chrome_profile = C:/Users/<usuario>/Downloads/perfil_chrome`. Una ruta local
-//! no ayuda a diagnosticar —el agente razona sobre el flujo, no sobre el disco de
-//! quien lo ejecuto— y ademas identifica a la persona, asi que se sustituye por
+//! usuario. En las variables una ruta local no ayuda a diagnosticar —el agente
+//! razona sobre el flujo, no sobre el disco de quien lo ejecuto— y ademas
+//! identifica a la persona, asi que se sustituye entera por `(ruta)`: un
+//! `chrome_profile = C:/Users/<usuario>/Downloads/perfil_chrome` se publica como
 //! `(ruta)`. La deteccion es estrecha a proposito: una URL o una ruta relativa se
 //! conservan porque ahi si hay informacion util.
+//!
+//! # Enmascarar el usuario y no la ruta entera
+//!
+//! En los parametros de los comandos y en los mensajes de los hallazgos la ruta
+//! **si** es informacion de diagnostico: saber que el robot escribe en
+//! `OneDrive\Documentos` o que abre un perfil de Chrome concreto explica el flujo,
+//! y borrarla entera lo dejaria mas pobre que el JSON crudo. Lo que identifica a
+//! la persona es el tramo del usuario, asi que [`mask_user_paths`] substituye solo
+//! ese tramo por un marcador estable (`%USERPROFILE%` o `~`) y conserva la cola.
+//!
+//! El enmascarado se aplica en el render y no al construir el pack: el pack
+//! conserva el parametro fiel para el resto de consumidores y la garantia queda
+//! concentrada en un solo punto de salida; ver [`crate::render`].
 
 /// Firma de Fernet: Rocketbot cifra asi lo que guarda en `project.vars`.
 const FERNET_PREFIX: &str = "gAAAAA";
@@ -239,6 +251,220 @@ fn opens_token(text: &str, at: usize) -> bool {
     let prev = text[..at].chars().next_back();
     prev.is_none()
         || prev.is_some_and(|c| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+}
+
+/// Marcador del tramo del usuario en una ruta Windows.
+const USERPROFILE_MARK: &str = "%USERPROFILE%";
+
+/// Marcador del tramo del usuario en una ruta POSIX (y en la forma macOS).
+const HOME_MARK: &str = "~";
+
+/// Tramo de una ruta que hay que substituir: hasta donde llega (byte) y por que.
+struct MaskedPrefix {
+    end: usize,
+    mark: &'static str,
+}
+
+/// Sustituye el tramo del usuario de las rutas absolutas por un marcador estable.
+///
+/// No se borra la ruta entera a proposito: en un parametro, `OneDrive\Documentos`
+/// es justo lo que explica donde escribe el robot. Solo se tapa el nombre del
+/// usuario, que es el dato que identifica a la persona:
+///
+/// - `C:\Users\<x>\...` y `C:/Users/<x>/...` -> `%USERPROFILE%\...` /
+///   `%USERPROFILE%/...`, conservando el separador original.
+/// - `\home\<x>\...`, `/home/<x>/...`, `\Users\<x>\...` y `/Users/<x>/...` ->
+///   `~/...`, la forma en que un shell nombra el home.
+///
+/// Se enmascara **solo el primer tramo**: en `.../<usuario>/resto` el resto de la
+/// ruta se conserva (en POSIX se normaliza a `/` el separador de la marca). La
+/// funcion es idempotente: aplicar dos veces da el mismo resultado, porque los
+/// marcadores ya no casan con ningun patron.
+///
+/// # Lo que no se toca
+///
+/// Las URLs, porque `https://ejemplo.com/Users/algo` es una direccion, no el
+/// disco de nadie, y el texto normal, porque sin un patron de usuario completo se
+/// devuelve la cadena intacta. La deteccion es tan estrecha como la de
+/// [`is_absolute_path`]: un falso positivo aqui cambiaria el parametro que el
+/// agente usa para entender el flujo.
+pub fn mask_user_paths(text: &str) -> String {
+    let urls = url_spans(text);
+    // `None` hasta el primer reemplazo: cuando no hay nada que enmascarar se
+    // devuelve el original sin asignar ni una cadena nueva.
+    let mut out: Option<String> = None;
+    let mut copied = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((at, _)) = chars.next() {
+        // Una ruta dentro de una URL (incluido `file:///C:/Users/...`) no es una
+        // ruta del disco para efectos de privacidad: se deja como esta.
+        if inside_any(&urls, at) {
+            continue;
+        }
+        let Some(prefix) = masked_prefix_at(text, at) else {
+            continue;
+        };
+        let buf = out.get_or_insert_with(|| String::with_capacity(text.len()));
+        buf.push_str(&text[copied..at]);
+        buf.push_str(prefix.mark);
+        copied = prefix.end;
+        // El tramo ya se sustituyo entero: no se vuelve a mirar dentro de el.
+        while chars.peek().is_some_and(|(next, _)| *next < prefix.end) {
+            chars.next();
+        }
+    }
+    match out {
+        Some(mut buf) => {
+            buf.push_str(&text[copied..]);
+            buf
+        }
+        None => text.to_string(),
+    }
+}
+
+/// Patron de ruta con usuario que empieza en `at`, si lo hay.
+///
+/// Windows primero: `C:/Users/x` tambien contiene `/Users/x`, y si se evaluara la
+/// forma POSIX primero el resultado seria `C:~/x`.
+fn masked_prefix_at(text: &str, at: usize) -> Option<MaskedPrefix> {
+    windows_users_at(text, at).or_else(|| posix_home_at(text, at))
+}
+
+/// `C:\Users\<x>` / `C:/Users/<x>`: se conserva el separador que sigue al usuario.
+///
+/// Tambien reconoce la forma escapada de un parametro JSON
+/// (`"C:\\Users\\<x>\\x"`): `tree::params_text` re-serializa los objetos y una
+/// ruta de Windows llega al render con las barras dobladas, que es otro punto por
+/// el que se escaparia el usuario.
+fn windows_users_at(text: &str, at: usize) -> Option<MaskedPrefix> {
+    let bytes = text.as_bytes();
+    if !bytes.get(at).is_some_and(u8::is_ascii_alphabetic)
+        || bytes.get(at + 1) != Some(&b':')
+        // La letra no puede continuar un esquema: en `https://` la `s` va detras
+        // de una letra y el patron la confundiria con una unidad.
+        || !opens_token(text, at)
+    {
+        return None;
+    }
+    let users_at = match (bytes.get(at + 2), bytes.get(at + 3)) {
+        (Some(b'\\'), Some(b'\\')) => at + 4,
+        (Some(sep), _) if is_sep(*sep) => at + 3,
+        _ => return None,
+    };
+    if !starts_with_ic(text, users_at, "Users") {
+        return None;
+    }
+    let after = users_at + 5;
+    let user_start = match (bytes.get(after), bytes.get(after + 1)) {
+        (Some(b'\\'), Some(b'\\')) => after + 2,
+        (Some(sep), _) if is_sep(*sep) => after + 1,
+        _ => return None,
+    };
+    let end = user_end(text, user_start)?;
+    Some(MaskedPrefix {
+        end,
+        mark: USERPROFILE_MARK,
+    })
+}
+
+/// `\home\<x>`, `/home/<x>`, `\Users\<x>` y `/Users/<x>`: la marca es `~/`.
+///
+/// El separador que sigue al usuario se consume y se normaliza a `/` para que la
+/// salida sea siempre `~/resto`, que es como se lee una ruta de home.
+fn posix_home_at(text: &str, at: usize) -> Option<MaskedPrefix> {
+    let bytes = text.as_bytes();
+    if !bytes.get(at).is_some_and(|c| is_sep(*c)) || !opens_home_token(text, at) {
+        return None;
+    }
+    let after = if starts_with_ic(text, at + 1, "Users") {
+        at + 6
+    } else if starts_with_ic(text, at + 1, "home") {
+        at + 5
+    } else {
+        return None;
+    };
+    if !bytes.get(after).is_some_and(|c| is_sep(*c)) {
+        return None;
+    }
+    let end = user_end(text, after + 1)?;
+    if bytes.get(end).is_some_and(|c| is_sep(*c)) {
+        Some(MaskedPrefix {
+            end: end + 1,
+            mark: HOME_MARK_WITH_SEP,
+        })
+    } else {
+        Some(MaskedPrefix {
+            end,
+            mark: HOME_MARK,
+        })
+    }
+}
+
+/// `~/`: la marca de home cuando aun queda cola detras.
+const HOME_MARK_WITH_SEP: &str = "~/";
+
+/// Apertura de token para una raiz POSIX.
+///
+/// Ademas de no continuar una palabra, se rechaza `:`, `~` y `%` delante:
+/// - `C:/home/x` es una carpeta `home` de la unidad C, no el home de un usuario;
+/// - `~/home/x` y `%USERPROFILE%/home/x` ya llevan el usuario enmascarado, y
+///   volver a enmascararlos romperia la idempotencia.
+fn opens_home_token(text: &str, at: usize) -> bool {
+    let prev = text[..at].chars().next_back();
+    prev.is_none() || prev.is_some_and(|c| !is_word_char(c) && !matches!(c, ':' | '~' | '%'))
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')
+}
+
+fn is_sep(b: u8) -> bool {
+    matches!(b, b'\\' | b'/')
+}
+
+/// Compara sin distinguir mayusculas (`users`, `Users` y `USERS` son la misma
+/// carpeta en Windows y en macOS).
+fn starts_with_ic(text: &str, at: usize, needle: &str) -> bool {
+    text.get(at..at + needle.len())
+        .is_some_and(|s| s.eq_ignore_ascii_case(needle))
+}
+
+/// Fin del tramo del usuario: desde `start` hasta el primer caracter que ya no
+/// puede formar parte de un nombre de usuario.
+///
+/// Devolver `None` con el tramo vacio evita inventarse un usuario en `C:/Users/`
+/// o en `/home//x`, que son textos rotos y no rutas.
+fn user_end(text: &str, start: usize) -> Option<usize> {
+    let mut end = start;
+    for (off, c) in text.get(start..)?.char_indices() {
+        if !is_user_char(c) {
+            break;
+        }
+        end = start + off + c.len_utf8();
+    }
+    (end > start).then_some(end)
+}
+
+fn is_user_char(c: char) -> bool {
+    !c.is_whitespace()
+        && !matches!(
+            c,
+            '/' | '\\'
+                | '"'
+                | '\''
+                | '`'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '<'
+                | '>'
+                | ','
+                | ';'
+                | '|'
+        )
 }
 
 /// Valor listo para el pack. `None` cuando no hay nada que mostrar: el render lo
@@ -471,5 +697,129 @@ mod tests {
             None,
             "sin valor no hay nada que ocultar"
         );
+    }
+
+    #[test]
+    fn enmascara_el_usuario_en_rutas_windows() {
+        assert_eq!(
+            mask_user_paths("C:/Users/josep/OneDrive/Documentos/mercadolibre_"),
+            "%USERPROFILE%/OneDrive/Documentos/mercadolibre_"
+        );
+        assert_eq!(
+            mask_user_paths(r"C:\Users\josep\Downloads\perfil_chrome"),
+            r"%USERPROFILE%\Downloads\perfil_chrome",
+            "el separador original se conserva"
+        );
+        // La unidad no tiene por que ser C, y la carpeta no distingue mayusculas.
+        assert_eq!(mask_user_paths(r"D:\USERS\Josep\x"), r"%USERPROFILE%\x");
+        // Embebida en una expresion: todo lo que rodea la ruta se conserva.
+        assert_eq!(
+            mask_user_paths(r#""C:/Users/josep/x" + fecha"#),
+            r#""%USERPROFILE%/x" + fecha"#
+        );
+        // Sin cola no se inventa un separador que no estaba.
+        assert_eq!(mask_user_paths("C:/Users/josep"), "%USERPROFILE%");
+        // Los parametros JSON llegan con las barras escapadas (`tree::params_text`
+        // re-serializa el objeto); el usuario se enmascara igual.
+        assert_eq!(
+            mask_user_paths(r#""C:\\Users\\josep\\reporte.xlsx""#),
+            r#""%USERPROFILE%\\reporte.xlsx""#
+        );
+    }
+
+    #[test]
+    fn enmascara_el_usuario_en_rutas_posix_y_macos() {
+        assert_eq!(mask_user_paths("/home/josep/proyectos/x"), "~/proyectos/x");
+        assert_eq!(
+            mask_user_paths(r"\home\josep\proyectos"),
+            "~/proyectos",
+            "la forma de shell se normaliza a `~/`"
+        );
+        assert_eq!(mask_user_paths("/Users/josep/Documents/x"), "~/Documents/x");
+        assert_eq!(mask_user_paths(r"\Users\josep\Documents"), "~/Documents");
+        assert_eq!(mask_user_paths("/home/josep"), "~");
+        // Solo el primer tramo: una carpeta `home` de dentro no es el home.
+        assert_eq!(mask_user_paths("/home/josep/home/otro"), "~/home/otro");
+        // Un nombre de usuario no tiene por que ser ASCII.
+        assert_eq!(mask_user_paths("/home/josé/x"), "~/x");
+    }
+
+    #[test]
+    fn enmascara_todas_las_rutas_del_texto() {
+        assert_eq!(
+            mask_user_paths(r"de C:\Users\ana\a a /home/luis/b"),
+            r"de %USERPROFILE%\a a ~/b"
+        );
+    }
+
+    #[test]
+    fn no_toca_las_urls() {
+        for url in [
+            "https://ejemplo.com/Users/algo",
+            "https://ejemplo.com/home/usuario",
+            "https://ejemplo.test/api",
+            // Una URL `file:` tambien es una direccion, aunque lleve una ruta.
+            "file:///C:/Users/josep/x",
+        ] {
+            assert_eq!(mask_user_paths(url), url, "se toco una URL: {url}");
+        }
+        // La URL se queda; la ruta que va al lado si se enmascara.
+        assert_eq!(
+            mask_user_paths("mira https://ejemplo.com/Users/algo y C:/Users/josep/x"),
+            "mira https://ejemplo.com/Users/algo y %USERPROFILE%/x"
+        );
+    }
+
+    #[test]
+    fn el_texto_normal_se_devuelve_intacto() {
+        for text in [
+            "El robot abre el navegador, escribe en Documentos y sube el reporte.",
+            "Users home usuarios /usuarios",
+            "reporte_ml.xlsx",
+            "C:reporte_sin_separador",
+            "https://ejemplo.test/api?home=/home/x",
+            "",
+        ] {
+            assert_eq!(mask_user_paths(text), text, "se toco el texto: {text}");
+        }
+    }
+
+    #[test]
+    fn las_rutas_relativas_se_conservan() {
+        for text in [
+            "reporte_ml.xlsx",
+            "carpeta/home/josep/x.txt",
+            "carpeta/Users/josep/x",
+            "Users/josep",
+        ] {
+            assert_eq!(
+                mask_user_paths(text),
+                text,
+                "se toco una ruta relativa: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn enmascarar_dos_veces_da_lo_mismo() {
+        for text in [
+            r"C:\Users\josep\OneDrive\Documentos",
+            "C:/Users/josep/OneDrive/Documentos/mercadolibre_",
+            "/home/josep/proyectos/x",
+            r"\home\josep\proyectos",
+            "/home/josep/home/otro",
+            "/Users/josep/Documents/x",
+            "https://ejemplo.com/Users/algo",
+            r#""C:/Users/josep/a" + "C:\Users\josep\b""#,
+            r#""C:\\Users\\josep\\x""#,
+        ] {
+            let una = mask_user_paths(text);
+            let dos = mask_user_paths(&una);
+            assert_eq!(una, dos, "no es idempotente: {text}");
+            assert!(
+                !dos.contains("%USERPROFILE%%USERPROFILE%"),
+                "marca duplicada: {dos}"
+            );
+        }
     }
 }

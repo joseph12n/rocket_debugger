@@ -64,6 +64,41 @@ fn pack_de(dir: &Path, json: &str) -> Pack {
     build_from_conn(&conn, "credenciales", None, "test\\robot.db").expect("construyo pack")
 }
 
+/// Robot con la expresion real del issue #16: la ruta del usuario dentro de los
+/// parametros de un `setVar`. No es un secreto, es informacion del flujo, asi que
+/// solo debe desaparecer el tramo del usuario.
+fn robot_con_ruta_en_params() -> String {
+    serde_json::json!({
+        "project": {
+            "profile": {"name": "rutas", "description": "Fixture de rutas en parametros"},
+            "commands": [
+                {
+                    "father": "setVar",
+                    "command": r#""C:/Users/josep/OneDrive/Documentos/mercadolibre_" + datetime.now().strftime("%Y%m%d")"#,
+                    "group": "system",
+                    "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    "line": 1,
+                    "var": "ruta_salida",
+                    "children": [],
+                    "else": []
+                },
+                {
+                    "father": "log_message",
+                    "command": r"C:\Users\josep\Downloads\reportes\resumen.xlsx",
+                    "group": "system",
+                    "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                    "line": 2,
+                    "option": "INFO",
+                    "children": [],
+                    "else": []
+                }
+            ],
+            "vars": [{"name": "ruta_salida", "data": null}]
+        }
+    })
+    .to_string()
+}
+
 #[test]
 fn el_render_no_filtra_secretos_y_los_marca() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -153,4 +188,41 @@ fn el_render_no_filtra_rutas_absolutas_del_usuario() {
     assert!(md.contains("reporte_ml.xlsx"), "{md}");
     assert!(md.contains("https://ejemplo.test/api"), "{md}");
     assert_eq!(pack.vars[0].value.as_deref(), Some("(ruta)"));
+}
+
+/// Issue #16: antes solo se redactaban las variables; los parametros de los
+/// comandos y el snippet del hallazgo `RUTA_ABSOLUTA` seguian publicando
+/// `C:/Users/josep/...`.
+#[test]
+fn el_pack_no_filtra_el_usuario_de_los_parametros() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pack = pack_de(tmp.path(), &robot_con_ruta_en_params());
+
+    // El dato crudo conserva la ruta: el enmascarado es del render, no del pack,
+    // para que el pack siga siendo el dato fiel y la garantia viva en un unico
+    // punto de salida.
+    assert!(
+        pack.flow[0].params.contains("josep"),
+        "el pack no deberia destruir el parametro: {}",
+        pack.flow[0].params
+    );
+
+    let md = pack.render_markdown();
+    assert!(!md.contains("josep"), "el usuario se escapo:\n{md}");
+    assert!(!md.contains("C:/Users"), "ruta Windows filtrada:\n{md}");
+    assert!(!md.contains(r"C:\Users"), "ruta Windows filtrada:\n{md}");
+
+    // La cola util se conserva: se entiende donde escribe el robot.
+    assert!(
+        md.contains("%USERPROFILE%/OneDrive/Documentos/mercadolibre_"),
+        "falta la ruta enmascarada del parametro:\n{md}"
+    );
+    assert!(
+        md.contains(r"%USERPROFILE%\Downloads\reportes\resumen.xlsx"),
+        "falta la ruta enmascarada del comando:\n{md}"
+    );
+    assert!(
+        md.contains("RUTA_ABSOLUTA"),
+        "el hallazgo que cita la ruta debe seguir ahi:\n{md}"
+    );
 }
