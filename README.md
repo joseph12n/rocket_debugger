@@ -40,10 +40,10 @@ cargo run -p rocketdebug-cli -- pack reporteMercadolibre --stats
 ## Arquitectura
 
 ```
-robot.db (N dbs) ──┐
-logs/*.log ────────┤→ motor ──┬→ render markdown (el context pack)
-catalogo comandos ─┘          ├→ daemon local (HTTP/WS)
-                              └→ fachada MCP (intenciones, no datos)
+robot.db (N dbs) â”€â”€â”
+logs/*.log â”€â”€â”€â”€â”€â”€â”€â”€â”¤â†’ motor â”€â”€â”¬â†’ render markdown (el context pack)
+catalogo comandos â”€â”˜          â”œâ†’ daemon local (HTTP/WS)
+                              â””â†’ fachada MCP (intenciones, no datos)
 ```
 
 Detalle en [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -64,7 +64,7 @@ Este equipo no tiene MSVC. El proyecto compila con el toolchain GNU y un GCC por
 
 ```powershell
 rustup toolchain install stable-x86_64-pc-windows-gnu
-# añadir el bin de mingw64 al PATH
+# aÃ±adir el bin de mingw64 al PATH
 cargo +stable-x86_64-pc-windows-gnu build
 ```
 
@@ -79,9 +79,9 @@ En CI (Linux) se usa el toolchain por defecto.
 - [x] #5 render del context pack con contabilidad de tokens
 - [x] #8 redaccion de credenciales cifradas y valores sensibles
 - [x] #11 redaccion de rutas absolutas en el panel de variables
-- [ ] #6 fachada MCP de lectura para el agente
-- [ ] #12 workspace multi-db (hoy el grafo ve una sola db)
-- [ ] #13 aviso de hallazgos omitidos por el tope
+- [x] #6 fachada MCP de lectura para el agente
+- [x] #12 workspace multi-db (el grafo ve todas las dbs)
+- [x] #13 aviso de hallazgos omitidos por el tope
 
 ## Estado medido
 

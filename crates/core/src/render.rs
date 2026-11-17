@@ -276,9 +276,15 @@ impl Pack {
     /// no esta escrito en ningun sitio y es la causa de los `NameError` que el log
     /// solo muestra cuando ya fallo. Aqui se ve antes de ejecutar: que provee el
     /// padre (`contracts_out`) y que espera de quien lo llama (`contracts_in`).
+    ///
+    /// Las llamadas que el grafo no pudo resolver van al final: una llamada ambigua
+    /// (el hijo solo existe en otra db) o sin destino (no existe en ninguna) es un
+    /// fallo latente que en runtime aparece como robot no encontrado en la linea N.
     fn render_contracts(&self, o: &mut String) {
         let analysis = &self.analysis;
-        if analysis.contracts_out.is_empty() && analysis.contracts_in.is_empty() {
+        let sin_resolver =
+            !analysis.ambiguous_calls.is_empty() || !analysis.missing_calls.is_empty();
+        if analysis.contracts_out.is_empty() && analysis.contracts_in.is_empty() && !sin_resolver {
             return;
         }
         let _ = writeln!(o, "## Contrato implicito (subrobots)");
@@ -312,6 +318,22 @@ impl Pack {
             let _ = writeln!(
                 o,
                 "- ... y {omitted} {word} mas (el detalle, en el pack del subrobot)"
+            );
+        }
+
+        // Llamadas que el grafo no pudo resolver. No se callan: una llamada a un robot
+        // inexistente revienta en runtime en esa linea, y un homonimo fuera de la db
+        // es una conjetura que conviene saber que se esta haciendo.
+        for call in &analysis.missing_calls {
+            let _ = writeln!(
+                o,
+                "- llamada sin destino: {call} — no existe en ninguna db del workspace"
+            );
+        }
+        for call in &analysis.ambiguous_calls {
+            let _ = writeln!(
+                o,
+                "- llamada ambigua: {call} — el hijo solo existe fuera de esta db"
             );
         }
         let _ = writeln!(o);
@@ -602,6 +624,7 @@ mod tests {
                 contracts_in: Vec::new(),
                 unused_declared: Vec::new(),
                 ambiguous_calls: Vec::new(),
+                missing_calls: Vec::new(),
                 errors: crate::analysis::ErrorReport {
                     live: errors,
                     ..Default::default()
@@ -609,6 +632,40 @@ mod tests {
             },
             raw_pretty: String::new(),
         }
+    }
+
+    /// Una llamada que el grafo no pudo resolver es un fallo latente: en runtime
+    /// aparece como "robot no encontrado" en esa linea. No se puede callar.
+    #[test]
+    fn las_llamadas_sin_resolver_no_se_callan() {
+        let mut pack = pack_con(Vec::new(), Vec::new(), Vec::new());
+        assert!(
+            !pack.render_markdown().contains("## Contrato"),
+            "sin contratos ni llamadas no hay seccion"
+        );
+
+        pack.analysis.missing_calls = vec!["orq L4 -> no_existe".to_string()];
+        let md = pack.render_markdown();
+        assert!(
+            md.contains("## Contrato implicito"),
+            "una llamada sin destino ya justifica la seccion:\n{md}"
+        );
+        assert!(
+            md.contains(
+                "- llamada sin destino: orq L4 -> no_existe — no existe en ninguna db del workspace"
+            ),
+            "falta la linea de llamada sin destino:\n{md}"
+        );
+
+        pack.analysis.missing_calls.clear();
+        pack.analysis.ambiguous_calls = vec!["orq -> hijo_web".to_string()];
+        let md = pack.render_markdown();
+        assert!(
+            md.contains(
+                "- llamada ambigua: orq -> hijo_web — el hijo solo existe fuera de esta db"
+            ),
+            "falta la linea de llamada ambigua:\n{md}"
+        );
     }
 
     /// Issue #16: el nombre del usuario no puede salir por ninguno de los tres
