@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use crate::db::{self, Snapshot};
 use crate::error::Result;
+use crate::redact;
 use crate::render::{estimate_tokens, Sizing};
 use crate::tree::{self, FlatNode};
 use crate::versions::{VersionIndex, VersionInfo};
@@ -121,6 +122,8 @@ fn commands_of(root: &Value) -> &[Value] {
     }
 }
 
+/// Las variables salen ya redactadas: el pack se comparte (agente, incidencia,
+/// UI) y `project.vars` puede llevar credenciales cifradas por Rocketbot.
 fn vars_of(root: &Value) -> Vec<VarInfo> {
     let Some(arr) = root.get("vars").and_then(Value::as_array) else {
         return Vec::new();
@@ -132,9 +135,9 @@ fn vars_of(root: &Value) -> Vec<VarInfo> {
                 return None;
             }
             let value = match v.get("data") {
-                Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
                 Some(Value::Null) | None => None,
-                Some(other) => Some(other.to_string()),
+                Some(Value::String(s)) => redact::redacted_value(&name, s),
+                Some(other) => redact::redacted_value(&name, &other.to_string()),
             };
             Some(VarInfo { name, value })
         })
@@ -173,6 +176,25 @@ mod tests {
         assert_eq!(vars[0].name, "url");
         assert_eq!(vars[0].value.as_deref(), Some("https://x"));
         assert!(vars[1].value.is_none());
+    }
+
+    #[test]
+    fn redacta_las_variables_sensibles_del_robot() {
+        let root = serde_json::json!({
+            "vars": [
+                {"name": "destinatario", "data": "gAAAAABq7LyRAghP1xNXRUIBkRfDi6ioMMqj_-oPnZ5xvkmSw_Jb1B41VjB_"},
+                {"name": "db_password", "data": "hunter2"},
+                {"name": "url", "data": "https://x"}
+            ]
+        });
+        let vars = vars_of(&root);
+        assert_eq!(vars[0].value.as_deref(), Some("(valor cifrado)"));
+        assert_eq!(vars[1].value.as_deref(), Some("(oculto)"));
+        assert_eq!(
+            vars[2].value.as_deref(),
+            Some("https://x"),
+            "un valor normal no se toca"
+        );
     }
 
     #[test]
