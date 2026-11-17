@@ -6,6 +6,7 @@
 
 use std::fmt::Write as _;
 
+use crate::analysis::ErrorItem;
 use crate::graph::Contract;
 use crate::pack::Pack;
 use crate::rules::Severity;
@@ -27,6 +28,24 @@ pub const CONTRACT_MAX: usize = 8;
 /// convertiria el contrato en la seccion mas grande del pack sin decir nada nuevo
 /// (lo que importa es *que* se provee, no el inventario completo).
 pub const CONTRACT_VARS_MAX: usize = 6;
+
+/// Errores vivos que se listan uno a uno.
+///
+/// Medido en la entrega BBRE2: `reporteMercadolibre` deja 49 firmas historicas y
+/// `ML_06_Legacy` 5. Con seis filas el agente ve las que mas duelen; el resto es
+/// cola larga y se cuenta, no se lista.
+pub const ERRORS_LIVE_MAX: usize = 6;
+/// Errores con parametros cambiados que se listan: son los candidatos a "el fix
+/// estaba a medias" y con tres basta para decidir si hay que mirar el diff.
+pub const ERRORS_PAYLOAD_MAX: usize = 3;
+/// Nombres que se listan en las lineas agregadas (historicos y plataforma).
+pub const ERRORS_GROUP_MAX: usize = 3;
+
+/// Mensaje de error en el render.
+///
+/// El analisis ya lo recorta a 160; aqui se baja a 120 porque va multiplicado por
+/// cada fila y la seccion entera tiene que caber en el presupuesto del pack.
+const ERROR_MESSAGE_SHOW: usize = 120;
 
 /// Los hallazgos ya vienen truncados a 5, pero un mensaje que cita una ruta larga
 /// no puede comerse el presupuesto de contexto.
@@ -135,6 +154,7 @@ impl Pack {
 
         self.render_findings(&mut o);
         self.render_contracts(&mut o);
+        self.render_errors(&mut o);
 
         if !self.vars.is_empty() {
             let _ = writeln!(o, "## Variables ({})", self.vars.len());
@@ -255,6 +275,73 @@ impl Pack {
         let _ = writeln!(o);
     }
 
+    /// Errores del log ya atribuidos al snapshot que estaba vivo.
+    ///
+    /// Va detras del contrato y delante de las variables: es la unica seccion que
+    /// dice que se rompio **de verdad**, y el orden importa porque el pack se lee
+    /// de arriba abajo y se deja de leer muy pronto.
+    ///
+    /// Se acota por cubos y por filas (6 vivos + 3 con payload cambiado + 3
+    /// agregadas). El caso real de `reporteMercadolibre` son 51 firmas: listarlas
+    /// seria la mitad del presupuesto de 2,5k tokens en cola larga, justo lo que
+    /// hace inutil el panel de errores. Los historicos y el ruido se resumen en una
+    /// linea: ni se arreglan hoy ni se arreglan desde el robot.
+    fn render_errors(&self, o: &mut String) {
+        let errors = &self.analysis.errors;
+        if errors.is_empty() {
+            // Un "## Errores (0)" ensena a saltarse la seccion: se omite entera,
+            // igual que los hallazgos y el contrato.
+            return;
+        }
+        let _ = writeln!(
+            o,
+            "## Errores (vivos {} · payload cambiado {} · historicos {} · modulo {} · ruido {})",
+            errors.live.len(),
+            errors.payload_changed.len(),
+            errors.historical.len(),
+            errors.platform.len(),
+            errors.noise.len()
+        );
+
+        for item in errors.live.iter().take(ERRORS_LIVE_MAX) {
+            let _ = writeln!(o, "{}", error_line(item));
+        }
+        for item in errors.payload_changed.iter().take(ERRORS_PAYLOAD_MAX) {
+            let _ = writeln!(o, "{}", error_line(item));
+        }
+
+        let omitidos = errors.live.len().saturating_sub(ERRORS_LIVE_MAX)
+            + errors
+                .payload_changed
+                .len()
+                .saturating_sub(ERRORS_PAYLOAD_MAX);
+        if omitidos > 0 {
+            let _ = writeln!(o, "- ... y {omitidos} mas (los de menos ocurrencias)");
+        }
+
+        if !errors.historical.is_empty() {
+            let _ = writeln!(
+                o,
+                "- historicos de versiones anteriores: {}",
+                tally_preview(&errors.historical, |item| item.command.as_str())
+            );
+        }
+        if !errors.platform.is_empty() {
+            let _ = writeln!(
+                o,
+                "- defecto de modulo (no del robot): {}",
+                tally_preview(&errors.platform, platform_source)
+            );
+        }
+        if !errors.noise.is_empty() {
+            let n = errors.noise.len();
+            let palabra = if n == 1 { "firma" } else { "firmas" };
+            let _ = writeln!(o, "- ruido del motor (ignorado): {n} {palabra}");
+        }
+
+        let _ = writeln!(o);
+    }
+
     /// Resumen de una linea para el listado de robots.
     pub fn summary_line(&self) -> String {
         format!(
@@ -278,6 +365,89 @@ fn missing_line(o: &mut String, contract: &Contract) {
         "  !! el hijo espera y nadie provee: {}",
         vars_preview(&contract.missing)
     );
+}
+
+/// Una fila de error: `- x3 L2.10 evaluateIf: NameError: name 'contador'...`.
+///
+/// La linea vacia se rotula `L-`: es un error que no se pudo ubicar en el
+/// snapshot, y dejarla en blanco se leeria como un fallo de formato.
+fn error_line(item: &ErrorItem) -> String {
+    let line = if item.line.is_empty() {
+        "L-".to_string()
+    } else {
+        format!("L{}", item.line)
+    };
+    let command = if item.command.is_empty() {
+        "?"
+    } else {
+        item.command.as_str()
+    };
+    format!(
+        "- x{} {} {}: {}",
+        item.occurrences,
+        line,
+        command,
+        field(&item.message, ERROR_MESSAGE_SHOW)
+    )
+}
+
+/// Modulo de plataforma tal como lo nombra el runner: `EXCEPTION IN (<string> X, ...)`.
+///
+/// Se toma del mensaje porque el cubo ya viene decidido por `signature::classify`;
+/// aqui solo se necesita el nombre para mostrar y no merece otra clasificacion.
+fn module_of(message: &str) -> Option<&str> {
+    const MARK: &str = "<string>";
+    let at = message.find(MARK)?;
+    let rest = message.get(at + MARK.len()..)?.trim_start();
+    let end = rest.find([',', ')']).unwrap_or(rest.len());
+    let module = rest[..end].trim();
+    if module.is_empty() {
+        None
+    } else {
+        Some(module)
+    }
+}
+
+/// Con que se nombra un error de plataforma: el modulo si el mensaje lo delata.
+fn platform_source(item: &ErrorItem) -> &str {
+    match module_of(&item.message) {
+        Some(module) => module,
+        // Sin marcador de modulo queda el comando del robot, que al menos dice
+        // por donde pasaba el flujo cuando fallo la plataforma.
+        None if item.command.is_empty() => "?",
+        None => item.command.as_str(),
+    }
+}
+
+/// `setVar(x3), raise_exception(x3), module(x3) …` con el recorte declarado.
+///
+/// Cuenta ocurrencias, no firmas: el agente necesita saber que lo que mas se
+/// repitio fue `setVar`, no cuantas variantes de mensaje tuvo.
+fn tally_preview(items: &[ErrorItem], clave: impl Fn(&ErrorItem) -> &str) -> String {
+    let mut cuenta: Vec<(&str, usize)> = Vec::new();
+    for item in items {
+        let nombre = clave(item);
+        match cuenta.iter_mut().find(|(n, _)| *n == nombre) {
+            Some((_, n)) => *n += item.occurrences,
+            None => cuenta.push((nombre, item.occurrences)),
+        }
+    }
+    if cuenta.is_empty() {
+        return "(nada)".to_string();
+    }
+    cuenta.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+
+    let mut out = cuenta
+        .iter()
+        .take(ERRORS_GROUP_MAX)
+        .map(|(nombre, n)| format!("{nombre}(x{n})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if cuenta.len() > ERRORS_GROUP_MAX {
+        // Un solo caracter: la linea ya esta en el limite del presupuesto.
+        out.push_str(" …");
+    }
+    out
 }
 
 #[cfg(test)]
