@@ -1,4 +1,4 @@
-//! Motor de deteccion y suministro de contexto para flujos de Rocketbot.
+﻿//! Motor de deteccion y suministro de contexto para flujos de Rocketbot.
 //!
 //! El producto no es un IDE: es el motor que convierte un `robot.db` en un
 //! *context pack* que un agente puede leer de una vez (1-3k tokens) en lugar del
@@ -23,8 +23,8 @@
 //!   numeracion (`2.1`, `2.2`, `2.3`), asi que solo sirve como etiqueta de display.
 
 pub mod db;
-pub mod error;
 pub mod pack;
+pub mod redact;
 pub mod render;
 pub mod tree;
 pub mod versions;
