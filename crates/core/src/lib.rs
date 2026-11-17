@@ -10,7 +10,11 @@
 //! - [`db`]      lectura de `robot.db` (solo lectura, tolerante al formato)
 //! - [`tree`]    arbol de comandos -> lista plana con linea, rama y profundidad
 //! - [`versions`] historial de snapshots + atribucion temporal
+<<<<<<< HEAD
 //! - [`analysis`] grafo de llamadas + reglas: hallazgos y contratos del robot
+=======
+//! - [`attribution`] atribucion de cada error al snapshot vivo (veredicto y linea)
+>>>>>>> feat/attribution
 //! - [`pack`]    ensamblado del context pack
 //! - [`render`]  markdown + contabilidad de tokens
 //!
@@ -23,7 +27,10 @@
 //!   codigo. `line` **no** es unico: hay robots donde el `try` y el `catch` comparten
 //!   numeracion (`2.1`, `2.2`, `2.3`), asi que solo sirve como etiqueta de display.
 
+<<<<<<< HEAD
+
 pub mod analysis;
+pub mod attribution;
 pub mod db;
 pub mod error;
 pub mod graph;
