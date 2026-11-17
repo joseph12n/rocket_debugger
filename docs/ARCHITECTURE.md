@@ -17,11 +17,11 @@ catalogo comandos ─┘          ├→ daemon local (HTTP/WS)  ← lo que pint
 
 | Capa | Crate | Responsabilidad |
 |---|---|---|
-| Motor | `rocketdebug-core` | parseo, arbol, indice de versiones, reglas, render |
+| Motor | `rocketdebug-core` | parseo, arbol, indice de versiones, grafo, reglas, atribucion, render |
 | CLI | `rocketdebug-cli` | inspeccion manual y debug del motor |
+| MCP | `rocketdebug-mcp` | fachada de lectura por stdio para el agente (3 tools) |
 | Daemon | *(pendiente)* | vigilancia de logs y `robot.db`, servidor local |
 | UI | *(pendiente)* | Tauri: canvas, heatmap, diff, inbox de hallazgos |
-| MCP | *(pendiente)* | 5-6 tools de alto nivel para el agente |
 
 ## Decisiones y su motivo
 

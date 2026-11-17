@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 use crate::analysis::ErrorItem;
 use crate::graph::Contract;
 use crate::pack::Pack;
+use crate::redact;
 use crate::rules::{Finding, Severity};
 
 /// Se cortan los parametros largos: un `execJs` de 2 KB aporta el inicio, no el final.
@@ -97,7 +98,14 @@ fn clip(s: &str, max: usize) -> String {
 }
 
 fn field(s: &str, max: usize) -> String {
-    clip(&one_line(s), max)
+    // La garantia de privacidad vive aqui, en el unico helper por el que pasan
+    // los parametros del flujo, los mensajes y arreglos de hallazgos y los
+    // mensajes de error. Replicarla en cada `writeln!` seria olvidarse de uno el
+    // dia que se anada una seccion nueva (issue #16).
+    //
+    // Enmascarar antes de recortar importa: si el corte cae dentro del nombre del
+    // usuario, el tramo ya no coincide con el patron y se escaparia medio nombre.
+    clip(&redact::mask_user_paths(&one_line(s)), max)
 }
 
 /// Pinta un cubo de hallazgos con tope y aviso de lo omitido.
@@ -268,9 +276,15 @@ impl Pack {
     /// no esta escrito en ningun sitio y es la causa de los `NameError` que el log
     /// solo muestra cuando ya fallo. Aqui se ve antes de ejecutar: que provee el
     /// padre (`contracts_out`) y que espera de quien lo llama (`contracts_in`).
+    ///
+    /// Las llamadas que el grafo no pudo resolver van al final: una llamada ambigua
+    /// (el hijo solo existe en otra db) o sin destino (no existe en ninguna) es un
+    /// fallo latente que en runtime aparece como robot no encontrado en la linea N.
     fn render_contracts(&self, o: &mut String) {
         let analysis = &self.analysis;
-        if analysis.contracts_out.is_empty() && analysis.contracts_in.is_empty() {
+        let sin_resolver =
+            !analysis.ambiguous_calls.is_empty() || !analysis.missing_calls.is_empty();
+        if analysis.contracts_out.is_empty() && analysis.contracts_in.is_empty() && !sin_resolver {
             return;
         }
         let _ = writeln!(o, "## Contrato implicito (subrobots)");
@@ -304,6 +318,22 @@ impl Pack {
             let _ = writeln!(
                 o,
                 "- ... y {omitted} {word} mas (el detalle, en el pack del subrobot)"
+            );
+        }
+
+        // Llamadas que el grafo no pudo resolver. No se callan: una llamada a un robot
+        // inexistente revienta en runtime en esa linea, y un homonimo fuera de la db
+        // es una conjetura que conviene saber que se esta haciendo.
+        for call in &analysis.missing_calls {
+            let _ = writeln!(
+                o,
+                "- llamada sin destino: {call} — no existe en ninguna db del workspace"
+            );
+        }
+        for call in &analysis.ambiguous_calls {
+            let _ = writeln!(
+                o,
+                "- llamada ambigua: {call} — el hijo solo existe fuera de esta db"
             );
         }
         let _ = writeln!(o);
@@ -568,5 +598,146 @@ mod tests {
             !preview.contains("v9"),
             "no se listan todas las del orquestador: {preview}"
         );
+    }
+
+    /// Pack minimo sin db: el render solo necesita la estructura ya ensamblada.
+    fn pack_con(
+        flow: Vec<crate::tree::FlatNode>,
+        findings: Vec<Finding>,
+        errors: Vec<ErrorItem>,
+    ) -> Pack {
+        Pack {
+            robot: "rutas".to_string(),
+            db_label: "test\\robot.db".to_string(),
+            snapshot_id: 1,
+            snapshot_at: crate::db::parse_date("2026-11-17 10:00:00"),
+            versions: crate::versions::VersionIndex::default(),
+            description: None,
+            depth: 0,
+            vars: Vec::new(),
+            collisions: std::collections::BTreeMap::new(),
+            flow,
+            analysis: crate::analysis::Analysis {
+                findings,
+                higiene: Vec::new(),
+                contracts_out: Vec::new(),
+                contracts_in: Vec::new(),
+                unused_declared: Vec::new(),
+                ambiguous_calls: Vec::new(),
+                missing_calls: Vec::new(),
+                errors: crate::analysis::ErrorReport {
+                    live: errors,
+                    ..Default::default()
+                },
+            },
+            raw_pretty: String::new(),
+        }
+    }
+
+    /// Una llamada que el grafo no pudo resolver es un fallo latente: en runtime
+    /// aparece como "robot no encontrado" en esa linea. No se puede callar.
+    #[test]
+    fn las_llamadas_sin_resolver_no_se_callan() {
+        let mut pack = pack_con(Vec::new(), Vec::new(), Vec::new());
+        assert!(
+            !pack.render_markdown().contains("## Contrato"),
+            "sin contratos ni llamadas no hay seccion"
+        );
+
+        pack.analysis.missing_calls = vec!["orq L4 -> no_existe".to_string()];
+        let md = pack.render_markdown();
+        assert!(
+            md.contains("## Contrato implicito"),
+            "una llamada sin destino ya justifica la seccion:\n{md}"
+        );
+        assert!(
+            md.contains(
+                "- llamada sin destino: orq L4 -> no_existe — no existe en ninguna db del workspace"
+            ),
+            "falta la linea de llamada sin destino:\n{md}"
+        );
+
+        pack.analysis.missing_calls.clear();
+        pack.analysis.ambiguous_calls = vec!["orq -> hijo_web".to_string()];
+        let md = pack.render_markdown();
+        assert!(
+            md.contains(
+                "- llamada ambigua: orq -> hijo_web — el hijo solo existe fuera de esta db"
+            ),
+            "falta la linea de llamada ambigua:\n{md}"
+        );
+    }
+
+    /// Issue #16: el nombre del usuario no puede salir por ninguno de los tres
+    /// puntos de salida (parametros del flujo, mensaje de hallazgo y mensaje de
+    /// error), pero la ruta util tiene que seguir ahi.
+    #[test]
+    fn el_render_enmascara_el_usuario_y_conserva_la_ruta_util() {
+        let flow = vec![crate::tree::FlatNode {
+            line: "1".to_string(),
+            id: "id-1".to_string(),
+            cmd: "setVar".to_string(),
+            group: Some("system".to_string()),
+            option: None,
+            desc: None,
+            params: r#""C:/Users/josep/OneDrive/Documentos/mercadolibre_" + datetime.now()"#
+                .to_string(),
+            write_var: Some("ruta_salida".to_string()),
+            branch: crate::tree::Branch::Main,
+            depth: 0,
+        }];
+        let findings = vec![Finding {
+            rule_id: "RUTA_ABSOLUTA".to_string(),
+            severity: Severity::Media,
+            kind: crate::rules::Kind::Accionable,
+            line: "1".to_string(),
+            message: r"ruta absoluta en los parametros: C:\Users\josep\OneDrive\Documentos; no es portable".to_string(),
+            fix: "usa una ruta relativa o %base_path%".to_string(),
+        }];
+        let errors = vec![ErrorItem {
+            line: "1".to_string(),
+            command: "setVar".to_string(),
+            message: r"PermissionError: C:\Users\josep\OneDrive\Documentos\reporte.xlsx"
+                .to_string(),
+            occurrences: 2,
+            signature: "permissionerror".to_string(),
+            version: Some(1),
+        }];
+
+        let pack = pack_con(flow, findings, errors);
+        let md = pack.render_markdown();
+
+        assert!(!md.contains("josep"), "el usuario se escapo:\n{md}");
+        assert!(
+            !md.contains("C:/Users"),
+            "ruta Windows sin enmascarar:\n{md}"
+        );
+        assert!(
+            !md.contains(r"C:\Users"),
+            "ruta Windows sin enmascarar:\n{md}"
+        );
+
+        // La ruta sigue siendo util: se conserva la cola, incluida la carpeta.
+        assert!(
+            md.contains("%USERPROFILE%/OneDrive/Documentos/mercadolibre_"),
+            "se perdio la cola del parametro:\n{md}"
+        );
+        assert!(
+            md.contains(r"%USERPROFILE%\OneDrive\Documentos;"),
+            "se perdio la cola del hallazgo:\n{md}"
+        );
+        assert!(
+            md.contains(r"%USERPROFILE%\OneDrive\Documentos\reporte.xlsx"),
+            "se perdio la cola del error:\n{md}"
+        );
+    }
+
+    /// El enmascarado va antes del recorte: si no, un corte dentro del nombre
+    /// dejaria medio nombre fuera del patron y se publicaria igual.
+    #[test]
+    fn el_recorte_no_deja_medio_nombre_de_usuario() {
+        let recortado = field("C:/Users/josep/OneDrive/Documentos", 20);
+        assert!(!recortado.contains("josep"), "{recortado}");
+        assert!(recortado.starts_with("%USERPROFILE%"), "{recortado}");
     }
 }

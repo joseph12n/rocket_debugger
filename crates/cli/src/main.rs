@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+use rocketdebug_core::analysis::{analyse_with_workspace, load_workspace};
 use rocketdebug_core::{build_from_conn_with_logs, db, logs};
 
 #[derive(Parser, Debug)]
@@ -26,7 +27,13 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// Lista los robots de la base de datos con sus versiones.
-    List,
+    List {
+        /// Directorio del workspace: lista todas las dbs de robots bajo la raiz.
+        ///
+        /// Sin el flag se lista solo la db de `--db` (comportamiento historico).
+        #[arg(long, value_name = "DIR")]
+        workspace: Option<PathBuf>,
+    },
 
     /// Emite el context pack de un robot.
     Pack {
@@ -37,6 +44,15 @@ enum Cmd {
         /// Imprime la contabilidad de tokens en stderr.
         #[arg(long)]
         stats: bool,
+        /// Analiza el grafo contra todas las dbs de robots bajo este directorio.
+        ///
+        /// La db de `--db` es la del robot analizado y va siempre en el workspace;
+        /// las demas se descubren con `db::discover_databases`, que ya excluye
+        /// `backups/`. Sin el flag el grafo se alimenta con una sola db, y entonces
+        /// una llamada a un robot que vive en otra db no se puede distinguir de una
+        /// llamada a un robot inexistente.
+        #[arg(long, value_name = "DIR")]
+        workspace: Option<PathBuf>,
     },
 
     /// Busca bases de datos de robots bajo una raiz.
@@ -60,23 +76,20 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Cmd::List => {
-            let conn = db::open_readonly(&db_path)
-                .with_context(|| format!("abriendo {}", db_path.display()))?;
-            let robots = db::list_robots(&conn)?;
-            println!("{}  |  {} robots", db_label(&db_path), robots.len());
-            for r in robots {
-                println!(
-                    "  {:<28} {:>3} versiones   ultimo id {:<5}",
-                    r.name, r.versions, r.latest_id
-                );
+        Cmd::List { workspace } => match workspace {
+            None => {
+                let conn = db::open_readonly(&db_path)
+                    .with_context(|| format!("abriendo {}", db_path.display()))?;
+                print_robots(&db_label(&db_path), &db::list_robots(&conn)?);
+                Ok(())
             }
-            Ok(())
-        }
+            Some(dir) => list_workspace(&dir),
+        },
         Cmd::Pack {
             robot,
             snapshot,
             stats,
+            workspace,
         } => {
             let conn = db::open_readonly(&db_path)
                 .with_context(|| format!("abriendo {}", db_path.display()))?;
@@ -84,11 +97,63 @@ fn main() -> anyhow::Result<()> {
             // Los logs son responsabilidad del CLI, no del motor: asi la suite de
             // tests del crate core queda hermética y este binario sigue leyendo el
             // entorno real cuando existe.
-            let logs_dir = std::path::Path::new(logs::DEFAULT_LOGS_DIR);
+            let logs_dir = Path::new(logs::DEFAULT_LOGS_DIR);
             let log_source = logs_dir
                 .is_dir()
                 .then_some((logs_dir, rocketdebug_core::pack::DEFAULT_LOG_FILES));
-            let pack = build_from_conn_with_logs(&conn, &robot, snapshot, &label, log_source)?;
+
+            let pack = match &workspace {
+                None => build_from_conn_with_logs(&conn, &robot, snapshot, &label, log_source)?,
+                Some(dir) => {
+                    // La db pedida va primera y no se repite: es la etiqueta con la
+                    // que viaja el hecho del robot analizado (ver
+                    // `analyse_with_workspace`).
+                    let mut opened = Vec::new();
+                    for path in db::discover_databases(dir)
+                        .with_context(|| format!("descubriendo bases en {}", dir.display()))?
+                    {
+                        if same_file(&path, &db_path) {
+                            continue;
+                        }
+                        match db::open_readonly(&path) {
+                            Ok(ws_conn) => opened.push((ws_conn, db_label(&path))),
+                            // Una db ilegible no puede tumbar el pack: se avisa y el
+                            // analisis sigue con las demas.
+                            Err(e) => eprintln!("aviso: {e}"),
+                        }
+                    }
+
+                    let mut refs = Vec::with_capacity(opened.len() + 1);
+                    refs.push((&conn, label.as_str()));
+                    for (ws_conn, ws_label) in &opened {
+                        refs.push((ws_conn, ws_label.as_str()));
+                    }
+
+                    let analysis = analyse_with_workspace(&refs, &label, &robot, log_source)?;
+                    eprintln!(
+                        "workspace: {} dbs | {} llamadas ambiguas | {} llamadas sin destino",
+                        refs.len(),
+                        analysis.ambiguous_calls.len(),
+                        analysis.missing_calls.len()
+                    );
+                    for call in &analysis.ambiguous_calls {
+                        eprintln!("  ambigua: {call}");
+                    }
+                    for call in &analysis.missing_calls {
+                        eprintln!("  sin destino: {call}");
+                    }
+
+                    // `pack` cablea su propio analisis de una sola db y no acepta uno
+                    // externo sin cambiar su firma, que no es de este issue: se
+                    // construye sin logs y se sustituye por el del workspace, que si
+                    // los trae. Asi los logs se leen una sola vez.
+                    let mut pack =
+                        build_from_conn_with_logs(&conn, &robot, snapshot, &label, None)?;
+                    pack.analysis = analysis;
+                    pack
+                }
+            };
+
             let md = pack.render_markdown();
             print!("{md}");
 
@@ -110,6 +175,62 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Lista las dbs de un workspace y resume cuanto se deduplica.
+///
+/// Las conexiones viven hasta el final porque el dedupe necesita los hechos de
+/// todas las dbs a la vez. Cuenta hechos, no nombres: dos homonimos con contenido
+/// distinto son dos.
+fn list_workspace(dir: &Path) -> anyhow::Result<()> {
+    let found = db::discover_databases(dir)
+        .with_context(|| format!("descubriendo bases en {}", dir.display()))?;
+    if found.is_empty() {
+        println!("0 bases con tabla bots en {}", dir.display());
+        return Ok(());
+    }
+
+    let mut opened = Vec::new();
+    let mut rows = 0usize;
+    for path in found {
+        let conn = match db::open_readonly(&path) {
+            Ok(conn) => conn,
+            // Una db ilegible no puede tumbar el listado del resto.
+            Err(e) => {
+                eprintln!("aviso: {e}");
+                continue;
+            }
+        };
+        let robots = db::list_robots(&conn)?;
+        rows += robots.len();
+        print_robots(&db_label(&path), &robots);
+        opened.push((conn, db_label(&path)));
+    }
+
+    let mut refs = Vec::new();
+    for (conn, label) in &opened {
+        refs.push((conn, label.as_str()));
+    }
+    let hechos = load_workspace(&refs)?.len();
+    println!();
+    println!(
+        "workspace: {} dbs | {} filas (una por robot y db) | {} hechos distintos \
+         (dedupe por contenido)",
+        refs.len(),
+        rows,
+        hechos
+    );
+    Ok(())
+}
+
+fn print_robots(label: &str, robots: &[db::RobotSummary]) {
+    println!("{label}  |  {} robots", robots.len());
+    for r in robots {
+        println!(
+            "  {:<28} {:>3} versiones   ultimo id {:<5}",
+            r.name, r.versions, r.latest_id
+        );
+    }
+}
+
 /// Etiqueta de la db sin ruta absoluta: `BBRE2\robot_run.db`.
 ///
 /// Se normalizan las dos formas de separador a proposito: `Path` solo reconoce
@@ -124,6 +245,20 @@ fn db_label(path: &Path) -> String {
     match partes.pop() {
         Some(dir) => format!("{dir}\\{file}"),
         None => file.to_string(),
+    }
+}
+
+/// `true` si las dos rutas son el mismo fichero.
+///
+/// Se comparan rutas canonicas porque el descubrimiento devuelve rutas absolutas y
+/// `--db` puede venir relativa: comparando texto, la db analizada entraria dos
+/// veces en el workspace y sus hechos se duplicarian.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        // Si alguna no existe, la comparacion literal sigue siendo la mejor
+        // respuesta: no se puede afirmar que sean el mismo fichero.
+        _ => a == b,
     }
 }
 
@@ -143,5 +278,15 @@ mod tests {
             "entrega\\robot_run.db"
         );
         assert_eq!(db_label(Path::new("robot.db")), "robot.db");
+    }
+
+    #[test]
+    fn la_misma_db_por_dos_rutas_no_se_duplica() {
+        // El descubrimiento y `--db` no tienen por que escribir la ruta igual.
+        assert!(same_file(Path::new("."), Path::new("./")));
+        assert!(!same_file(
+            Path::new("."),
+            Path::new("no-existe-en-este-directorio.db")
+        ));
     }
 }

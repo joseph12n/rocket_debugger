@@ -60,7 +60,8 @@ higiene): **2,7 accionables por robot afectado y 0 ocultos por el tope**.
 |---|---|
 | Cifrado de Rocketbot (`gAAAAA…`) | `(valor cifrado)` |
 | Nombre sensible (`pass`, `token`, `serial`, …) | `(oculto)` |
-| Ruta absoluta del sistema | `(ruta)` |
+| Ruta absoluta en el panel de variables | `(ruta)` |
+| Tramo de usuario en cualquier ruta (`C:/Users/x`, `/home/x`) | `%USERPROFILE%` / `~` |
 
 Un pack esta pensado para compartirse y para pasarselo a un agente: el material de credenciales y el
 arbol de directorios del desarrollador no viajan.
@@ -81,9 +82,12 @@ arbol de directorios del desarrollador no viajan.
 - **El motor no lee logs por su cuenta.** `build_from_conn` no toca el sistema de ficheros; es el CLI
   quien pasa el directorio de logs con `build_from_conn_with_logs`. Sin eso, un test cuyo robot se
   llamara igual que uno real cambiaria de resultado segun la maquina.
-- No contiene rutas absolutas del usuario en la etiqueta de db ni en las variables. Los **parametros
-  de los comandos** todavia pueden contenerlas (issue abierto): ahi la ruta es informacion util para
-  entender el flujo, pero habria que enmascarar al menos el nombre de usuario.
+- No contiene el nombre de usuario en ningun sitio: la etiqueta de db es relativa, las variables se
+  redactan y en los **parametros de los comandos** el tramo del usuario se enmascara conservando la
+  cola util (`C:/Users/josep/OneDrive/x` → `%USERPROFILE%/OneDrive/x`). La ruta sigue siendo legible
+  porque forma parte de entender el flujo; el nombre del desarrollador no.
+- El enmascarado vive en **un solo punto** (`render::field`), por donde pasan parametros, mensajes de
+  hallazgo y mensajes de error. Un recorte no puede publicar medio nombre.
 
 ## Medicion
 

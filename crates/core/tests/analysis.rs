@@ -10,6 +10,8 @@
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
+use rocketdebug_core::analysis::{analyse_with_workspace, load_workspace};
+use rocketdebug_core::graph::build_edges;
 use rocketdebug_core::{analyse, build_from_conn, db};
 use serde_json::{json, Value};
 
@@ -86,7 +88,14 @@ fn hijo_excel() -> Value {
 }
 
 fn make_db(dir: &Path, rows: Vec<(i64, String, Value)>) -> PathBuf {
-    let path = dir.join("robot.db");
+    make_db_at(dir, "robot.db", rows)
+}
+
+/// Igual que [`make_db`] con nombre de fichero: un workspace tiene varias dbs y
+/// cada una vive en su carpeta.
+fn make_db_at(dir: &Path, file: &str, rows: Vec<(i64, String, Value)>) -> PathBuf {
+    std::fs::create_dir_all(dir).expect("creo la carpeta de la db");
+    let path = dir.join(file);
     let conn = rusqlite::Connection::open(&path).expect("abro db temporal");
     conn.execute_batch(
         "CREATE TABLE bots (
@@ -188,9 +197,16 @@ fn el_orquestador_ve_a_sus_hijos_y_solo_marca_lo_que_esta_muerto() {
         "no hay lineas repetidas: {accionables:?}"
     );
 
-    // Una sola db de hechos: no se puede afirmar que el hijo este en otra, asi que
-    // `build_edges` no marca ambiguedad y la lista queda vacia.
+    // Una sola db de hechos: no hay otra donde buscar el hijo, asi que
+    // `build_edges` no puede saber si el nombre existe fuera y `ambiguous_calls`
+    // queda vacia. La llamada a un robot que no esta en ninguna db si se ve en
+    // `missing_calls`: era el punto ciego del issue #12.
     assert!(analysis.ambiguous_calls.is_empty());
+    assert_eq!(
+        analysis.missing_calls,
+        vec!["orq L4 -> no_esta_en_la_db".to_string()],
+        "la llamada sin destino ya no se pierde en silencio"
+    );
 
     let md = pack.render_markdown();
     // Este robot no tiene defectos de linea, asi que no hay seccion de accionables;
@@ -293,4 +309,138 @@ fn un_robot_que_no_esta_en_la_db_da_error_claro() {
 
     let err = analyse(&conn, DB, "no_existe").expect_err("no hay hechos de ese robot");
     assert!(err.to_string().contains("no_existe"), "error: {err}");
+}
+
+/// Issue #12: con una sola db, un hijo que solo vive en otra db del workspace ni
+/// siquiera se veia. Con las dos dbs, la arista existe marcada `ambiguous` y su
+/// contrato se puede calcular.
+#[test]
+fn un_hijo_que_solo_esta_en_otra_db_sale_como_ambiguo() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path_a = make_db_at(
+        &tmp.path().join("BBRE2"),
+        "robot_run.db",
+        vec![
+            (1, "orq".to_string(), orquestador()),
+            (2, "hijo_excel".to_string(), hijo_excel()),
+        ],
+    );
+    let path_b = make_db_at(
+        &tmp.path().join("BBRE2").join("entrega_corregida"),
+        "robot_run.db",
+        vec![(1, "hijo_web".to_string(), hijo_web())],
+    );
+    let conn_a = db::open_readonly(&path_a).expect("abro A");
+    let conn_b = db::open_readonly(&path_b).expect("abro B");
+    let la = r"BBRE2\robot_run.db";
+    let lb = r"entrega_corregida\robot_run.db";
+
+    // Antes: con una sola db `hijo_web` no existe, luego no hay arista que marcar.
+    let solo_a = analyse(&conn_a, la, "orq").expect("analisis de una db");
+    assert!(
+        solo_a.ambiguous_calls.is_empty(),
+        "una db no puede saber que el hijo esta fuera"
+    );
+    assert_eq!(
+        solo_a.contracts_out.len(),
+        1,
+        "solo el hijo de la misma db: {:?}",
+        solo_a.contracts_out
+    );
+
+    // La arista del workspace si existe, y marcada ambigua.
+    let facts = load_workspace(&[(&conn_a, la), (&conn_b, lb)]).expect("hechos del workspace");
+    let edges = build_edges(&facts);
+    let web = edges
+        .iter()
+        .find(|edge| edge.child == "hijo_web")
+        .expect("arista a hijo_web");
+    assert!(
+        web.ambiguous && !web.same_db,
+        "solo existe fuera de la db del padre: {web:?}"
+    );
+    assert_eq!(web.child_db, lb);
+
+    // Y el analisis la reporta, en vez de perder la llamada.
+    let ws = analyse_with_workspace(&[(&conn_a, la), (&conn_b, lb)], la, "orq", None)
+        .expect("analisis del workspace");
+    assert_eq!(ws.ambiguous_calls, vec!["orq -> hijo_web".to_string()]);
+    assert_eq!(
+        ws.contracts_out.len(),
+        2,
+        "ahora el hijo de la otra db tiene contrato: {:?}",
+        ws.contracts_out
+    );
+    let contrato = ws
+        .contracts_out
+        .iter()
+        .find(|c| c.child == "hijo_web")
+        .expect("contrato de hijo_web");
+    assert_eq!(
+        contrato.missing,
+        vec!["chrome_profile".to_string()],
+        "el contrato se calcula con los hechos de la otra db"
+    );
+    assert_eq!(
+        ws.missing_calls,
+        vec!["orq L4 -> no_esta_en_la_db".to_string()],
+        "el robot que no esta en ninguna db sigue siendo un aviso"
+    );
+}
+
+/// Dedupe del workspace: el mismo robot copiado en dos dbs es un solo hecho; dos
+/// homonimos con contenido distinto son dos.
+#[test]
+fn load_workspace_deduplica_por_contenido_y_conserva_homonimos() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // `orq` es identico en las dos dbs: es el mismo robot copiado entre entregas.
+    let path_a = make_db_at(
+        &tmp.path().join("trabajo"),
+        "robot.db",
+        vec![
+            (1, "orq".to_string(), orquestador()),
+            (2, "hijo_excel".to_string(), hijo_excel()),
+        ],
+    );
+    // `hijo_excel` cambia de contenido y `hijo_web` solo existe aqui.
+    let path_b = make_db_at(
+        &tmp.path().join("entrega_corregida"),
+        "robot.db",
+        vec![
+            (1, "orq".to_string(), orquestador()),
+            (2, "hijo_excel".to_string(), robot(vec![], &["otra_cosa"])),
+            (3, "hijo_web".to_string(), hijo_web()),
+        ],
+    );
+    let conn_a = db::open_readonly(&path_a).expect("abro A");
+    let conn_b = db::open_readonly(&path_b).expect("abro B");
+    let (la, lb) = ("trabajo\\robot.db", "entrega_corregida\\robot.db");
+
+    let facts = load_workspace(&[(&conn_a, la), (&conn_b, lb)]).expect("hechos");
+
+    // 5 filas (robot por db) -> 4 hechos: la copia identica de `orq` no se cuenta
+    // dos veces.
+    assert_eq!(
+        facts.len(),
+        4,
+        "hechos: {:?}",
+        facts.iter().map(|f| (&f.db, &f.name)).collect::<Vec<_>>()
+    );
+
+    let orq = facts.iter().find(|fact| fact.name == "orq").expect("orq");
+    assert_eq!(orq.db, la, "la primera db conserva la etiqueta del hecho");
+    assert_eq!(
+        orq.also_in,
+        vec![lb.to_string()],
+        "la copia identica se anota, no se duplica"
+    );
+
+    assert_eq!(
+        facts
+            .iter()
+            .filter(|fact| fact.name == "hijo_excel")
+            .count(),
+        2,
+        "el mismo nombre con contenido distinto son dos hechos"
+    );
 }
