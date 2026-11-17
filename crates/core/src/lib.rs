@@ -13,6 +13,7 @@
 //! - [`logs`]    parser de los logs de ejecucion del runner
 //! - [`signature`] normalizacion de firmas de error y clasificacion del ruido
 //! - [`attribution`] atribucion de cada error al snapshot vivo (veredicto y linea)
+//! - [`diff`]     diff estructural entre dos snapshots del mismo robot
 //! - [`graph`]    grafo de llamadas `execRocketBotDB` y contrato de variables
 //! - [`rules`]    motor de reglas declarativo (hallazgos)
 //! - [`analysis`] grafo + reglas cableados sobre los hechos de la db
@@ -34,6 +35,7 @@
 pub mod analysis;
 pub mod attribution;
 pub mod db;
+pub mod diff;
 pub mod error;
 pub mod graph;
 pub mod logs;
