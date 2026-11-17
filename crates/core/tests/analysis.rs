@@ -1,0 +1,283 @@
+//! Test de aceptacion del cableado: un pack deja de ser un volcado del flujo y
+//! pasa a traer hallazgos y contrato implicito de los subrobots.
+//!
+//! El caso es el medido en la fase 0: un orquestador cuyas variables solo tienen
+//! sentido como interfaz de los hijos. Sin grafo, `destinatario` y las demas
+//! parecen muertas; con grafo queda marcada solo la que no usa nadie.
+//!
+//! Ningun test toca `C:\Rocketbot`: los robots se construyen en memoria.
+
+use std::path::{Path, PathBuf};
+
+use base64::Engine as _;
+use rocketdebug_core::{analyse, build_from_conn, db};
+use serde_json::{json, Value};
+
+const DB: &str = r"test\robot.db";
+
+fn node(father: &str, line: &str, command: &str) -> Value {
+    json!({
+        "father": father,
+        "line": line,
+        "command": command,
+        "children": [],
+        "else": [],
+    })
+}
+
+/// Nodo de llamada tal como lo guarda Studio: el nombre del hijo va en `command`.
+fn call(line: &str, child: &str) -> Value {
+    node("execRocketBotDB", line, child)
+}
+
+/// Proyecto minimo con el panel de variables declarado.
+fn robot(commands: Vec<Value>, vars: &[&str]) -> Value {
+    let vars: Vec<Value> = vars
+        .iter()
+        .map(|name| json!({"name": name, "data": null}))
+        .collect();
+    json!({
+        "project": {
+            "commands": commands,
+            "vars": vars,
+            "profile": {"name": "fixture"},
+        }
+    })
+}
+
+/// Orquestador con dos hijos reales y uno que no esta en la db.
+fn orquestador() -> Value {
+    robot(
+        vec![
+            json!({
+                "father": "setVar",
+                "line": "1",
+                "command": "\"cafe\"",
+                "var": "busqueda",
+                "children": [],
+                "else": [],
+            }),
+            call("2", "hijo_web"),
+            call("3", "hijo_excel"),
+            // Hijo inexistente: no genera contrato, pero tampoco puede romper nada.
+            call("4", "no_esta_en_la_db"),
+        ],
+        &["busqueda", "ruta_salida", "destinatario"],
+    )
+}
+
+/// Lee una variable que el padre provee y otra que no provee nadie.
+fn hijo_web() -> Value {
+    robot(
+        vec![node(
+            "log_message",
+            "2.1",
+            "Buscando {busqueda} con {chrome_profile}",
+        )],
+        &[],
+    )
+}
+
+fn hijo_excel() -> Value {
+    robot(
+        vec![node("savexlsx", "3.1", "%base_path%/{ruta_salida}")],
+        &[],
+    )
+}
+
+fn make_db(dir: &Path, rows: Vec<(i64, String, Value)>) -> PathBuf {
+    let path = dir.join("robot.db");
+    let conn = rusqlite::Connection::open(&path).expect("abro db temporal");
+    conn.execute_batch(
+        "CREATE TABLE bots (
+            id INTEGER PRIMARY KEY,
+            name TEXT,
+            created_at TEXT,
+            data TEXT
+        );",
+    )
+    .expect("creo tabla");
+    for (id, name, project) in rows {
+        let raw = project.to_string();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(raw.as_bytes());
+        conn.execute(
+            "INSERT INTO bots (id, name, created_at, data) \
+             VALUES (?1, ?2, '2026-11-17 10:00:00', ?3)",
+            rusqlite::params![id, name, b64],
+        )
+        .expect("inserto snapshot");
+    }
+    path
+}
+
+fn workspace(dir: &Path) -> PathBuf {
+    make_db(
+        dir,
+        vec![
+            (1, "orq".to_string(), orquestador()),
+            (2, "hijo_web".to_string(), hijo_web()),
+            (3, "hijo_excel".to_string(), hijo_excel()),
+        ],
+    )
+}
+
+#[test]
+fn el_orquestador_ve_a_sus_hijos_y_solo_marca_lo_que_esta_muerto() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = workspace(tmp.path());
+    let conn = db::open_readonly(&path).expect("abro");
+
+    let pack = build_from_conn(&conn, "orq", None, DB).expect("pack");
+    let analysis = &pack.analysis;
+
+    // El hijo `no_esta_en_la_db` no produce arista: `build_edges` lo omite porque
+    // no hay hechos con los que calcular su contrato.
+    assert_eq!(
+        analysis.contracts_out.len(),
+        2,
+        "{:?}",
+        analysis.contracts_out
+    );
+    let web = analysis
+        .contracts_out
+        .iter()
+        .find(|c| c.child == "hijo_web")
+        .expect("contrato de hijo_web");
+    assert_eq!(web.parent, "orq");
+    assert_eq!(web.line, "2", "la linea de la llamada en el padre");
+    assert_eq!(
+        web.provided,
+        vec![
+            "busqueda".to_string(),
+            "destinatario".to_string(),
+            "ruta_salida".to_string()
+        ],
+        "el panel del padre es lo que hereda el hijo"
+    );
+    assert_eq!(
+        web.missing,
+        vec!["chrome_profile".to_string()],
+        "lo que el hijo lee y nadie le da"
+    );
+    assert!(analysis.contracts_in.is_empty(), "nadie llama al orq");
+
+    // `busqueda` la usa orq y `ruta_salida` la lee hijo_excel: solo `destinatario`
+    // esta realmente muerta. Sin el grafo serian tres hallazgos falsos.
+    assert_eq!(
+        analysis.unused_declared,
+        vec!["destinatario".to_string()],
+        "la var que es API de un hijo no se marca"
+    );
+
+    let ids: Vec<&str> = analysis
+        .findings
+        .iter()
+        .map(|f| f.rule_id.as_str())
+        .collect();
+    assert!(ids.contains(&"SIN_TRY"), "ids: {ids:?}");
+    assert!(ids.contains(&"VAR_NO_USADA"), "ids: {ids:?}");
+    assert!(
+        !ids.contains(&"LINEA_COLISION"),
+        "no hay lineas repetidas: {ids:?}"
+    );
+
+    // Una sola db de hechos: no se puede afirmar que el hijo este en otra, asi que
+    // `build_edges` no marca ambiguedad y la lista queda vacia.
+    assert!(analysis.ambiguous_calls.is_empty());
+
+    let md = pack.render_markdown();
+    assert!(
+        md.contains("## Hallazgos (2: 0 alta / 1 media / 1 baja)"),
+        "cabecera con recuento por severidad:\n{md}"
+    );
+    assert!(
+        md.contains("## Contrato implicito (subrobots)"),
+        "falta la seccion de contrato:\n{md}"
+    );
+    assert!(
+        md.contains("- llama a hijo_web en L2 → provee: busqueda, destinatario, ruta_salida"),
+        "linea de contrato:\n{md}"
+    );
+    assert!(
+        md.contains("  !! el hijo espera y nadie provee: chrome_profile"),
+        "el hueco del contrato se ve antes de ejecutar:\n{md}"
+    );
+
+    // El orden de las secciones es el del contrato del pack: primero lo accionable.
+    let pos = |needle: &str| md.find(needle).unwrap_or_else(|| panic!("falta {needle}"));
+    assert!(pos("## Hallazgos") < pos("## Contrato implicito"));
+    assert!(pos("## Contrato implicito") < pos("## Variables"));
+    assert!(pos("## Variables") < pos("## Flujo"));
+}
+
+#[test]
+fn el_hijo_sabe_quien_lo_llama_y_que_le_falta() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = workspace(tmp.path());
+    let conn = db::open_readonly(&path).expect("abro");
+
+    let pack = build_from_conn(&conn, "hijo_web", None, DB).expect("pack");
+    assert!(
+        pack.analysis.contracts_out.is_empty(),
+        "hijo_web no llama a nadie"
+    );
+    assert_eq!(pack.analysis.contracts_in.len(), 1);
+
+    let inbound = &pack.analysis.contracts_in[0];
+    assert_eq!(inbound.parent, "orq");
+    assert_eq!(inbound.line, "2", "la linea del padre que lo llama");
+    assert_eq!(
+        inbound.missing,
+        vec!["chrome_profile".to_string()],
+        "el hijo ve el mismo hueco que ve el padre"
+    );
+
+    let md = pack.render_markdown();
+    assert!(
+        md.contains("- lo llama orq en L2 → recibe: busqueda, destinatario, ruta_salida"),
+        "linea de contrato entrante:\n{md}"
+    );
+}
+
+#[test]
+fn el_contrato_se_trunca_a_ocho_llamadas_por_seccion() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut rows = Vec::new();
+    let mut calls = Vec::new();
+    for i in 0..10 {
+        calls.push(call(&(i + 1).to_string(), &format!("hijo_{i}")));
+        rows.push((i, format!("hijo_{i}"), robot(Vec::new(), &[])));
+    }
+    rows.push((100, "orq".to_string(), robot(calls, &[])));
+
+    let path = make_db(tmp.path(), rows);
+    let conn = db::open_readonly(&path).expect("abro");
+    let pack = build_from_conn(&conn, "orq", None, DB).expect("pack");
+
+    assert_eq!(
+        pack.analysis.contracts_out.len(),
+        10,
+        "el analisis conserva todo; el recorte es del render"
+    );
+
+    let md = pack.render_markdown();
+    assert_eq!(
+        md.matches("- llama a ").count(),
+        8,
+        "nunca se listan las 40 lineas:\n{md}"
+    );
+    assert!(
+        md.contains("- ... y 2 llamadas mas"),
+        "el recorte se declara, no se esconde:\n{md}"
+    );
+}
+
+#[test]
+fn un_robot_que_no_esta_en_la_db_da_error_claro() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = workspace(tmp.path());
+    let conn = db::open_readonly(&path).expect("abro");
+
+    let err = analyse(&conn, DB, "no_existe").expect_err("no hay hechos de ese robot");
+    assert!(err.to_string().contains("no_existe"), "error: {err}");
+}

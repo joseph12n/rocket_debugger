@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use chrono::NaiveDateTime;
 use serde_json::Value;
 
+use crate::analysis::{self, Analysis};
 use crate::db::{self, Snapshot};
 use crate::error::Result;
 use crate::redact;
@@ -37,6 +38,11 @@ pub struct Pack {
     /// Lineas repetidas: si hay alguna, `line` no sirve para direccionar nodos.
     pub collisions: BTreeMap<String, usize>,
     pub flow: Vec<FlatNode>,
+    /// Hallazgos, contratos implicitos y variables muertas del robot.
+    ///
+    /// Se calcula contra la db entera (grafo de llamadas) y describe el **ultimo**
+    /// snapshot de cada robot, tambien cuando el pack se pide sobre uno anterior.
+    pub analysis: Analysis,
     /// JSON completo del snapshot, para medir el ahorro real.
     pub raw_pretty: String,
 }
@@ -74,10 +80,20 @@ pub fn build_from_conn(
             .ok_or(crate::error::Error::SnapshotNotFound(id))?,
         None => snaps.last().expect("load_snapshots nunca devuelve vacio"),
     };
-    Ok(build(robot, db_label, &snaps, target))
+    // El analisis cruzado necesita la db entera (grafo de llamadas), no solo este
+    // robot; por eso se resuelve aqui y se pasa ya hecho a `build`, que trabaja
+    // unicamente con el snapshot pedido y no vuelve a tocar la conexion.
+    let analysis = analysis::analyse(conn, db_label, robot)?;
+    Ok(build(robot, db_label, &snaps, target, analysis))
 }
 
-fn build(robot: &str, db_label: &str, snaps: &[Snapshot], target: &Snapshot) -> Pack {
+fn build(
+    robot: &str,
+    db_label: &str,
+    snaps: &[Snapshot],
+    target: &Snapshot,
+    analysis: Analysis,
+) -> Pack {
     // El indice recorre todas las versiones. Cuando llegue el daemon esto se
     // cachea por (db, robot, ultimo_id); hoy es barato y mantiene el codigo simple.
     let mut versions = VersionIndex::default();
@@ -111,6 +127,7 @@ fn build(robot: &str, db_label: &str, snaps: &[Snapshot], target: &Snapshot) -> 
         vars,
         collisions,
         flow,
+        analysis,
         raw_pretty,
     }
 }
