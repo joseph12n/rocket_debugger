@@ -23,9 +23,11 @@
 //!   numeracion (`2.1`, `2.2`, `2.3`), asi que solo sirve como etiqueta de display.
 
 pub mod db;
+pub mod logs;
 pub mod pack;
 pub mod redact;
 pub mod render;
+pub mod signature;
 pub mod tree;
 pub mod versions;
 
