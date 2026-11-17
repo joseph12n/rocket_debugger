@@ -1,0 +1,21 @@
+[package]
+name = "rocketdebug-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Fachada MCP de lectura para rocket_debugger"
+
+[[bin]]
+name = "rocketdebug-mcp"
+path = "src/main.rs"
+
+[dependencies]
+rocketdebug-core = { path = "../core" }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# Solo para crear el `robot.db` sintetico de los tests de integracion. La fachada
+# nunca escribe: abre siempre con `rocketdebug_core::db::open_readonly`.
+rusqlite = { workspace = true }
+base64 = { workspace = true }
