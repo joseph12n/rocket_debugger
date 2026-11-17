@@ -64,6 +64,24 @@ El mismo robot aparece copiado en varias dbs de entrega (`robot_run.db` y
 `entrega_corregida/robot_run.db`). Sin dedupe, el workspace de 28 robots se cuenta como 50 y las
 metricas mienten.
 
+### Dos cubos de hallazgos
+
+Un defecto con linea concreta (`LINEA_COLISION`, `RUTA_ABSOLUTA`) se puede atender hoy; una carencia
+del robot entero (`SIN_TRY`, `IF_SIN_ELSE`, `ANIDAMIENTO`, `VAR_NO_USADA`) es cierta pero no urgente.
+Mezcladas competian por el mismo tope y la segunda diluia a la primera: medido, las genericas eran el
+36% de lo mostrado. Ahora el render las separa (`## Hallazgos` / `## Higiene`) y cada cubo tiene su
+tope. En el barrido real: 70 accionables, 66 de higiene, 0 ocultos.
+
+Regla de clasificacion: **accionable = senala una linea con un defecto concreto**. Se declara por
+regla en `rules/builtin.json`, no se infiere de `Finding::line` (`IF_SIN_ELSE` trae linea y es higiene).
+
+### El motor no lee logs por su cuenta
+
+`build_from_conn` es puro: no toca el sistema de ficheros y deja la seccion de errores vacia. El CLI
+usa `build_from_conn_with_logs` y decide el directorio. Sin esa separacion, un test cuyo robot se
+llamara igual que uno real cambiaria de resultado segun la maquina que lo ejecute, y el golden del
+render dejaria de ser un golden.
+
 ## Restricciones del entorno real
 
 - `max_executions: 1` en la licencia y un unico ChromeDriver. La app debe ser **broker de ejecucion**
@@ -80,9 +98,10 @@ Medido sobre 28 robots reales:
 
 | | tokens |
 |---|---|
-| JSON crudo (pretty) | 102.052 |
-| render | 16.326 |
-| uno solo (el mas grande) | 1.827 |
+| JSON crudo de las 3 dbs | 102.052 (fase 0) |
+| render de las mismas | 16.326 (fase 0, 4 secciones) |
+| `ML_06_Legacy` (36 nodos, todas las secciones) | 1.128 (8,2x) |
+| `reporteMercadolibre` (17 nodos, 86 vars) | 1.812 (5,6x) |
 
 Objetivo de diseno: **un robot en <= 2,5k tokens**, para que un agente pueda tener el workspace
 entero en contexto y diagnosticar sin pedir el flujo crudo.

@@ -1,6 +1,6 @@
 # Context pack
 
-El contrato entre el motor y el consumidor (agente o UI). Un robot, un documento, ~1-2,5k tokens.
+El contrato entre el motor y el consumidor (agente o UI). Un robot, un documento, ~1-3k tokens.
 
 ## Formato
 
@@ -14,46 +14,82 @@ sin que un modelo lo lea mejor. El JSON se reserva para la UI.
 > descripcion del robot
 db: <etiqueta> | nodos N | vars V | prof D
 !! direccionamiento por linea NO FIABLE: N lineas duplicadas
-   <linea> x<n>, ...
 
-## Variables
-- <nombre> = <valor o (sin valor inicial)>
+## Hallazgos (5: 5 alta / 0 media / 0 baja)      ← accionables: defecto con linea
+- [alta] L2.1 LINEA_COLISION — ... → ...
+
+## Higiene (3: 0 alta / 1 media / 2 baja)        ← higiene: afecta al robot entero
+- [media] L- ANIDAMIENTO — ... → ...
+
+## Contrato implicito (subrobots)
+- llama a X en L2.3 → provee: ...
+  !! el hijo espera y nadie provee: ...
+
+## Errores (vivos 0 · payload cambiado 0 · historicos 5 · modulo 0 · ruido 1)
+- historicos de versiones anteriores: log_message(x4), raise_exception(x4) …
+- ruido del motor (ignorado): 1 firma
+
+## Variables (18)
+- ruta_salida = (ruta)
+- destinatario = (valor cifrado)
 
 ## Flujo
-<linea> <comando> → <variable_escrita> [else]  <parametros>
-  <anidado>
+2 setVar → contador  0
 ```
 
-Cada seccion corresponde a una card de la UI. Las secciones pendientes:
-
-| seccion | estado | issue |
+| Seccion | Estado | Issue |
 |---|---|---|
-| cabecera + colisiones | hecho | #5 |
-| Variables | hecho | #5 |
+| cabecera + colisiones de linea | hecho | #5 |
+| Hallazgos (accionables) | hecho | #4 |
+| Higiene | hecho | #4 |
+| Contrato implicito | hecho | #3 |
+| Errores con atribucion temporal | hecho | #2 |
+| Variables redactadas | hecho | #8, #11 |
 | Flujo | hecho | #5 |
-| Hallazgos | pendiente | #4 |
-| Contrato implicito (subrobots) | pendiente | #3 |
-| Errores (vivos / stale / obsoletos / modulo / ruido) | pendiente | #2 |
+
+### Por que dos cubos de hallazgos
+
+Un defecto con linea (`LINEA_COLISION`, `RUTA_ABSOLUTA`) es atendible hoy. Una carencia del robot
+entero (`SIN_TRY`, `IF_SIN_ELSE`, `ANIDAMIENTO`, `VAR_NO_USADA`) es cierta pero no urguide; mezcladas,
+la segunda diluia a la primera. Medido sobre 3 dbs reales (39 instancias, 70 accionables + 66 de
+higiene): **2,7 accionables por robot afectado y 0 ocultos por el tope**.
+
+## Redaccion (que NO sale del pack)
+
+| Valor | Se convierte en |
+|---|---|
+| Cifrado de Rocketbot (`gAAAAA…`) | `(valor cifrado)` |
+| Nombre sensible (`pass`, `token`, `serial`, …) | `(oculto)` |
+| Ruta absoluta del sistema | `(ruta)` |
+
+Un pack esta pensado para compartirse y para pasarselo a un agente: el material de credenciales y el
+arbol de directorios del desarrollador no viajan.
 
 ## Presupuesto
 
-- Tope por robot: 2,5k tokens. Si se pasa, primero se recorta el flujo (los parametros largos ya se
-  cortan a 100 caracteres) y nunca los hallazgos.
-- Tope por tool MCP: ~3k tokens. Si una consulta devuelve mas, se pagina o se resume.
+- Tope por robot: ~2,5k tokens. Los parametros largos se cortan a 100 caracteres y los mensajes de
+  hallazgo a 140.
+- Tope por seccion: 5 hallazgos accionables y 5 de higiene; si se recorta, la cabecera lo dice
+  (`5 de 23`) y una linea final lo cierra (`… y 18 mas`). Nunca se oculta el total en silencio.
+- Medido: `ML_06_Legacy` (36 nodos) 1.128 tokens (8,2x sobre el JSON crudo); `reporteMercadolibre`
+  (17 nodos, 86 vars) 1.812 tokens (5,6x).
 
-## Estabilidad
+## Estabilidad y hermeticidad
 
-- El render es **determinista**: misma db + mismo snapshot => mismo texto. Hay un golden test
+- El render es **determinista**: misma db + mismo snapshot + mismos logs => mismo texto. Hay un golden
   (`fixtures/golden/simple.md`) que falla si cambia el formato; renovarlo es una decision consciente.
-- No contiene rutas absolutas del usuario: la etiqueta de db es `padre\fichero.db`.
-- Los parametros se normalizan a una linea (saltos -> `⏎`) y se cortan a 100 caracteres.
+- **El motor no lee logs por su cuenta.** `build_from_conn` no toca el sistema de ficheros; es el CLI
+  quien pasa el directorio de logs con `build_from_conn_with_logs`. Sin eso, un test cuyo robot se
+  llamara igual que uno real cambiaria de resultado segun la maquina.
+- No contiene rutas absolutas del usuario en la etiqueta de db ni en las variables. Los **parametros
+  de los comandos** todavia pueden contenerlas (issue abierto): ahi la ruta es informacion util para
+  entender el flujo, pero habria que enmascarar al menos el nombre de usuario.
 
 ## Medicion
 
 ```bash
 rocketdebug pack <robot> --stats
-# crudo 9235 tok (34166 car.) | render 733 tok (2712 car.) | 12.6x | -92%
+# crudo 9235 tok (34166 car.) | render 1128 tok (4172 car.) | 8.2x | -88%
 ```
 
-La estimacion de tokens es `caracteres / 3,7` (+-15%). Sirve para decidir presupuesto, no para
-facturar.
+La estimacion de tokens es `caracteres / 3,7` (+-15%). Sirve para decidir presupuesto, no para facturar.

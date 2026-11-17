@@ -169,16 +169,23 @@ fn el_orquestador_ve_a_sus_hijos_y_solo_marca_lo_que_esta_muerto() {
         "la var que es API de un hijo no se marca"
     );
 
-    let ids: Vec<&str> = analysis
+    // `SIN_TRY` y `VAR_NO_USADA` son higiene: describen el robot entero, no un
+    // nodo concreto. Se separan para que no compitan por el cupo con lo accionable.
+    let accionables: Vec<&str> = analysis
         .findings
         .iter()
         .map(|f| f.rule_id.as_str())
         .collect();
-    assert!(ids.contains(&"SIN_TRY"), "ids: {ids:?}");
-    assert!(ids.contains(&"VAR_NO_USADA"), "ids: {ids:?}");
+    let higiene: Vec<&str> = analysis
+        .higiene
+        .iter()
+        .map(|f| f.rule_id.as_str())
+        .collect();
+    assert!(higiene.contains(&"SIN_TRY"), "higiene: {higiene:?}");
+    assert!(higiene.contains(&"VAR_NO_USADA"), "higiene: {higiene:?}");
     assert!(
-        !ids.contains(&"LINEA_COLISION"),
-        "no hay lineas repetidas: {ids:?}"
+        !accionables.contains(&"LINEA_COLISION"),
+        "no hay lineas repetidas: {accionables:?}"
     );
 
     // Una sola db de hechos: no se puede afirmar que el hijo este en otra, asi que
@@ -186,9 +193,15 @@ fn el_orquestador_ve_a_sus_hijos_y_solo_marca_lo_que_esta_muerto() {
     assert!(analysis.ambiguous_calls.is_empty());
 
     let md = pack.render_markdown();
+    // Este robot no tiene defectos de linea, asi que no hay seccion de accionables;
+    // lo suyo (sin Try/Catch, variable muerta) va a higiene, con su propio recuento.
     assert!(
-        md.contains("## Hallazgos (2: 0 alta / 1 media / 1 baja)"),
-        "cabecera con recuento por severidad:\n{md}"
+        !md.contains("## Hallazgos"),
+        "sin accionables no se pinta la seccion:\n{md}"
+    );
+    assert!(
+        md.contains("## Higiene (2: 0 alta / 1 media / 1 baja)"),
+        "cabecera de higiene con recuento por severidad:\n{md}"
     );
     assert!(
         md.contains("## Contrato implicito (subrobots)"),
@@ -205,7 +218,7 @@ fn el_orquestador_ve_a_sus_hijos_y_solo_marca_lo_que_esta_muerto() {
 
     // El orden de las secciones es el del contrato del pack: primero lo accionable.
     let pos = |needle: &str| md.find(needle).unwrap_or_else(|| panic!("falta {needle}"));
-    assert!(pos("## Hallazgos") < pos("## Contrato implicito"));
+    assert!(pos("## Higiene") < pos("## Contrato implicito"));
     assert!(pos("## Contrato implicito") < pos("## Variables"));
     assert!(pos("## Variables") < pos("## Flujo"));
 }

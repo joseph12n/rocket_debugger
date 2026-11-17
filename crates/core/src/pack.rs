@@ -5,6 +5,7 @@
 //! tests de ratio) salen todos de aqui.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use chrono::NaiveDateTime;
 use serde_json::Value;
@@ -65,12 +66,46 @@ impl Pack {
     }
 }
 
+/// Logs que se leen como maximo en un pack automatico.
+///
+/// Medido en el entorno real: el directorio pesa ~6,6 MB repartidos en 13
+/// ficheros, y con los 20 mas recientes entran todas las ejecuciones recientes sin
+/// que el pack dependa de logs de semanas atras.
+/// Ficheros de log que se leen por defecto al construir un pack con logs.
+///
+/// Vive aqui y no en el CLI para que la politica (cuantos dias atras mira el motor)
+/// sea una sola: 20 ficheros cubren la semana de trabajo normal sin recorrer meses.
+pub const DEFAULT_LOG_FILES: usize = 20;
+
 /// Construye el pack del snapshot indicado (por defecto, el ultimo).
+///
+/// La seccion de errores se rellena leyendo los logs **solo si el directorio
+/// existe**: aqui, y no en `analysis`, es donde se decide si este entorno tiene
+/// logs. Asi un pack de test no depende de `C:\Rocketbot` y un pack real no pierde
+/// la seccion por una ruta mal escrita.
 pub fn build_from_conn(
     conn: &rusqlite::Connection,
     robot: &str,
     snapshot: Option<i64>,
     db_label: &str,
+) -> Result<Pack> {
+    // Sin logs por defecto: un pack de test no puede depender de `C:\Rocketbot`.
+    // El CLI es quien decide leerlos (ver `build_from_conn_with_logs`).
+    build_from_conn_with_logs(conn, robot, snapshot, db_label, None)
+}
+
+/// Igual que [`build_from_conn`], con un origen de logs explicito.
+///
+/// `None` deja la seccion de errores vacia y no toca el sistema de ficheros: eso es
+/// lo que usan los tests y cualquier consumidor sin logs. Que el motor no decida
+/// por su cuenta es lo que mantiene la suite hermética: antes, un test cuyo robot se
+/// llamara igual que uno real habria cambiado de resultado segun la maquina.
+pub fn build_from_conn_with_logs(
+    conn: &rusqlite::Connection,
+    robot: &str,
+    snapshot: Option<i64>,
+    db_label: &str,
+    log_source: Option<(&Path, usize)>,
 ) -> Result<Pack> {
     let snaps = db::load_snapshots(conn, robot)?;
     let target = match snapshot {
@@ -83,7 +118,7 @@ pub fn build_from_conn(
     // El analisis cruzado necesita la db entera (grafo de llamadas), no solo este
     // robot; por eso se resuelve aqui y se pasa ya hecho a `build`, que trabaja
     // unicamente con el snapshot pedido y no vuelve a tocar la conexion.
-    let analysis = analysis::analyse(conn, db_label, robot)?;
+    let analysis = analysis::analyse_with_logs(conn, db_label, robot, log_source)?;
     Ok(build(robot, db_label, &snaps, target, analysis))
 }
 

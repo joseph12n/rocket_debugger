@@ -72,9 +72,19 @@ En CI (Linux) se usa el toolchain por defecto.
 
 ## Roadmap
 
-- [ ] #1 parser de `bots.data` e indice de versiones
-- [ ] #2 atribucion temporal de errores al snapshot vivo
-- [ ] #3 grafo de llamadas y contrato implicito de variables
-- [ ] #4 motor de reglas declarativo con umbral de precision
-- [ ] #5 render del context pack con contabilidad de tokens
-- [ ] #6 fachada MCP de lectura
+- [x] #1 parser de `bots.data` e indice de versiones
+- [x] #2 seccion de errores con atribucion temporal al snapshot vivo
+- [x] #3 grafo de llamadas y contrato implicito de variables
+- [x] #4 motor de reglas con hallazgos accionables e higiene separados
+- [x] #5 render del context pack con contabilidad de tokens
+- [x] #8 redaccion de credenciales cifradas y valores sensibles
+- [x] #11 redaccion de rutas absolutas en el panel de variables
+- [ ] #6 fachada MCP de lectura para el agente
+- [ ] #12 workspace multi-db (hoy el grafo ve una sola db)
+- [ ] #13 aviso de hallazgos omitidos por el tope
+
+## Estado medido
+
+`rocketdebug pack` sobre datos reales: 70 hallazgos accionables en 39 instancias de robot (2,7 por
+robot afectado, todos verificables estructuralmente), 66 de higiene en seccion aparte, y packs de
+1,1-1,8k tokens para robots de 17-36 nodos.

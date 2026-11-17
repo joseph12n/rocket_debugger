@@ -5,7 +5,9 @@
 
 use std::collections::BTreeMap;
 
-use rocketdebug_core::rules::{self, evaluate, evaluate_with_limit, Finding, Severity};
+use rocketdebug_core::rules::{
+    self, evaluate, evaluate_split, evaluate_with_limit, Finding, Kind, Severity,
+};
 use rocketdebug_core::tree::{self, FlatNode};
 use serde_json::{json, Value};
 
@@ -289,4 +291,253 @@ fn el_tope_de_cinco_se_respeta_y_conserva_lo_mas_grave() {
     let dos = evaluate_with_limit(&nodes, &collisions, &[], 0, 2);
     assert_eq!(dos.len(), 2);
     assert!(dos.iter().all(|f| f.severity == Severity::Alta));
+}
+
+/// `(rule_id, line)` ordenados: compara conjuntos de hallazgos sin depender del
+/// orden en que los cubos se concatenan.
+fn claves_ordenadas(findings: &[Finding]) -> Vec<(String, String)> {
+    let mut claves: Vec<(String, String)> = findings
+        .iter()
+        .map(|f| (f.rule_id.clone(), f.line.clone()))
+        .collect();
+    claves.sort();
+    claves
+}
+
+#[test]
+fn builtin_rules_declara_las_siete_con_su_cubo() {
+    let rules = rules::builtin_rules();
+    assert_eq!(rules.len(), 7, "siete reglas declaradas");
+    assert_eq!(
+        rules.iter().filter(|r| r.kind == Kind::Accionable).count(),
+        3,
+        "accionables: LINEA_COLISION, CATCH_VACIO y RUTA_ABSOLUTA"
+    );
+    assert_eq!(
+        rules.iter().filter(|r| r.kind == Kind::Higiene).count(),
+        4,
+        "higiene: SIN_TRY, IF_SIN_ELSE, ANIDAMIENTO y VAR_NO_USADA"
+    );
+    assert!(
+        rules
+            .iter()
+            .all(|r| matches!(r.kind.label(), "accionable" | "higiene")),
+        "las dos etiquetas del render estan cubiertas"
+    );
+}
+
+#[test]
+fn el_fixture_reparte_colisiones_en_accionables_y_higiene_en_su_cubo() {
+    let nodes = fixture_nodes();
+    let collisions = tree::collisions(&nodes);
+
+    let (accionables, higiene) = evaluate_split(&nodes, &collisions, &[], 0, 5);
+
+    assert_eq!(
+        rule_ids(&accionables),
+        ["LINEA_COLISION", "LINEA_COLISION"],
+        "las colisiones son el unico defecto con linea concreta del fixture"
+    );
+    assert_eq!(
+        accionables
+            .iter()
+            .map(|f| f.line.as_str())
+            .collect::<Vec<_>>(),
+        ["2.1", "2.2"]
+    );
+    assert!(accionables.iter().all(|f| f.kind == Kind::Accionable));
+
+    let ids_higiene = rule_ids(&higiene);
+    assert!(
+        ids_higiene.contains(&"IF_SIN_ELSE"),
+        "el evaluateIf sin else del fixture es higiene: {higiene:?}"
+    );
+    assert!(
+        !ids_higiene.contains(&"SIN_TRY"),
+        "el fixture si tiene trycatch: {higiene:?}"
+    );
+    assert!(higiene.iter().all(|f| f.kind == Kind::Higiene));
+
+    assert!(
+        accionables
+            .windows(2)
+            .all(|w| w[0].severity >= w[1].severity),
+        "orden por severidad descendente en accionables: {accionables:?}"
+    );
+    assert!(
+        higiene.windows(2).all(|w| w[0].severity >= w[1].severity),
+        "orden por severidad descendente en higiene: {higiene:?}"
+    );
+}
+
+#[test]
+fn un_robot_sin_try_manda_sin_try_a_higiene_y_deja_vacio_lo_accionable() {
+    // El defecto es del robot entero y no apunta a ninguna linea: es exactamente
+    // el ruido que hundia la precision util, asi que no puede caer en accionables.
+    let nodes = flat(json!([node("log_message", "1", "ok")]));
+    let (accionables, higiene) = evaluate_split(&nodes, &BTreeMap::new(), &[], 0, 5);
+
+    assert!(accionables.is_empty(), "{accionables:?}");
+    assert_eq!(rule_ids(&higiene), ["SIN_TRY"]);
+    assert!(higiene[0].line.is_empty());
+    assert_eq!(higiene[0].kind, Kind::Higiene);
+}
+
+#[test]
+fn las_tres_accionables_senalan_una_linea_concreta() {
+    // Un robot donde disparan las tres reglas accionables a la vez: colision,
+    // catch vacio y ruta absoluta. Es el contrato de `Kind::Accionable`: si
+    // dispara, senala una linea; sin linea no habria nada que accionar.
+    let nodes = flat(json!([
+        {
+            "father": "trycatch",
+            "line": 1,
+            "command": "",
+            "children": [node("openBrowser", "1.1", "C:/Users/x")],
+            "else": []
+        },
+        node("setVar", "2", "\"a\""),
+        node("setVar", "2", "\"b\"")
+    ]));
+    let collisions = tree::collisions(&nodes);
+
+    let (accionables, higiene) = evaluate_split(&nodes, &collisions, &[], 0, 50);
+
+    let mut ids = rule_ids(&accionables);
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        ["CATCH_VACIO", "LINEA_COLISION", "RUTA_ABSOLUTA"],
+        "las tres accionables disparan: {accionables:?}"
+    );
+    assert!(
+        accionables.iter().all(|f| !f.line.trim().is_empty()),
+        "una accionable sin linea no se puede accionar: {accionables:?}"
+    );
+    assert_eq!(
+        accionables
+            .iter()
+            .filter(|f| f.rule_id == "CATCH_VACIO")
+            .map(|f| f.line.as_str())
+            .collect::<Vec<_>>(),
+        ["1"]
+    );
+    assert_eq!(
+        accionables
+            .iter()
+            .filter(|f| f.rule_id == "RUTA_ABSOLUTA")
+            .map(|f| f.line.as_str())
+            .collect::<Vec<_>>(),
+        ["1.1"]
+    );
+    assert!(higiene.is_empty(), "aqui no hay higiene: {higiene:?}");
+}
+
+#[test]
+fn cada_cubo_se_trunca_por_separado_a_su_tope() {
+    // Tres colisiones (accionable, alta) y cuatro evaluateIf sin else (higiene,
+    // baja) mas el SIN_TRY que comparte el cubo de higiene.
+    let mut commands = Vec::new();
+    for line in 1..=3 {
+        commands.push(node("setVar", &line.to_string(), "\"a\""));
+        commands.push(node("setVar", &line.to_string(), "\"b\""));
+    }
+    for line in 10..=13 {
+        commands.push(node("evaluateIf", &line.to_string(), "True"));
+    }
+    let nodes = tree::flatten(&commands);
+    let collisions = tree::collisions(&nodes);
+    assert_eq!(collisions.len(), 3, "tres lineas repetidas");
+
+    let (accionables, higiene) = evaluate_split(&nodes, &collisions, &[], 0, 2);
+    assert_eq!(
+        accionables.len(),
+        2,
+        "el cubo accionable tiene su propio tope: {accionables:?}"
+    );
+    assert!(
+        accionables.iter().all(|f| f.kind == Kind::Accionable),
+        "{accionables:?}"
+    );
+    assert_eq!(
+        accionables
+            .iter()
+            .map(|f| f.line.as_str())
+            .collect::<Vec<_>>(),
+        ["1", "2"],
+        "se queda con las mas graves y, a igualdad, las primeras: {accionables:?}"
+    );
+
+    assert_eq!(
+        higiene.len(),
+        2,
+        "el cubo de higiene se trunca aparte, no contra las accionables: {higiene:?}"
+    );
+    assert!(
+        higiene.iter().all(|f| f.kind == Kind::Higiene),
+        "{higiene:?}"
+    );
+    assert_eq!(
+        higiene[0].rule_id, "SIN_TRY",
+        "el tope conserva lo mas grave del cubo: {higiene:?}"
+    );
+    assert_eq!(higiene[1].rule_id, "IF_SIN_ELSE");
+    assert_eq!(higiene[1].line, "10", "orden determinista dentro del cubo");
+
+    // Con tope amplio se ven los ocho: repartir no descarta ni duplica hallazgos.
+    let (todos_accionables, todos_higiene) = evaluate_split(&nodes, &collisions, &[], 0, 50);
+    assert_eq!(todos_accionables.len(), 3);
+    assert_eq!(
+        todos_higiene.len(),
+        5,
+        "cuatro evaluateIf sin else + un SIN_TRY: {todos_higiene:?}"
+    );
+
+    let mut repartidos = todos_accionables;
+    repartidos.extend(todos_higiene);
+    let completa = evaluate_with_limit(&nodes, &collisions, &[], 0, 50);
+    assert_eq!(
+        claves_ordenadas(&repartidos),
+        claves_ordenadas(&completa),
+        "el reparto es una particion de la misma evaluacion"
+    );
+}
+
+#[test]
+fn cada_hallazgo_hereda_el_kind_declarado_por_su_regla() {
+    // El `Vec` de reglas vive hasta el final del test: las claves del mapa son
+    // `&str` a sus ids.
+    let specs = rules::builtin_rules();
+    let por_id: BTreeMap<&str, Kind> = specs.iter().map(|r| (r.id.as_str(), r.kind)).collect();
+
+    let nodes = fixture_nodes();
+    let collisions = tree::collisions(&nodes);
+    let unused = vec!["sobra".to_string()];
+    let (accionables, higiene) = evaluate_split(&nodes, &collisions, &unused, 1, 50);
+    let sin_try = flat(json!([node("log_message", "1", "ok")]));
+    let (sin_try_accionables, sin_try_higiene) =
+        evaluate_split(&sin_try, &BTreeMap::new(), &[], 0, 50);
+
+    let todos: Vec<&Finding> = accionables
+        .iter()
+        .chain(higiene.iter())
+        .chain(sin_try_accionables.iter())
+        .chain(sin_try_higiene.iter())
+        .collect();
+    assert_eq!(
+        todos.len(),
+        accionables.len() + higiene.len() + sin_try_accionables.len() + sin_try_higiene.len(),
+        "no se pierde ningun hallazgo al repartir"
+    );
+    assert!(!todos.is_empty(), "las evaluaciones producen hallazgos");
+    for finding in todos {
+        let esperado = por_id
+            .get(finding.rule_id.as_str())
+            .unwrap_or_else(|| panic!("regla desconocida: {}", finding.rule_id));
+        assert_eq!(
+            *esperado, finding.kind,
+            "{} acabo en el cubo {:?}",
+            finding.rule_id, finding.kind
+        );
+    }
 }
