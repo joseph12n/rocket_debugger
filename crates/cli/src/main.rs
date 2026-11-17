@@ -104,14 +104,19 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Etiqueta de la db sin ruta absoluta: `BBRE2\robot_run.db`.
+///
+/// Se normalizan las dos formas de separador a proposito: `Path` solo reconoce
+/// `\` en Windows, y con la implementacion ingenua la funcion devolvia la ruta
+/// absoluta completa cuando se compilaba en Linux (lo detecto CI).
 fn db_label(path: &Path) -> String {
-    let file = path
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "robot.db".to_string());
-    match path.parent().and_then(|p| p.file_name()) {
-        Some(dir) => format!("{}\\{}", dir.to_string_lossy(), file),
-        None => file,
+    let normalizado = path.to_string_lossy().replace('\\', "/");
+    let mut partes: Vec<&str> = normalizado.split('/').filter(|p| !p.is_empty()).collect();
+    let Some(file) = partes.pop() else {
+        return "robot.db".to_string();
+    };
+    match partes.pop() {
+        Some(dir) => format!("{dir}\\{file}"),
+        None => file.to_string(),
     }
 }
 
@@ -121,7 +126,15 @@ mod tests {
 
     #[test]
     fn la_etiqueta_no_filtra_la_ruta_absoluta() {
-        let p = Path::new(r"C:\Users\josep\proyecto\entrega\robot_run.db");
-        assert_eq!(db_label(p), "entrega\\robot_run.db");
+        assert_eq!(
+            db_label(Path::new(r"C:\Users\josep\proyecto\entrega\robot_run.db")),
+            "entrega\\robot_run.db"
+        );
+        // La misma ruta en forma posix: el resultado no puede depender del host.
+        assert_eq!(
+            db_label(Path::new("/home/josep/proyecto/entrega/robot_run.db")),
+            "entrega\\robot_run.db"
+        );
+        assert_eq!(db_label(Path::new("robot.db")), "robot.db");
     }
 }
