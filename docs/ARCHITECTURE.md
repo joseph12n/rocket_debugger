@@ -1,0 +1,88 @@
+# Arquitectura
+
+## Que es y que no es
+
+Es el **motor de deteccion** y el **suministro de contexto** para depurar flujos de Rocketbot.
+No es un IDE ni un editor visual: nunca escribe `robot.db`. Todo cambio en un robot pasa por el
+agente; esta herramienta detecta, propone y muestra el diff.
+
+## Capas
+
+```
+robot.db (N dbs) ──┐
+logs/*.log ────────┤→ motor ──┬→ render markdown  ← lo que lee el agente
+catalogo comandos ─┘          ├→ daemon local (HTTP/WS)  ← lo que pinta la UI
+                              └→ fachada MCP  ← intenciones, no datos
+```
+
+| Capa | Crate | Responsabilidad |
+|---|---|---|
+| Motor | `rocketdebug-core` | parseo, arbol, indice de versiones, reglas, render |
+| CLI | `rocketdebug-cli` | inspeccion manual y debug del motor |
+| Daemon | *(pendiente)* | vigilancia de logs y `robot.db`, servidor local |
+| UI | *(pendiente)* | Tauri: canvas, heatmap, diff, inbox de hallazgos |
+| MCP | *(pendiente)* | 5-6 tools de alto nivel para el agente |
+
+## Decisiones y su motivo
+
+### `serde_json::Value` en vez de structs
+
+El formato de `bots.data` **no esta documentado** y puede cambiar entre versiones de Rocketbot.
+Un campo nuevo se ignora, uno que desaparece no rompe nada. El coste es perder seguridad de tipos,
+que se compensa con tests sobre fixtures y el test de integracion contra datos reales.
+
+### `id` como direccion, `line` como etiqueta
+
+El `id` de cada nodo coincide con el `cmd_id` que el runner escribe en el log: es la unica union
+fiable entre ejecucion y codigo.
+
+`line` **no es unico**. Medido: 34 lineas duplicadas en 13 de 28 robots. En `ML_06_Legacy` el `try`
+y el `catch` comparten `2.1`, `2.2`, `2.3`. Cualquier herramienta que direccione por linea — incluido
+un `edit` por linea — puede tocar el nodo equivocado. El motor lo detecta y el render lo avisa.
+
+### La atribucion es temporal
+
+Rocketbot no escribe en el log que version se ejecuto. Pero `bots` es un historial: una fila por
+guardado, con `created_at`. El intervalo de vida de cada version es reconstruible:
+
+```
+snapshot_vivo(t) = argmax { created_at <= t }
+```
+
+Caso real: `ML_06_Legacy` fallaba con `NameError: contador` entre 12:49:22 y 12:50:28, cuando estaba
+vivo v25/v26. El robot actual es v29 y el error ya no existe. Comparar el nodo contra el snapshot
+actual **no** lo detecta: el fix fue anadir un nodo *antes*, sin tocar el nodo que fallaba.
+
+### `preserve_order` en serde_json
+
+Los parametros conservan el orden en que los escribio Studio. Con orden alfabetico, un reordenamiento
+de claves al re-guardar aparece como ruido en el diff entre versiones.
+
+### Deduplicacion por hash de contenido
+
+El mismo robot aparece copiado en varias dbs de entrega (`robot_run.db` y
+`entrega_corregida/robot_run.db`). Sin dedupe, el workspace de 28 robots se cuenta como 50 y las
+metricas mienten.
+
+## Restricciones del entorno real
+
+- `max_executions: 1` en la licencia y un unico ChromeDriver. La app debe ser **broker de ejecucion**
+  (cola + mutex), no un espectador: si el agente ejecuta mientras Studio esta abierto, el resultado es
+  `SessionNotCreatedException: Chrome failed to start: crashed`.
+- Cada guardado crea un snapshot nuevo: **el undo del agente es gratis**. El diff y el rollback se
+  construyen sobre datos que ya existen.
+- Ruido de motor: buena parte de los `ERROR` del log son `zdev`/`getbot` (fallos del propio Rocketbot,
+  no del robot). Sin clasificarlos, el panel esta siempre en rojo y se deja de mirar.
+
+## Presupuesto de contexto
+
+Medido sobre 28 robots reales:
+
+| | tokens |
+|---|---|
+| JSON crudo (pretty) | 102.052 |
+| render | 16.326 |
+| uno solo (el mas grande) | 1.827 |
+
+Objetivo de diseno: **un robot en <= 2,5k tokens**, para que un agente pueda tener el workspace
+entero en contexto y diagnosticar sin pedir el flujo crudo.

@@ -1,0 +1,58 @@
+{
+  "project": {
+    "commands": [
+      {
+        "father": "setVar",
+        "command": "\"cafe\"",
+        "group": "system",
+        "id": "bbbbbbbb-0000-0000-0000-000000000001",
+        "line": 1,
+        "var": "busqueda",
+        "children": [],
+        "else": []
+      },
+      {
+        "father": "execRocketBotDB",
+        "command": "hijo_web",
+        "group": "scripts",
+        "id": "bbbbbbbb-0000-0000-0000-000000000002",
+        "line": 2,
+        "children": [],
+        "else": []
+      },
+      {
+        "father": "execRocketBotDB",
+        "command": "hijo_excel",
+        "group": "scripts",
+        "id": "bbbbbbbb-0000-0000-0000-000000000003",
+        "line": 3,
+        "children": [],
+        "else": []
+      }
+    ],
+    "vars": [
+      {
+        "name": "busqueda",
+        "data": null,
+        "type": "string"
+      },
+      {
+        "name": "ruta_salida",
+        "data": "C:/salida/reporte.xlsx",
+        "type": "string"
+      },
+      {
+        "name": "destinatario",
+        "data": null,
+        "type": "string"
+      }
+    ],
+    "profile": {
+      "name": "orchestrator",
+      "description": "Orquestador que llama subrobots"
+    },
+    "ifs": [],
+    "modules": [],
+    "expose": {}
+  }
+}
