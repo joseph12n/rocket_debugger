@@ -26,6 +26,7 @@ pub mod db;
 pub mod error;
 pub mod pack;
 pub mod render;
+pub mod rules;
 pub mod tree;
 pub mod versions;
 

@@ -1,0 +1,51 @@
+[
+  {
+    "id": "LINEA_COLISION",
+    "severity": "alta",
+    "scope": "linea",
+    "when": "dos o mas nodos comparten la misma etiqueta de linea",
+    "fix": "direcciona por id, no por linea; si hay que editar por linea, renumera antes el robot"
+  },
+  {
+    "id": "CATCH_VACIO",
+    "severity": "alta",
+    "scope": "nodo",
+    "when": "un trycatch no tiene ningun nodo en la rama else",
+    "fix": "anade en el else un log_message con {rocketbot_last_status} y la accion de recuperacion"
+  },
+  {
+    "id": "SIN_TRY",
+    "severity": "media",
+    "scope": "robot",
+    "when": "el robot no contiene ningun trycatch",
+    "fix": "envuelve el bloque principal en un trycatch y registra el error en el else"
+  },
+  {
+    "id": "IF_SIN_ELSE",
+    "severity": "baja",
+    "scope": "nodo",
+    "when": "un evaluateIf no tiene rama else",
+    "fix": "anade la rama else o invierte la condicion si la ruta alternativa importa"
+  },
+  {
+    "id": "RUTA_ABSOLUTA",
+    "severity": "media",
+    "scope": "nodo",
+    "when": "los parametros contienen una ruta con letra de unidad (C:\\ o C:/)",
+    "fix": "usa %base_path% para que el robot sea portable entre maquinas"
+  },
+  {
+    "id": "ANIDAMIENTO",
+    "severity": "media",
+    "scope": "robot",
+    "when": "la profundidad del arbol llega a 4 niveles",
+    "fix": "extrae el bloque interno a un subrobot con execRocketBotDB"
+  },
+  {
+    "id": "VAR_NO_USADA",
+    "severity": "baja",
+    "scope": "variable",
+    "when": "una variable declarada no se lee en el robot ni en los subrobots que llama",
+    "fix": "elimina la variable o usala; si es una salida, exponla en el profile"
+  }
+]
