@@ -25,6 +25,7 @@ use crate::Settings;
 pub const LIST_ROBOTS: &str = "list_robots";
 pub const FLOW_PACK: &str = "flow_pack";
 pub const ROBOT_ERRORS: &str = "robot_errors";
+pub const FLOW_DIFF: &str = "flow_diff";
 
 /// Resultado de una tool, ya listo para el `result` de JSON-RPC.
 #[derive(Debug, Clone)]
@@ -108,6 +109,30 @@ pub fn descriptors() -> Value {
                     &["robot"],
                 ),
             },
+            {
+                "name": FLOW_DIFF,
+                "description": "Diff estructural entre dos snapshots del mismo robot, emparejando \
+                                por id de nodo. Responde 'que cambio entre la v26 y la v27': es lo \
+                                que cierra un diagnostico cuando ya se sabe que fallo pero no que se \
+                                toco para arreglarlo.",
+                "inputSchema": object_schema(
+                    json!({
+                        "robot": robot_property(),
+                        "from": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "bots.id del snapshot anterior.",
+                        },
+                        "to": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "bots.id del snapshot nuevo.",
+                        },
+                        "db": db_property(),
+                    }),
+                    &["robot", "from", "to"],
+                ),
+            },
         ]
     })
 }
@@ -157,6 +182,7 @@ fn dispatch(name: &str, arguments: &Value, settings: &Settings) -> Result<ToolOu
         LIST_ROBOTS => list_robots(arguments, settings),
         FLOW_PACK => flow_pack(arguments, settings),
         ROBOT_ERRORS => robot_errors(arguments, settings),
+        FLOW_DIFF => flow_diff(arguments, settings),
         other => Err(CallError::InvalidParams(format!(
             "tool desconocida: `{other}`"
         ))),
@@ -190,6 +216,55 @@ fn flow_pack(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallE
             &source, &db_path,
         ))),
     }
+}
+
+/// `flow_diff`: que cambio entre dos snapshots.
+///
+/// Es la tool que cierra el circulo del diagnostico: el pack dice que falla y
+/// donde; el diff dice que se toco entre la version que fallaba y la siguiente.
+fn flow_diff(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
+    let args = Args::new(arguments)?;
+    let robot = args.required_str("robot")?;
+    let db_path = resolve_db(args.opt_str("db")?, settings);
+    let from = args.opt_i64("from")?.ok_or_else(|| {
+        CallError::InvalidParams("falta `from` (bots.id del snapshot anterior)".to_string())
+    })?;
+    let to = args.opt_i64("to")?.ok_or_else(|| {
+        CallError::InvalidParams("falta `to` (bots.id del snapshot nuevo)".to_string())
+    })?;
+
+    match diff_markdown(&db_path, &robot, from, to) {
+        Ok(texto) => Ok(ToolOutput::ok(texto)),
+        Err(source) => Ok(ToolOutput::business_error(describe_failure(
+            &source, &db_path,
+        ))),
+    }
+}
+
+fn diff_markdown(db_path: &Path, robot: &str, from: i64, to: i64) -> Result<String, Error> {
+    let antes = nodes_of(db_path, robot, from)?;
+    let despues = nodes_of(db_path, robot, to)?;
+    Ok(rocketdebug_core::render::render_changes(
+        &rocketdebug_core::diff::diff_nodes(&antes, &despues),
+    ))
+}
+
+/// Nodos de un snapshot concreto. Abre su propia conexion para no arrastrar
+/// `rusqlite` como dependencia del crate: la fachada solo conoce el motor.
+fn nodes_of(
+    db_path: &Path,
+    robot: &str,
+    snapshot: i64,
+) -> Result<Vec<rocketdebug_core::tree::FlatNode>, Error> {
+    let conn = db::open_readonly(db_path)?;
+    let snap = db::load_snapshot(&conn, robot, snapshot)?;
+    let root = db::project_root(&snap.project);
+    let commands = root
+        .get("commands")
+        .and_then(Value::as_array)
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
+    Ok(rocketdebug_core::tree::flatten(commands))
 }
 
 /// `robot_errors`: solo la seccion de errores del pack.
@@ -534,10 +609,16 @@ mod tests {
     }
 
     #[test]
-    fn el_catalogo_declara_las_tres_tools_con_schema() {
+    fn el_catalogo_declara_las_cuatro_tools_con_schema() {
         let catalogo = descriptors();
         let tools = catalogo["tools"].as_array().expect("array de tools");
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 4);
+        let nombres: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert_eq!(
+            nombres,
+            vec![LIST_ROBOTS, FLOW_PACK, ROBOT_ERRORS, FLOW_DIFF],
+            "el orden del catalogo es el que ve el agente"
+        );
         for tool in tools {
             assert_eq!(tool["inputSchema"]["type"], "object");
             assert!(tool["inputSchema"]["properties"].is_object());

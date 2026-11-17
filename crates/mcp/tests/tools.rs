@@ -23,6 +23,55 @@ fn call(settings: &Settings, id: i64, tool: &str, args: Value) -> Value {
 }
 
 #[test]
+fn flow_diff_dice_que_cambio_entre_dos_snapshots() {
+    let tmp = TempDir::new("diff");
+    let antes = proyecto_con_comando("1");
+    let despues = proyecto_con_comando("2");
+    let db = make_db(
+        tmp.path(),
+        "demo",
+        &[
+            (1, "2026-11-17 10:00:00", antes.as_str()),
+            (2, "2026-11-17 11:00:00", despues.as_str()),
+        ],
+    );
+
+    let respuesta = call(
+        &Settings::hermetic(),
+        1,
+        "flow_diff",
+        json!({"robot": "demo", "db": db, "from": 1, "to": 2}),
+    );
+    assert!(!is_error(&respuesta), "{respuesta}");
+    let texto = tool_text(&respuesta);
+    assert!(texto.contains("1 cambiado"), "resumen del diff:\n{texto}");
+    assert!(texto.contains("~ L1 setVar"), "linea del cambio:\n{texto}");
+
+    // El mismo snapshot contra si mismo no inventa cambios.
+    let igual = call(
+        &Settings::hermetic(),
+        2,
+        "flow_diff",
+        json!({"robot": "demo", "db": db, "from": 1, "to": 1}),
+    );
+    assert!(
+        tool_text(&igual).contains("sin cambios"),
+        "{}",
+        tool_text(&igual)
+    );
+}
+
+/// Un proyecto de un solo nodo estable (`id` fijo) con el comando variable: es lo
+/// minimo para que el diff vea `Changed` y no `Added` + `Removed`.
+fn proyecto_con_comando(cmd: &str) -> String {
+    format!(
+        r#"{{"project":{{"commands":[{{"father":"setVar","command":"{cmd}","group":"system",
+        "id":"nodo-fijo","line":1,"var":"x","children":[],"else":[]}}],"vars":[],
+        "profile":{{"name":"demo"}}}}}}"#
+    )
+}
+
+#[test]
 fn list_robots_dice_que_db_leyo_y_que_robots_tiene() {
     let tmp = TempDir::new("list");
     let proyecto = demo_project();
@@ -138,15 +187,16 @@ fn un_robot_inexistente_es_error_de_negocio_y_el_servidor_sigue() {
     );
 
     // La linea siguiente se sigue atendiendo: el fallo no envenena el servidor.
+    // No se fija el numero de tools a proposito: lo que se prueba aqui es que el
+    // servidor sigue vivo, no el catalogo (para eso esta el test del catalogo).
     let linea = common::request(2, "tools/list", json!({}));
     let siguiente = parse_response(
         &handle_line_with(&linea, &Settings::hermetic()).expect("tools/list responde"),
     );
-    assert_eq!(
-        siguiente["result"]["tools"].as_array().map(Vec::len),
-        Some(3),
-        "{siguiente}"
-    );
+    let tools = siguiente["result"]["tools"]
+        .as_array()
+        .expect("tools es un array");
+    assert!(!tools.is_empty(), "{siguiente}");
 }
 
 #[test]
@@ -263,9 +313,11 @@ fn el_proceso_sobrevive_a_un_robot_inexistente_y_sigue_hablando() {
     );
 
     let listado = parse_response(lineas[2]);
-    assert_eq!(
-        listado["result"]["tools"].as_array().map(Vec::len),
-        Some(3),
+    let tools = listado["result"]["tools"]
+        .as_array()
+        .expect("tools es un array");
+    assert!(
+        !tools.is_empty(),
         "el proceso sigue atendiendo despues del fallo: {listado}"
     );
 }
