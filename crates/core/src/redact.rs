@@ -17,6 +17,17 @@
 //! que hace falta para entender el flujo, asi que solo entran los terminos que de
 //! verdad nombran credenciales. `usuario`, `user`, `contador` o `url` se quedan
 //! fuera a proposito: saber a quien apunta una peticion es parte del diagnostico.
+//!
+//! # Por que tambien las rutas
+//!
+//! `docs/CONTEXT_PACK.md` promete que el pack no lleva rutas absolutas del
+//! usuario, y hasta ahora eso solo se cumplia en los parametros de los comandos:
+//! `project.vars` publicaba tal cual un
+//! `chrome_profile = C:/Users/<usuario>/Downloads/perfil_chrome`. Una ruta local
+//! no ayuda a diagnosticar —el agente razona sobre el flujo, no sobre el disco de
+//! quien lo ejecuto— y ademas identifica a la persona, asi que se sustituye por
+//! `(ruta)`. La deteccion es estrecha a proposito: una URL o una ruta relativa se
+//! conservan porque ahi si hay informacion util.
 
 /// Firma de Fernet: Rocketbot cifra asi lo que guarda en `project.vars`.
 const FERNET_PREFIX: &str = "gAAAAA";
@@ -50,6 +61,9 @@ pub const ENCRYPTED_MARK: &str = "(valor cifrado)";
 
 /// Marcador de un valor oculto por el nombre de su variable.
 pub const HIDDEN_MARK: &str = "(oculto)";
+
+/// Marcador de un valor que es una ruta absoluta del equipo del usuario.
+pub const PATH_MARK: &str = "(ruta)";
 
 /// Detecta un blob Fernet sin validarlo de verdad: basta con que sea plausible.
 /// Si un texto normal empieza por `gAAAAA` y sigue en el alfabeto base64,
@@ -105,11 +119,136 @@ fn strip_separators(s: &str) -> String {
     s.chars().filter(|c| !is_separator(*c)).collect()
 }
 
+/// Raices POSIX que en la practica solo aparecen como ruta absoluta del usuario:
+/// nadie escribe `/home/...` para referirse a una carpeta relativa del proyecto.
+const POSIX_ROOTS: [&str; 6] = ["/home/", "/Users/", "/var/", "/tmp/", "/etc/", "/opt/"];
+
+/// Separador de esquema URL: lo que sigue a `://` es una direccion, no el disco.
+const URL_SEP: &str = "://";
+
+/// UNC de Windows: `\\servidor\recurso`.
+const UNC_PREFIX: &str = r"\\";
+
+/// `true` si el valor lleva una ruta absoluta del sistema. Las URLs y las rutas
+/// relativas quedan fuera a proposito: `https://x` y `reporte.xlsx` son datos de
+/// diagnostico, no ubicaciones de la maquina de quien ejecuto el robot.
+pub fn is_absolute_path(value: &str) -> bool {
+    let v = value.trim();
+    if v.is_empty() {
+        return false;
+    }
+    // Los tramos de URL se calculan una sola vez: `file:///C:/x` contiene `C:/`
+    // y aun asi no es una ruta del usuario.
+    let urls = url_spans(v);
+    has_windows_drive(v, &urls) || has_unc(v) || has_posix_root(v, &urls)
+}
+
+/// Tramos que ocupa cada URL (`esquema://resto`) dentro del valor. El resto del
+/// texto puede ser una ruta aunque comparta cadena con ellas.
+fn url_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut from = 0;
+    while let Some(sep) = find_from(text, URL_SEP, from) {
+        let start = text[..sep]
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| is_scheme_char(*c))
+            .last()
+            .map_or(sep, |(i, _)| i);
+        let body = sep + URL_SEP.len();
+        let end = text[body..]
+            .char_indices()
+            .find(|(_, c)| is_url_stop(*c))
+            .map_or(text.len(), |(i, _)| body + i);
+        spans.push((start, end));
+        // `body` garantiza avance aunque la URL se corte justo tras `://`.
+        from = end.max(body);
+    }
+    spans
+}
+
+fn find_from(text: &str, needle: &str, from: usize) -> Option<usize> {
+    text.get(from..)?.find(needle).map(|i| from + i)
+}
+
+/// Caracteres que puede llevar un esquema (`https`, `file`, `git+ssh`).
+fn is_scheme_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')
+}
+
+/// Un caracter que corta la URL: a partir de ahi empieza otro token del valor.
+fn is_url_stop(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(
+            c,
+            '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';'
+        )
+}
+
+fn inside_any(spans: &[(usize, usize)], at: usize) -> bool {
+    spans.iter().any(|&(start, end)| (start..end).contains(&at))
+}
+
+/// Unidad Windows (`C:\`, `C:/`). La letra no puede continuar un esquema: en
+/// `https://` la `s` va delante de `:` y el patron la confundiria con una unidad,
+/// que es justo el falso positivo que hay que evitar. Tampoco cuenta si cae
+/// dentro de una URL ya abierta (`file:///C:/x`).
+fn has_windows_drive(text: &str, urls: &[(usize, usize)]) -> bool {
+    text.as_bytes().windows(3).enumerate().any(|(i, w)| {
+        w[0].is_ascii_alphabetic()
+            && w[1] == b':'
+            && matches!(w[2], b'\\' | b'/')
+            && !continues_scheme(text, i)
+            && !inside_any(urls, i)
+    })
+}
+
+fn continues_scheme(text: &str, at: usize) -> bool {
+    text[..at].chars().next_back().is_some_and(is_scheme_char)
+}
+
+/// UNC (`\\servidor\recurso`), al principio del valor o embebida en una
+/// expresion (`copia en \\srv\share\datos`). Se exige que el servidor no este
+/// vacio y que vuelva a aparecer un separador: `\\` suelto es un escape, no una
+/// ruta.
+fn has_unc(text: &str) -> bool {
+    if text.starts_with(UNC_PREFIX) {
+        return true;
+    }
+    text.match_indices(UNC_PREFIX).any(|(at, _)| {
+        let rest = &text[at + UNC_PREFIX.len()..];
+        rest.find('\\').is_some_and(|sep| {
+            sep > 0
+                && !rest[..sep]
+                    .chars()
+                    .any(|c| c.is_whitespace() || matches!(c, '"' | '\''))
+        })
+    })
+}
+
+/// Raiz POSIX conocida. Se exige que abra token: en `carpeta/home/x` el prefijo
+/// aparece, pero la ruta es relativa y se conserva.
+fn has_posix_root(text: &str, urls: &[(usize, usize)]) -> bool {
+    POSIX_ROOTS.iter().any(|root| {
+        text.match_indices(root)
+            .any(|(at, _)| !inside_any(urls, at) && opens_token(text, at))
+    })
+}
+
+fn opens_token(text: &str, at: usize) -> bool {
+    let prev = text[..at].chars().next_back();
+    prev.is_none()
+        || prev.is_some_and(|c| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+}
+
 /// Valor listo para el pack. `None` cuando no hay nada que mostrar: el render lo
 /// pinta como `(sin valor inicial)`, igual que antes de redactar.
 ///
-/// El cifrado manda sobre el nombre: si el valor esta cifrado se dice que lo
-/// esta, aunque la variable se llame `destinatario` y no parezca sensible.
+/// El orden de las reglas es el contrato. El cifrado manda sobre todo lo demas:
+/// un blob no se explica por su nombre ni por su forma. El nombre manda sobre la
+/// ruta: si la variable se llama `db_password`, decir `(ruta)` solo confirmaria
+/// que la credencial apunta a una ruta. Y el valor normal se conserva: redactar
+/// no puede cegar el diagnostico.
 pub fn redacted_value(name: &str, value: &str) -> Option<String> {
     if value.trim().is_empty() {
         return None;
@@ -119,6 +258,9 @@ pub fn redacted_value(name: &str, value: &str) -> Option<String> {
     }
     if is_sensitive_name(name) {
         return Some(HIDDEN_MARK.to_string());
+    }
+    if is_absolute_path(value) {
+        return Some(PATH_MARK.to_string());
     }
     // Se devuelve el original sin recortar: el render ya normaliza y corta.
     Some(value.to_string())
@@ -224,6 +366,99 @@ mod tests {
         assert_eq!(
             redacted_value("url", "https://x").as_deref(),
             Some("https://x")
+        );
+    }
+
+    #[test]
+    fn detecta_las_rutas_absolutas_del_usuario() {
+        for value in [
+            // El hallazgo real de `reporteMercadolibre`.
+            "C:/Users/josep/Downloads/perfil_chrome",
+            r"C:\Users\josep\Downloads\perfil_chrome",
+            r"C:\Users\josep\x",
+            "C:/Users/josep/x",
+            r"\\srv\share",
+            r"\\srv\share\sub\datos",
+            "/home/user/x",
+            "/Users/user/x",
+            "/var/log/rocketbot.log",
+            "/tmp/x",
+            "/etc/hosts",
+            "/opt/app/bin/x",
+        ] {
+            assert!(is_absolute_path(value), "deberia ser ruta: {value}");
+        }
+        // Una expresion puede empezar por la ruta y seguir con mas codigo.
+        assert!(is_absolute_path(r#""C:/Users/josep/a" + fecha"#));
+        // UNC embebida tras otro texto.
+        assert!(is_absolute_path(r"copia en \\srv\share\datos"));
+    }
+
+    #[test]
+    fn no_confunde_urls_ni_rutas_relativas_con_una_ruta() {
+        for value in [
+            "https://mi-sitio.com/x",
+            "http://ejemplo.test/api",
+            "https://x",
+            "ftp://host/x",
+            // Contiene `C:/`, pero dentro de un esquema: no es una ruta.
+            "file:///C:/Users/josep/x",
+            // El prefijo POSIX aparece, pero la ruta es relativa.
+            "carpeta/sub/x.txt",
+            "carpeta/home/x.txt",
+            // Una URL puede llevar `/home/` sin ser un path del disco.
+            "https://ejemplo.test/home/usuario",
+            "reporte_ml.xlsx",
+            "operador1",
+            "",
+            "   ",
+        ] {
+            assert!(!is_absolute_path(value), "no deberia ser ruta: {value}");
+        }
+    }
+
+    #[test]
+    fn la_ruta_absoluta_se_marca_y_lo_demas_se_conserva() {
+        assert_eq!(
+            redacted_value("chrome_profile", "C:/Users/josep/Downloads/perfil_chrome").as_deref(),
+            Some("(ruta)")
+        );
+        assert_eq!(
+            redacted_value("carpeta_salida", r"C:\Users\josep\Downloads").as_deref(),
+            Some("(ruta)")
+        );
+        assert_eq!(
+            redacted_value("ruta_salida", r#""C:/Users/josep/a" + fecha"#).as_deref(),
+            Some("(ruta)"),
+            "una expresion que empieza por una ruta tambien la filtra"
+        );
+        assert_eq!(
+            redacted_value("reporte", "reporte_ml.xlsx").as_deref(),
+            Some("reporte_ml.xlsx"),
+            "una ruta relativa es parte del flujo y se conserva"
+        );
+        assert_eq!(
+            redacted_value("url", "https://x").as_deref(),
+            Some("https://x"),
+            "una URL no identifica al usuario y se conserva"
+        );
+    }
+
+    #[test]
+    fn el_nombre_sensible_gana_a_la_ruta() {
+        // El orden de las reglas es el contrato: con `(ruta)` el pack diria que
+        // la credencial es una ruta, y eso es informacion de mas.
+        assert_eq!(
+            redacted_value("db_password", "C:/Users/josep/x").as_deref(),
+            Some("(oculto)")
+        );
+    }
+
+    #[test]
+    fn el_cifrado_gana_a_la_ruta() {
+        assert_eq!(
+            redacted_value("ruta_respaldo", CIFRADO).as_deref(),
+            Some("(valor cifrado)")
         );
     }
 
