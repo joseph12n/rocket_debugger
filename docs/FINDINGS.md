@@ -101,3 +101,30 @@ reales.
 - La proyeccion a 300 comandos es lineal, no medida.
 - Las reglas encontraron defectos pero **no se arreglo ninguno**: falta cerrar el ciclo
   detectar → agente → diff → verificar.
+
+## Verificación en el motor (fase 1)
+
+Lo anterior se midió con el prototipo en Python. Esto es lo que mide el motor en Rust sobre los mismos
+datos, ya con todas las secciones cableadas:
+
+| Métrica | Valor |
+|---|---|
+| Robots inspeccionados (3 dbs, con copias) | 39 |
+| Hallazgos accionables | 70 (58 colisiones de línea + 12 rutas absolutas) |
+| Hallazgos de higiene | 66 (28 `IF_SIN_ELSE`, 22 `SIN_TRY`, 14 `VAR_NO_USADA`, 2 `ANIDAMIENTO`) |
+| Accionables por robot afectado | 2,7 |
+| Ocultos por el tope | 0 |
+| `ML_06_Legacy` | 1.128 tokens (8,2x sobre el JSON crudo) |
+| `reporteMercadolibre` (86 vars) | 1.812 tokens (5,6x) |
+
+### Corrección al informe de fase 0
+
+El informe original atribuía a `ML_06_Legacy` errores «vivos». Con la atribución temporal cableada, el
+motor dice **0 vivos / 5 históricos / 1 de ruido**, y es lo correcto: la v29 se guardó a las 12:59:37 y
+el último error registrado del robot es de las 12:55:30, así que **todo su log precede a la versión
+actual**. El `NameError` de `contador` aparece como histórico de la v25/v26, que es exactamente lo que
+el caso de estudio pedía demostrar.
+
+Los números de fase 0 (28 robots, 102.052 tokens crudos, 6,3x) se mantienen como referencia del
+prototipo; los de esta tabla son los del motor y no son directamente comparables, porque el render
+actual tiene seis secciones y el de fase 0 tenía cuatro.

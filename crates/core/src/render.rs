@@ -505,6 +505,50 @@ mod tests {
         assert_eq!(clip("código", 3), "cód...");
     }
 
+    /// El tope tiene que avisar de lo que deja fuera: el silencio hacia creer que
+    /// lo mostrado era todo (issue #13). Se prueba el cubo directamente porque
+    /// montar un `Pack` con siete hallazgos reales exigiria un robot de siete
+    /// colisiones, y lo que se valida aqui es el formato del aviso.
+    #[test]
+    fn el_tope_avisa_de_los_hallazgos_que_quedan_fuera() {
+        let hallazgo = |i: usize| Finding {
+            rule_id: format!("REGLA_{i}"),
+            severity: Severity::Alta,
+            kind: crate::rules::Kind::Accionable,
+            line: (i + 1).to_string(),
+            message: "mensaje".to_string(),
+            fix: "arreglo".to_string(),
+        };
+
+        let muchos: Vec<Finding> = (0..MAX_PER_SECTION + 2).map(hallazgo).collect();
+        let mut o = String::new();
+        render_bucket(&mut o, "Hallazgos", &muchos);
+        assert!(
+            o.contains(&format!(
+                "## Hallazgos ({} de {}:",
+                MAX_PER_SECTION,
+                muchos.len()
+            )),
+            "la cabecera debe declarar el total real:\n{o}"
+        );
+        assert!(
+            o.contains(&format!("… y {} mas", muchos.len() - MAX_PER_SECTION)),
+            "falta la linea de cierre:\n{o}"
+        );
+
+        // Sin recorte no se inventa un aviso.
+        let pocos: Vec<Finding> = (0..2).map(hallazgo).collect();
+        let mut o2 = String::new();
+        render_bucket(&mut o2, "Hallazgos", &pocos);
+        assert!(o2.contains("## Hallazgos (2:"), "{o2}");
+        assert!(!o2.contains("mas"), "sin recorte no hay aviso:\n{o2}");
+
+        // Un cubo vacio no pinta seccion: ensenaria a saltarsela.
+        let mut o3 = String::new();
+        render_bucket(&mut o3, "Higiene", &[]);
+        assert!(o3.is_empty(), "{o3}");
+    }
+
     #[test]
     fn la_vista_previa_de_variables_es_acotada_y_legible() {
         assert_eq!(vars_preview(&[]), "(nada)");
