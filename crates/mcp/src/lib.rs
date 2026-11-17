@@ -11,12 +11,20 @@
 //! tools de logs sueltos, ni de versiones, ni de comandos: cada una seria una
 //! puerta abierta a un volcado de 10.000 lineas.
 //!
-//! # Transporte
+//! # Transportes
 //!
-//! stdio, JSON-RPC 2.0 y **un documento JSON por linea** (una peticion por
-//! linea, una respuesta por linea). No se usa el framing `Content-Length` de
-//! LSP: el cliente escribe lineas y un prefijo de longitud solo anade una forma
-//! de desincronizarse.
+//! Dos transportes, un solo despacho:
+//!
+//! - **stdio**: JSON-RPC 2.0 y **un documento JSON por linea** (una peticion por
+//!   linea, una respuesta por linea). No se usa el framing `Content-Length` de
+//!   LSP: el cliente escribe lineas y un prefijo de longitud solo anade una forma
+//!   de desincronizarse.
+//! - **HTTP/1.1 local** ([`serve`]): la app sera el servidor de una sola
+//!   instancia y el agente el cliente que se conecta a `127.0.0.1`. HTTP minimo
+//!   sobre `std::net`, sin `keep-alive` ni dependencias nuevas.
+//!
+//! Los dos acaban en [`handle_line_with`], asi que la misma linea produce la
+//! misma respuesta por cualquiera de ellos.
 //!
 //! # Despacho separado de la E/S
 //!
@@ -37,8 +45,11 @@ use rocketdebug_core::db;
 use rocketdebug_core::logs;
 use rocketdebug_core::pack::DEFAULT_LOG_FILES;
 
+mod http;
 mod protocol;
 mod tools;
+
+pub use http::{serve, MAX_BODY_BYTES};
 
 /// Entorno que el servidor resuelve **una vez** al arrancar, no en cada peticion.
 ///
