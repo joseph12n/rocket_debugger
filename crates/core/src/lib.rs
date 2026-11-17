@@ -24,8 +24,10 @@
 
 pub mod db;
 pub mod error;
+pub mod logs;
 pub mod pack;
 pub mod render;
+pub mod signature;
 pub mod tree;
 pub mod versions;
 
