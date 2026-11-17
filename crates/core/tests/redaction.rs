@@ -117,3 +117,40 @@ fn las_variables_de_flujo_no_se_redactan_por_nombre() {
     assert!(md.contains("- contador = 7"), "{md}");
     assert!(!md.contains("(oculto)"), "{md}");
 }
+
+#[test]
+fn el_render_no_filtra_rutas_absolutas_del_usuario() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let json = robot_con_vars(serde_json::json!([
+        // El caso real: el perfil de Chrome que usa el robot.
+        {"name": "chrome_profile", "data": "C:/Users/josep/Downloads/perfil_chrome"},
+        {"name": "carpeta_salida", "data": r"C:\Users\josep\Downloads\reportes"},
+        {"name": "reporte", "data": "reporte_ml.xlsx"},
+        {"name": "url", "data": "https://ejemplo.test/api"}
+    ]));
+    let pack = pack_de(tmp.path(), &json);
+    let md = pack.render_markdown();
+
+    // La promesa de `docs/CONTEXT_PACK.md`: ni una ruta del usuario en el pack.
+    assert!(
+        !md.contains("C:/Users"),
+        "ruta con barra normal filtrada:\n{md}"
+    );
+    assert!(
+        !md.contains(r"C:\Users"),
+        "ruta con barra invertida filtrada:\n{md}"
+    );
+    assert!(
+        !md.contains("josep"),
+        "el nombre del usuario no debe salir:\n{md}"
+    );
+
+    // Y redactar no puede cegar el flujo: el marcador y los valores normales
+    // siguen ahi.
+    assert!(md.contains("(ruta)"), "falta el marcador de ruta:\n{md}");
+    assert!(md.contains("- chrome_profile = (ruta)"), "{md}");
+    assert!(md.contains("- carpeta_salida = (ruta)"), "{md}");
+    assert!(md.contains("reporte_ml.xlsx"), "{md}");
+    assert!(md.contains("https://ejemplo.test/api"), "{md}");
+    assert_eq!(pack.vars[0].value.as_deref(), Some("(ruta)"));
+}
