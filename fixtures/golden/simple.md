@@ -2,6 +2,9 @@
 > Fixture minimo del motor
 db: test\robot.db | nodos 3 | vars 1 | prof 1
 
+## Hallazgos (1: 0 alta / 1 media / 0 baja)
+- [media] L- SIN_TRY — el robot no tiene ningun trycatch: un error corta el flujo sin registro ni recuperacion → envuelve el bloque principal en un trycatch y registra el error en el else
+
 ## Variables (1)
 - saludo = (sin valor inicial)
 
