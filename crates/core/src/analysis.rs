@@ -23,6 +23,23 @@
 //! Por eso se aplanan las ultimas versiones de toda la db, no solo la del robot
 //! pedido.
 //!
+//! # Workspace: varias dbs y dedupe por contenido
+//!
+//! Una sola db no basta para juzgar una llamada: `execRocketBotDB` resuelve el
+//! nombre contra la db del padre, pero el robot puede vivir en otra db del
+//! workspace (una entrega corregida, el sandbox). Con una sola db el grafo no
+//! distingue "no existe" de "no lo veo", asi que [`Analysis::ambiguous_calls`]
+//! salia siempre vacia y una llamada a un robot inexistente se perdia en silencio
+//! (issue #12), que es justo lo que fallaria en runtime. [`analyse_with_workspace`]
+//! carga los hechos de todas las dbs y [`Analysis::missing_calls`] recoge las
+//! llamadas cuyo destino no esta en ninguna.
+//!
+//! El mismo robot esta copiado en varias dbs de entrega, asi que [`load_workspace`]
+//! deduplica por contenido: medido en el workspace real, 31 filas son 20 robots
+//! distintos y sin dedupe se cuentan 11 robots de mas, con sus contratos
+//! duplicados. La db analizada va primera para que el hecho del robot pedido
+//! conserve su etiqueta.
+//!
 //! # Limite conocido
 //!
 //! El analisis describe el **ultimo** snapshot de cada robot, mientras que el pack
@@ -71,12 +88,21 @@ pub struct Analysis {
     pub unused_declared: Vec<String>,
     /// Llamadas cuyo hijo no se puede resolver con certeza, como `"padre -> hijo"`.
     ///
-    /// [`analyse`] construye los hechos con una sola db, asi que hoy esta lista
-    /// sale vacia: [`graph::build_edges`] solo marca [`Edge::ambiguous`] cuando el
-    /// nombre existe **solo** en otra db, y para saberlo hacen falta los hechos de
-    /// esa otra db. El campo existe para que el consumidor (UI, daemon multi-db)
-    /// no cambie de forma cuando el grafo se alimente con varias.
+    /// Se llena cuando el nombre existe **solo** fuera de la db del padre
+    /// ([`Edge::ambiguous`]): el runner lo buscaria en su propia db, asi que la
+    /// arista es la mejor conjetura y no una certeza. Con una sola db de hechos no
+    /// hay forma de saberlo y la lista queda vacia; [`analyse_with_workspace`] es
+    /// quien la puede llenar.
     pub ambiguous_calls: Vec<String>,
+    /// Llamadas cuyo destino no existe en **ninguna** db del workspace, como
+    /// `"padre L2.3 -> hijo"`.
+    ///
+    /// [`graph::build_edges`] las omite porque sin los hechos del hijo no hay
+    /// contrato que calcular, y por eso una llamada a un robot inexistente se
+    /// perdia en silencio: en runtime el runner no resuelve el nombre y el padre
+    /// falla. La linea es la del nodo de llamada en el padre, que es lo unico que
+    /// permite localizarla.
+    pub missing_calls: Vec<String>,
     /// Errores del log del robot, ya clasificados y agrupados por firma.
     ///
     /// Vacio cuando no se pidieron logs: el analisis del codigo no depende de que
@@ -179,13 +205,53 @@ pub fn analyse_with_logs(
     robot: &str,
     logs: Option<(&Path, usize)>,
 ) -> Result<Analysis> {
-    let facts = load_facts(conn, db_label, robot)?;
+    analyse_with_workspace(&[(conn, db_label)], db_label, robot, logs)
+}
+
+/// Analiza un robot con los hechos de **todas** las dbs del workspace.
+///
+/// `conns` son las bases abiertas en solo lectura y su etiqueta (sin ruta
+/// absoluta); `db_label` marca cual es la db del robot analizado, que debe estar
+/// en la lista: es de donde salen sus nodos y, si se piden, sus logs.
+///
+/// La db pedida se procesa primero. Si el robot esta copiado en varias dbs, el
+/// hecho que sobrevive al dedupe conserva su etiqueta, y las demas quedan en
+/// [`RobotFacts::also_in`], que es lo que permite resolver las aristas que el
+/// runner resolveria en la db del padre.
+///
+/// Devuelve [`Error::RobotNotFound`] si el robot no esta en `db_label` —aunque
+/// exista en otra db del workspace— o si no se puede leer de ella: el pack de un
+/// robot que no se puede decodificar es una mentira, no un pack degradado.
+pub fn analyse_with_workspace(
+    conns: &[(&rusqlite::Connection, &str)],
+    db_label: &str,
+    robot: &str,
+    logs: Option<(&Path, usize)>,
+) -> Result<Analysis> {
+    // La db pedida primero: el dedupe conserva la primera aparicion, asi que el
+    // hecho del robot analizado lleva la etiqueta de la db que el consumidor pidio.
+    let mut ordered: Vec<(&rusqlite::Connection, &str)> = Vec::with_capacity(conns.len());
+    ordered.extend(
+        conns
+            .iter()
+            .copied()
+            .filter(|(_, label)| *label == db_label),
+    );
+    ordered.extend(
+        conns
+            .iter()
+            .copied()
+            .filter(|(_, label)| *label != db_label),
+    );
+
+    let facts = load_workspace_of(&ordered, Some((db_label, robot)))?;
     let edges = graph::build_edges(&facts);
     let all_contracts = graph::contracts(&facts, &edges);
 
+    // Un homonimo de otra db es otro hecho: se busca el que vive en la db pedida.
     let this = facts
         .iter()
-        .find(|fact| fact.name == robot)
+        .find(|fact| fact.name == robot && fact.lives_in(db_label))
         .ok_or_else(|| Error::RobotNotFound(robot.to_string()))?;
 
     // `unused_declared` devuelve un mapa por robot y omite los que no tienen
@@ -204,23 +270,37 @@ pub fn analyse_with_logs(
         usize::MAX,
     );
 
-    let mut contracts_out = Vec::new();
-    let mut contracts_in = Vec::new();
-    for contract in &all_contracts {
-        // Un robot puede llamarse a si mismo (bucle de reintento): entonces el
-        // contrato es de ida y vuelta y aparece en las dos listas.
-        if contract.parent == robot {
-            contracts_out.push(contract.clone());
-        }
-        if contract.child == robot {
-            contracts_in.push(contract.clone());
-        }
-    }
+    // Los contratos se recalculan sobre las aristas de **este** hecho: las de un
+    // homologo con contenido distinto no son suyas y presentarlas juntas haria que
+    // el pack de un robot hablara de las llamadas de otro.
+    let own_edges: Vec<Edge> = edges
+        .iter()
+        .filter(|edge| edge.parent == this.name && this.lives_in(&edge.parent_db))
+        .cloned()
+        .collect();
+    let contracts_out = graph::contracts(&facts, &own_edges);
+    let inbound_edges: Vec<Edge> = edges
+        .iter()
+        .filter(|edge| edge.child == this.name && this.lives_in(&edge.child_db))
+        .cloned()
+        .collect();
+    let contracts_in = graph::contracts(&facts, &inbound_edges);
 
-    // Los logs se leen despues de `load_facts`: si el robot no existe, el error
-    // tiene que ser el de siempre y no el de un directorio de logs ausente.
+    // Los logs se leen despues de cargar los hechos: si el robot no existe, el
+    // error tiene que ser el de siempre y no el de un directorio de logs ausente.
     let errors = match logs {
-        Some((dir, max_files)) => errors_for(conn, robot, dir, max_files)?,
+        Some((dir, max_files)) => {
+            // La db pedida esta en `conns` por construccion: el robot se encontro en
+            // ella, luego alguna conexion lleva esa etiqueta.
+            let Some(analysed) = conns
+                .iter()
+                .find(|(_, label)| *label == db_label)
+                .map(|(conn, _)| *conn)
+            else {
+                return Err(Error::RobotNotFound(robot.to_string()));
+            };
+            errors_for(analysed, robot, dir, max_files)?
+        }
         None => ErrorReport::default(),
     };
 
@@ -230,7 +310,8 @@ pub fn analyse_with_logs(
         contracts_out,
         contracts_in,
         unused_declared,
-        ambiguous_calls: ambiguous_calls(&edges, robot),
+        ambiguous_calls: ambiguous_calls(&edges, this),
+        missing_calls: missing_call_labels(&graph::missing_calls(&facts), this),
         errors,
     })
 }
@@ -454,53 +535,164 @@ fn sorted(cubo: BTreeMap<String, ErrorItem>) -> Vec<ErrorItem> {
     out
 }
 
-/// Extrae los hechos (nodos + declaradas) del **ultimo** snapshot de cada robot.
+/// Carga los hechos del ultimo snapshot de cada robot de cada db, deduplicando
+/// por contenido: el mismo robot esta copiado en `robot_run.db` y
+/// `entrega_corregida/robot_run.db`, y sin dedupe un workspace de 28 robots se
+/// cuenta como 50 (medido en el real: 31 filas -> 20 robots distintos).
 ///
-/// `load_snapshots` decodifica todas las versiones porque no hay consulta que
-/// pida solo la ultima; con las dbs reales (decenas de versiones, cientos de KB)
-/// es barato y evita una segunda forma de leer `bots` que se desincronice cuando
+/// La clave es `(nombre, hash del raw_b64)`. Dos homonimos con contenido distinto
+/// son dos hechos y se conservan: la db del padre decide cual resuelve el runner y
+/// el consumidor necesita ver los dos. El mismo contenido bajo el mismo nombre es
+/// el mismo robot copiado: se queda un hecho y las demas etiquetas van a
+/// [`RobotFacts::also_in`], porque el runner busca el nombre en la db del padre y
+/// una copia descartada no puede convertir una arista en ambigua. El nombre va en
+/// la clave porque dos robots distintos con el mismo contenido (un renombrado)
+/// siguen siendo dos nombres en el grafo: colapsarlos haria que las llamadas al
+/// nombre descartado parecieran inexistentes.
+///
+/// El hash es el mismo `blake3` del `raw_b64` que usa
+/// [`crate::versions::VersionInfo::hash`], sin recortar: aqui no se muestra, solo
+/// se compara.
+pub fn load_workspace(dbs: &[(&rusqlite::Connection, &str)]) -> Result<Vec<RobotFacts>> {
+    load_workspace_of(dbs, None)
+}
+
+/// [`load_workspace`] con una db y un robot que el consumidor **exige**.
+///
+/// `required` es `(etiqueta_db, robot)`. De esa db el robot no puede faltar
+/// ([`Error::RobotNotFound`]) ni fallar al decodificar (el error se propaga): es la
+/// diferencia entre un pack degradado y un pack que miente. En las demas dbs un
+/// robot ilegible solo se omite, porque como mucho hara que falte su contrato.
+fn load_workspace_of(
+    dbs: &[(&rusqlite::Connection, &str)],
+    required: Option<(&str, &str)>,
+) -> Result<Vec<RobotFacts>> {
+    let mut facts: Vec<RobotFacts> = Vec::new();
+    let mut seen: BTreeMap<(String, String), usize> = BTreeMap::new();
+
+    for (conn, label) in dbs {
+        let strict = required
+            .filter(|(db_label, _)| db_label == label)
+            .map(|(_, robot)| robot);
+        for (fact, hash) in load_db_facts(conn, label, strict)? {
+            let key = (fact.name.clone(), hash);
+            match seen.get(&key).copied() {
+                Some(idx) => {
+                    // Copia identica en otra db: el hecho ya existe y solo se
+                    // anota donde mas vive.
+                    let kept = &mut facts[idx];
+                    if !kept.lives_in(label) {
+                        kept.also_in.push((*label).to_string());
+                    }
+                }
+                None => {
+                    seen.insert(key, facts.len());
+                    facts.push(fact);
+                }
+            }
+        }
+    }
+
+    // Sin conexion con la etiqueta pedida no se puede haber encontrado el robot.
+    if let Some((db_label, robot)) = required {
+        if !facts
+            .iter()
+            .any(|fact| fact.name == robot && fact.lives_in(db_label))
+        {
+            return Err(Error::RobotNotFound(robot.to_string()));
+        }
+    }
+
+    Ok(facts)
+}
+
+/// Hechos del **ultimo** snapshot de cada robot de una db, con el hash del
+/// contenido que usa el dedupe.
+///
+/// `load_snapshots` decodifica todas las versiones porque no hay consulta que pida
+/// solo la ultima; con las dbs reales (decenas de versiones, cientos de KB) es
+/// barato y evita una segunda forma de leer `bots` que se desincronice cuando
 /// cambie el formato. Cuando llegue el daemon, esto se cachea por (db, robot).
-fn load_facts(conn: &rusqlite::Connection, db_label: &str, robot: &str) -> Result<Vec<RobotFacts>> {
-    let mut facts = Vec::new();
+fn load_db_facts(
+    conn: &rusqlite::Connection,
+    db_label: &str,
+    required: Option<&str>,
+) -> Result<Vec<(RobotFacts, String)>> {
+    let mut out = Vec::new();
 
     for summary in db::list_robots(conn)? {
         let snaps = match db::load_snapshots(conn, &summary.name) {
             Ok(snaps) => snaps,
-            // Ver doc de `analyse`: omite el resto, propaga el del robot pedido.
-            Err(_) if summary.name != robot => continue,
+            // Ver doc de `analyse_with_workspace`: omite el resto, propaga el del
+            // robot exigido.
+            Err(_) if Some(summary.name.as_str()) != required => continue,
             Err(e) => return Err(e),
         };
         let Some(snap) = snaps.last() else {
             continue;
         };
         let root = db::project_root(&snap.project);
-        facts.push(RobotFacts {
-            db: db_label.to_string(),
-            name: summary.name.clone(),
-            nodes: tree::flatten(commands_of(root)),
-            declared: declared_of(root),
-        });
+        out.push((
+            RobotFacts {
+                db: db_label.to_string(),
+                also_in: Vec::new(),
+                name: summary.name.clone(),
+                nodes: tree::flatten(commands_of(root)),
+                declared: declared_of(root),
+            },
+            content_hash(&snap.raw_b64),
+        ));
     }
 
-    if !facts.iter().any(|fact| fact.name == robot) {
-        return Err(Error::RobotNotFound(robot.to_string()));
+    if let Some(robot) = required {
+        if !out.iter().any(|(fact, _)| fact.name == robot) {
+            return Err(Error::RobotNotFound(robot.to_string()));
+        }
     }
-    Ok(facts)
+    Ok(out)
+}
+
+/// Hash del contenido de un snapshot: `blake3` del base64 tal cual esta en `bots`.
+///
+/// Se usa el base64 y no el JSON decodificado por la misma razon que
+/// [`crate::versions::VersionInfo::hash`]: es lo que se copia entre dbs de entrega
+/// y no depende de como se re-serialice el JSON.
+fn content_hash(raw_b64: &str) -> String {
+    blake3::hash(raw_b64.as_bytes()).to_hex().to_string()
 }
 
 /// Aristas ambiguas del robot, ya formateadas para el consumidor.
 ///
 /// Se deduplican porque un hijo homologo en dos dbs ajenas genera una arista por
-/// db y el agente solo necesita saber que la llamada no esta resuelta aqui.
-fn ambiguous_calls(edges: &[Edge], robot: &str) -> Vec<String> {
+/// db y el agente solo necesita saber que la llamada no esta resuelta aqui. El
+/// filtro es por hecho (`db` o copia), no solo por nombre: las llamadas de un
+/// homonimo de otra db no son las de este robot.
+fn ambiguous_calls(edges: &[Edge], this: &RobotFacts) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for edge in edges {
-        if !edge.ambiguous || edge.parent != robot {
+        if !edge.ambiguous || edge.parent != this.name || !this.lives_in(&edge.parent_db) {
             continue;
         }
         let call = format!("{} -> {}", edge.parent, edge.child);
         if !out.contains(&call) {
             out.push(call);
+        }
+    }
+    out
+}
+
+/// Llamadas sin destino del robot, con la linea para que el aviso sea accionable.
+///
+/// Mismo criterio que [`ambiguous_calls`]: solo las de este hecho, sin repetir.
+fn missing_call_labels(calls: &[graph::MissingCall], this: &RobotFacts) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for call in calls {
+        if call.parent != this.name || !this.lives_in(&call.parent_db) {
+            continue;
+        }
+        let label = format!("{} L{} -> {}", call.parent, call.line, call.child);
+        if !out.contains(&label) {
+            out.push(label);
         }
     }
     out
@@ -546,6 +738,16 @@ mod tests {
         }
     }
 
+    fn hecho(db: &str, name: &str) -> RobotFacts {
+        RobotFacts {
+            db: db.to_string(),
+            also_in: Vec::new(),
+            name: name.to_string(),
+            nodes: Vec::new(),
+            declared: BTreeSet::new(),
+        }
+    }
+
     #[test]
     fn solo_las_aristas_ambiguas_del_padre_pedido() {
         let edges = vec![
@@ -557,11 +759,66 @@ mod tests {
         ];
 
         assert_eq!(
-            ambiguous_calls(&edges, "orq"),
+            ambiguous_calls(&edges, &hecho("A", "orq")),
             vec!["orq -> fantasma".to_string()],
             "sin duplicados y sin las aristas de otros padres"
         );
-        assert!(ambiguous_calls(&edges, "nadie").is_empty());
+        assert!(ambiguous_calls(&edges, &hecho("A", "nadie")).is_empty());
+    }
+
+    #[test]
+    fn las_aristas_de_un_homonimo_de_otra_db_no_son_de_este_robot() {
+        // `orq` existe en A y en B con contenido distinto: son dos hechos. Las
+        // llamadas del de B no pueden aparecer en el analisis del de A.
+        let mut edges = vec![edge("orq", "fantasma", "B", true)];
+        edges[0].parent_db = "B".to_string();
+        edges.push(edge("orq", "comun", "C", true));
+
+        assert_eq!(
+            ambiguous_calls(&edges, &hecho("A", "orq")),
+            vec!["orq -> comun".to_string()],
+            "solo la arista cuyo padre es el hecho de A"
+        );
+
+        let mut copia = hecho("A", "orq");
+        copia.also_in = vec!["B".to_string()];
+        assert_eq!(
+            ambiguous_calls(&edges, &copia),
+            vec!["orq -> fantasma".to_string(), "orq -> comun".to_string()],
+            "una copia identica si es el mismo hecho en las dos dbs"
+        );
+    }
+
+    #[test]
+    fn las_llamadas_sin_destino_llevan_linea_y_no_se_repiten() {
+        let calls = vec![
+            graph::MissingCall {
+                parent: "orq".to_string(),
+                parent_db: "A".to_string(),
+                line: "4".to_string(),
+                child: "no_existe".to_string(),
+            },
+            // Misma linea repetida (Try/Catch comparten numeracion): un aviso.
+            graph::MissingCall {
+                parent: "orq".to_string(),
+                parent_db: "A".to_string(),
+                line: "4".to_string(),
+                child: "no_existe".to_string(),
+            },
+            graph::MissingCall {
+                parent: "otro".to_string(),
+                parent_db: "A".to_string(),
+                line: "2.1".to_string(),
+                child: "tampoco".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            missing_call_labels(&calls, &hecho("A", "orq")),
+            vec!["orq L4 -> no_existe".to_string()],
+            "con linea, sin duplicados y sin las llamadas de otros padres"
+        );
+        assert!(missing_call_labels(&calls, &hecho("A", "nadie")).is_empty());
     }
 
     #[test]

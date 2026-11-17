@@ -23,9 +23,19 @@
 //!
 //! Los robots que no existen en ninguna db **se omiten** en [`build_edges`]: un
 //! hijo que no esta no tiene contrato que analizar, y una arista a un nombre
-//! inexistente solo produciria `missing` falsos. Si el nombre solo existe en
-//! otras dbs la arista se emite con [`Edge::ambiguous`], porque en ese caso no se
-//! puede afirmar que sea el robot que resuelve el runner.
+//! inexistente solo produciria `missing` falsos. La llamada no se pierde: sale en
+//! [`missing_calls`], porque en runtime el runner no resuelve ese nombre y el
+//! padre falla. Si el nombre solo existe en otras dbs la arista se emite con
+//! [`Edge::ambiguous`], porque en ese caso no se puede afirmar que sea el robot
+//! que resuelve el runner.
+//!
+//! Un workspace son **varias dbs** y el mismo robot suele estar copiado en mas de
+//! una. `analysis::load_workspace` deduplica por contenido y guarda las etiquetas
+//! descartadas en [`RobotFacts::also_in`]: el runner busca el hijo en la db del
+//! padre, asi que una copia identica cuenta como "esta en la db del padre" aunque
+//! el hecho que sobrevive al dedupe lleve la etiqueta de otra db. Sin eso, una
+//! copia deduplicada pareceria un homologo ausente y marcaria la arista ambigua
+//! sin serlo.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -56,6 +66,14 @@ pub struct RobotFacts {
     /// Etiqueta de la db donde vive el robot. Distingue homologos: el mismo
     /// nombre puede existir en varias dbs con contenido distinto.
     pub db: String,
+    /// Otras dbs del workspace donde vive una copia **identica** de este robot.
+    ///
+    /// El dedupe por contenido deja un solo hecho, pero el runner resuelve el
+    /// nombre contra la db del padre: si esa db era la copia descartada, la
+    /// arista saldria ambigua sin serlo. Estas etiquetas son las que permiten
+    /// resolverla. Un homologo con contenido distinto **no** va aqui: es otro
+    /// hecho y se conserva aparte.
+    pub also_in: Vec<String>,
     pub name: String,
     pub nodes: Vec<FlatNode>,
     /// Variables del panel del robot (`project.vars`), no las que aparecen en el
@@ -64,14 +82,34 @@ pub struct RobotFacts {
     pub declared: BTreeSet<String>,
 }
 
+impl RobotFacts {
+    /// Etiquetas de db donde vive el hecho: la primaria primero y despues las
+    /// copias identicas. El orden importa para que la resolucion prefiera la db
+    /// del hecho y los listados sean deterministas.
+    pub fn db_labels(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.db.as_str()).chain(self.also_in.iter().map(String::as_str))
+    }
+
+    /// `true` si el hecho vive en esa db, como primaria o como copia identica.
+    ///
+    /// Es la pregunta del runner ("este nombre existe en mi db?") y no la del
+    /// dedupe ("cual es la etiqueta del hecho que quedo?"). Confundirlas marca
+    /// como ambigua una llamada que el runner resuelve sin problema.
+    pub fn lives_in(&self, db: &str) -> bool {
+        self.db == db || self.also_in.iter().any(|label| label == db)
+    }
+}
+
 /// Arista padre -> hijo, una por nodo `execRocketBotDB`.
 ///
 /// `line` es la linea del nodo de llamada **en el padre** (puede repetirse en
 /// robots con Try/Catch: `line` no es direccion unica).
 ///
 /// `same_db` es la resolucion preferente: el runner busca el nombre en la db del
-/// padre. `ambiguous` avisa de que solo habia homologos en otras dbs, asi que la
-/// arista es la mejor conjetura y el consumidor no debe tratarla como certeza.
+/// padre. Cuenta tambien una copia identica en esa db ([`RobotFacts::also_in`]),
+/// porque el contenido es el mismo y el nombre resuelve. `ambiguous` avisa de que
+/// solo habia homologos en otras dbs, asi que la arista es la mejor conjetura y
+/// el consumidor no debe tratarla como certeza.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Edge {
     pub parent: String,
@@ -204,10 +242,11 @@ fn is_before(a: &str, b: &str) -> bool {
 /// recortado de comillas (el selector de Studio lo guarda tal cual y algunos
 /// exports lo citan).
 ///
-/// Resolucion: se prefiere el homologo de la misma db; si solo existe en otras
-/// dbs se emite una arista por cada db candidata (ordenadas por etiqueta), todas
-/// marcadas [`Edge::ambiguous`]. Los nombres que no existen en ninguna db se
-/// omiten, y los `params` vacios no generan arista.
+/// Resolucion: se prefiere una db que el padre tambien vea (la suya, o una copia
+/// identica del hijo en ella, ver [`RobotFacts::also_in`]); si solo existe en dbs
+/// ajenas se emite una arista por cada homologo, todas marcadas [`Edge::ambiguous`]
+/// en orden de hechos. Los nombres que no existen en ninguna db no generan arista
+/// ([`missing_calls`] avisa de ellos) y los `params` vacios tampoco.
 pub fn build_edges(facts: &[RobotFacts]) -> Vec<Edge> {
     let mut edges = Vec::new();
 
@@ -220,47 +259,121 @@ pub fn build_edges(facts: &[RobotFacts]) -> Vec<Edge> {
                 continue;
             };
 
-            let mut dbs: Vec<&str> = facts
-                .iter()
-                .filter(|fact| fact.name == child)
-                .map(|fact| fact.db.as_str())
-                .collect();
-            // Orden determinista para que dos ejecuciones produzcan el mismo grafo.
-            dbs.sort_unstable();
-            dbs.dedup();
-            if dbs.is_empty() {
-                // Hijo inexistente: se omite (ver doc del modulo).
+            // Los hechos del hijo, no sus etiquetas: el dedupe deja un hecho por
+            // contenido y es `also_in` quien conserva las demas dbs.
+            let candidates: Vec<&RobotFacts> =
+                facts.iter().filter(|fact| fact.name == child).collect();
+            if candidates.is_empty() {
+                // Hijo inexistente: no hay contrato que calcular. [`missing_calls`]
+                // es quien avisa de la llamada (ver doc del modulo).
                 continue;
             }
 
-            if dbs.contains(&parent.db.as_str()) {
-                edges.push(Edge {
+            match shared_db(parent, &candidates) {
+                // El nombre existe en una db que el padre tambien ve: resolucion
+                // preferente, igual que hace el runner.
+                Some(db) => edges.push(Edge {
                     parent: parent.name.clone(),
                     child,
                     line: node.line.clone(),
                     parent_db: parent.db.clone(),
-                    child_db: parent.db.clone(),
+                    child_db: db,
                     same_db: true,
                     ambiguous: false,
-                });
-                continue;
-            }
-
-            for db in dbs {
-                edges.push(Edge {
-                    parent: parent.name.clone(),
-                    child: child.clone(),
-                    line: node.line.clone(),
-                    parent_db: parent.db.clone(),
-                    child_db: db.to_string(),
-                    same_db: false,
-                    ambiguous: true,
-                });
+                }),
+                None => {
+                    // Solo homologos en dbs ajenas: una arista por candidato, todas
+                    // marcadas `ambiguous` porque no se puede elegir.
+                    for fact in candidates {
+                        edges.push(Edge {
+                            parent: parent.name.clone(),
+                            child: child.clone(),
+                            line: node.line.clone(),
+                            parent_db: parent.db.clone(),
+                            child_db: fact.db.clone(),
+                            same_db: false,
+                            ambiguous: true,
+                        });
+                    }
+                }
             }
         }
     }
 
     edges
+}
+
+/// Db donde el padre encontraria al hijo, si comparten alguna.
+///
+/// La db del padre manda: es donde el runner busca el nombre. Si el hijo solo
+/// comparte una copia identica (dos dbs con la misma copia del padre), esa copia
+/// resuelve igual porque el contenido es el mismo. Sin db compartida devuelve
+/// `None`: solo hay homologos en otras dbs y la arista no se puede afirmar.
+fn shared_db(parent: &RobotFacts, candidates: &[&RobotFacts]) -> Option<String> {
+    if candidates.iter().any(|fact| fact.lives_in(&parent.db)) {
+        return Some(parent.db.clone());
+    }
+
+    // Cualquier otra db compartida, la menor por etiqueta para que dos
+    // ejecuciones produzcan el mismo grafo.
+    let mut shared: BTreeSet<&str> = BTreeSet::new();
+    for fact in candidates {
+        for db in fact.db_labels() {
+            if parent.lives_in(db) {
+                shared.insert(db);
+            }
+        }
+    }
+    shared.into_iter().next().map(str::to_string)
+}
+
+/// Llamada a un robot que no existe en ninguna db del workspace.
+///
+/// `line` es la linea del nodo de llamada **en el padre**, que es lo unico que
+/// permite localizarla: sin ella el aviso no se puede ni mirar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingCall {
+    pub parent: String,
+    pub parent_db: String,
+    pub line: String,
+    pub child: String,
+}
+
+/// Llamadas cuyo destino no existe en **ninguna** db del workspace.
+///
+/// [`build_edges`] las omite porque sin los hechos del hijo no hay contrato que
+/// calcular, y esa omision silenciosa era el punto ciego: en runtime el runner no
+/// resuelve el nombre y el padre falla. Se devuelven con la linea para que el
+/// aviso sea accionable y sin deduplicar (`line` no es unico en robots con
+/// Try/Catch: agrupar es decision del consumidor).
+pub fn missing_calls(facts: &[RobotFacts]) -> Vec<MissingCall> {
+    let mut out = Vec::new();
+
+    for parent in facts {
+        for node in &parent.nodes {
+            if node.cmd != "execRocketBotDB" {
+                continue;
+            }
+            let Some(child) = child_name(&node.params) else {
+                continue;
+            };
+            // Basta el nombre: el runner falla igual si el hijo no esta en su db,
+            // pero aqui la pregunta es si el robot existe en algun sitio del
+            // workspace. Si existe solo en otra db, la arista es ambigua, no
+            // inexistente.
+            if facts.iter().any(|fact| fact.name == child) {
+                continue;
+            }
+            out.push(MissingCall {
+                parent: parent.name.clone(),
+                parent_db: parent.db.clone(),
+                line: node.line.clone(),
+                child,
+            });
+        }
+    }
+
+    out
 }
 
 /// El nombre del hijo es el `params` recortado de comillas simples o dobles.
@@ -342,11 +455,19 @@ pub fn contracts(facts: &[RobotFacts], edges: &[Edge]) -> Vec<Contract> {
 ///
 /// La caida sirve cuando el consumidor reconstruye aristas a mano o cuando las
 /// etiquetas de db no coinciden literalmente; con homologos en varias dbs la
-/// resolucion exacta sigue ganando.
+/// resolucion exacta sigue ganando. Entre dos homologos gana el que **vive** en
+/// esa db (es el caso de una copia identica deduplicada, cuya etiqueta primaria es
+/// otra): sin ese paso, la caida por nombre podria devolver el homologo con
+/// contenido distinto y calcular su contrato.
 fn find_fact<'a>(facts: &'a [RobotFacts], db: &str, name: &str) -> Option<&'a RobotFacts> {
     facts
         .iter()
         .find(|fact| fact.db == db && fact.name == name)
+        .or_else(|| {
+            facts
+                .iter()
+                .find(|fact| fact.name == name && fact.lives_in(db))
+        })
         .or_else(|| facts.iter().find(|fact| fact.name == name))
 }
 
@@ -456,6 +577,7 @@ mod tests {
     fn hechos(db: &str, name: &str, declared: &[&str], nodes: Vec<FlatNode>) -> RobotFacts {
         RobotFacts {
             db: db.to_string(),
+            also_in: Vec::new(),
             name: name.to_string(),
             nodes,
             declared: declared.iter().map(|s| s.to_string()).collect(),
@@ -695,5 +817,110 @@ mod tests {
         let edges = build_edges(&[padre, hijo]);
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].child, "hijo");
+    }
+
+    #[test]
+    fn una_llamada_sin_destino_se_reporta_con_su_linea() {
+        let facts = vec![
+            hechos("A", "orq", &[], vec![llamada("4", "no_existe")]),
+            // Un robot mas para que el padre no sea el unico hecho de la db.
+            hechos("A", "otro", &[], vec![]),
+        ];
+
+        assert!(
+            build_edges(&facts).is_empty(),
+            "sin hechos del hijo no hay arista que analizar"
+        );
+
+        let faltan = missing_calls(&facts);
+        assert_eq!(faltan.len(), 1);
+        assert_eq!(faltan[0].parent, "orq");
+        assert_eq!(faltan[0].parent_db, "A");
+        assert_eq!(faltan[0].line, "4");
+        assert_eq!(faltan[0].child, "no_existe");
+    }
+
+    #[test]
+    fn una_llamada_resuelta_no_es_un_destino_perdido() {
+        let facts = vec![
+            hechos(
+                "A",
+                "orq",
+                &[],
+                vec![llamada("1", "hijo"), llamada("2", "hijo")],
+            ),
+            hechos("B", "hijo", &[], vec![]),
+        ];
+
+        // Existe en otra db: dos llamadas, dos aristas ambiguas, ninguna perdida.
+        let edges = build_edges(&facts);
+        assert_eq!(edges.len(), 2);
+        assert!(edges.iter().all(|edge| edge.ambiguous));
+        assert!(
+            missing_calls(&facts).is_empty(),
+            "el nombre existe en el workspace: no se puede avisar de inexistente"
+        );
+    }
+
+    #[test]
+    fn una_copia_identica_en_otra_db_resuelve_en_la_db_del_padre() {
+        // El dedupe deja un solo hecho, con la etiqueta de la db B, pero la copia
+        // A es identica: el padre vive en A y el runner resolveria el nombre alli.
+        let padre = hechos("A", "orq", &[], vec![llamada("2", "hijo")]);
+        let mut hijo = hechos("B", "hijo", &[], vec![]);
+        hijo.also_in = vec!["A".to_string()];
+
+        let edges = build_edges(&[padre, hijo]);
+        assert_eq!(edges.len(), 1);
+        assert!(
+            edges[0].same_db && !edges[0].ambiguous,
+            "una copia identica en la db del padre no es ambiguedad: {:?}",
+            edges[0]
+        );
+        assert_eq!(edges[0].child_db, "A");
+    }
+
+    #[test]
+    fn el_contrato_usa_el_homologo_que_vive_en_esa_db() {
+        // `hijo` existe dos veces: una copia identica de A que tambien esta en C
+        // (la db del padre) y un homologo distinto en B. El contrato tiene que
+        // salir de la copia que el runner encontraria en C, no de la primera que
+        // aparezca en la lista.
+        let padre = hechos("C", "orq", &[], vec![llamada("2", "hijo")]);
+        let homologo = hechos(
+            "B",
+            "hijo",
+            &[],
+            vec![nodo("1", "log_message", "{de_b}", None)],
+        );
+        let mut copia = hechos(
+            "A",
+            "hijo",
+            &[],
+            vec![nodo("1", "log_message", "{de_a}", None)],
+        );
+        copia.also_in = vec!["C".to_string()];
+
+        let facts = vec![padre, homologo, copia];
+        let cs = contracts(&facts, &build_edges(&facts));
+        assert_eq!(cs.len(), 1);
+        assert_eq!(
+            cs[0].missing,
+            vec!["de_a".to_string()],
+            "el contrato de la copia que vive en C, no el del homologo de B"
+        );
+    }
+
+    #[test]
+    fn la_etiqueta_de_un_hecho_incluye_sus_copias() {
+        let mut hecho = hechos("B", "hijo", &[], vec![]);
+        hecho.also_in = vec!["A".to_string(), "C".to_string()];
+
+        assert_eq!(hecho.db_labels().collect::<Vec<_>>(), ["B", "A", "C"]);
+        assert!(hecho.lives_in("A") && hecho.lives_in("B") && hecho.lives_in("C"));
+        assert!(
+            !hecho.lives_in("D"),
+            "una db sin copia no resuelve el nombre"
+        );
     }
 }
