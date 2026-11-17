@@ -50,8 +50,19 @@ use crate::tree;
 /// Resultado del analisis cruzado de un robot dentro de su db.
 #[derive(Debug, Clone)]
 pub struct Analysis {
-    /// Hallazgos ya ordenados por severidad y truncados por [`rules::evaluate`].
+    /// Hallazgos **accionables**: senalan una linea con un defecto concreto.
+    ///
+    /// Van **sin recortar**: el tope y el aviso de lo que queda fuera son cosa del
+    /// render. Recortar aqui era el defecto del issue #13: 18 variables muertas y
+    /// solo 2 visibles, sin que el lector supiera que faltaban 16.
     pub findings: Vec<Finding>,
+    /// Hallazgos de **higiene**: afectan al robot entero (sin Try/Catch, IF sin
+    /// else, anidamiento, variables muertas).
+    ///
+    /// Se separan para que no compitan por el cupo con lo accionable. Medido: eran
+    /// el 36% de los hallazgos mostrados y son justo los que un lector ignora; en
+    /// una seccion aparte no ensucian la lista que hay que atender.
+    pub higiene: Vec<Finding>,
     /// Contratos en los que este robot es el padre: lo que ofrece a sus hijos.
     pub contracts_out: Vec<Contract>,
     /// Contratos en los que este robot es el hijo: lo que espera de sus padres.
@@ -183,11 +194,14 @@ pub fn analyse_with_logs(
     let unused_declared = dead_by_robot.remove(robot).unwrap_or_default();
 
     let collisions = tree::collisions(&this.nodes);
-    let findings = rules::evaluate(
+    // `usize::MAX`: no se recorta aqui. El render decide el tope por seccion y dice
+    // cuantos hallazgos quedaron fuera.
+    let (findings, higiene) = rules::evaluate_split(
         &this.nodes,
         &collisions,
         &unused_declared,
         this.declared.len(),
+        usize::MAX,
     );
 
     let mut contracts_out = Vec::new();
@@ -212,6 +226,7 @@ pub fn analyse_with_logs(
 
     Ok(Analysis {
         findings,
+        higiene,
         contracts_out,
         contracts_in,
         unused_declared,

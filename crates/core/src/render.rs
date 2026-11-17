@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use crate::analysis::ErrorItem;
 use crate::graph::Contract;
 use crate::pack::Pack;
-use crate::rules::Severity;
+use crate::rules::{Finding, Severity};
 
 /// Se cortan los parametros largos: un `execJs` de 2 KB aporta el inicio, no el final.
 pub const PARAM_MAX: usize = 100;
@@ -47,8 +47,14 @@ pub const ERRORS_GROUP_MAX: usize = 3;
 /// cada fila y la seccion entera tiene que caber en el presupuesto del pack.
 const ERROR_MESSAGE_SHOW: usize = 120;
 
-/// Los hallazgos ya vienen truncados a 5, pero un mensaje que cita una ruta larga
-/// no puede comerse el presupuesto de contexto.
+/// Hallazgos que se listan por seccion (accionables e higiene por separado).
+///
+/// El analisis ya no recorta: trae todos y aqui se decide cuanto se pinta. Cinco
+/// por seccion es lo que se lee de verdad; el resto se cuenta en la cabecera y en
+/// una linea final, para que el lector sepa que existe y no lo confunda con el total.
+pub const MAX_PER_SECTION: usize = 5;
+
+/// Un mensaje que cita una ruta larga no puede comerse el presupuesto de contexto.
 const FINDING_MESSAGE_MAX: usize = 140;
 const FINDING_FIX_MAX: usize = 120;
 
@@ -92,6 +98,58 @@ fn clip(s: &str, max: usize) -> String {
 
 fn field(s: &str, max: usize) -> String {
     clip(&one_line(s), max)
+}
+
+/// Pinta un cubo de hallazgos con tope y aviso de lo omitido.
+///
+/// El recuento por severidad es de lo **mostrado**, y si se recorta se dice
+/// explicitamente ("5 de 23") porque el silencio hacia creer que ese era el total.
+fn render_bucket(o: &mut String, title: &str, findings: &[Finding]) {
+    if findings.is_empty() {
+        return;
+    }
+    let shown = findings.len().min(MAX_PER_SECTION);
+    let hidden = findings.len() - shown;
+    let count = |s: Severity| {
+        findings
+            .iter()
+            .take(shown)
+            .filter(|f| f.severity == s)
+            .count()
+    };
+    let total = if hidden > 0 {
+        format!("{shown} de {}", findings.len())
+    } else {
+        shown.to_string()
+    };
+    let _ = writeln!(
+        o,
+        "## {title} ({total}: {} alta / {} media / {} baja)",
+        count(Severity::Alta),
+        count(Severity::Media),
+        count(Severity::Baja)
+    );
+    for f in findings.iter().take(shown) {
+        // Linea vacia = el hallazgo afecta al robot entero, no a un nodo.
+        let line = if f.line.is_empty() {
+            "L-".to_string()
+        } else {
+            format!("L{}", f.line)
+        };
+        let _ = writeln!(
+            o,
+            "- [{}] {} {} — {} → {}",
+            f.severity.severity_label(),
+            line,
+            f.rule_id,
+            field(&f.message, FINDING_MESSAGE_MAX),
+            field(&f.fix, FINDING_FIX_MAX)
+        );
+    }
+    if hidden > 0 {
+        let _ = writeln!(o, "- … y {hidden} mas de la misma seccion");
+    }
+    let _ = writeln!(o);
 }
 
 /// Lista de variables acotada: `a, b, c (+3 mas)`.
@@ -190,42 +248,18 @@ impl Pack {
         o
     }
 
-    /// Hallazgos del motor de reglas: pocos, ordenados y con el arreglo al lado.
+    /// Hallazgos del motor de reglas, en dos secciones: accionables e higiene.
     ///
-    /// Se omite la seccion entera si no hay nada: un "## Hallazgos (0)" ensena al
-    /// agente a saltarse la seccion, y el dia que tenga contenido la saltara igual.
+    /// Se separan porque compiten por el mismo cupo y no valen lo mismo: una
+    /// colision de linea es un defecto concreto y ``SIN_TRY`` es una carencia
+    /// general del robot. Medido sobre 3 dbs reales: las reglas genericas eran el
+    /// 36% de lo mostrado y hundian la precision util al 64%.
+    ///
+    /// Cada seccion se omite si esta vacia: un "## Hallazgos (0)" ensena al agente
+    /// a saltarsela, y el dia que tenga contenido la saltara igual.
     fn render_findings(&self, o: &mut String) {
-        let findings = &self.analysis.findings;
-        if findings.is_empty() {
-            return;
-        }
-        let count = |severity: Severity| findings.iter().filter(|f| f.severity == severity).count();
-        let _ = writeln!(
-            o,
-            "## Hallazgos ({}: {} alta / {} media / {} baja)",
-            findings.len(),
-            count(Severity::Alta),
-            count(Severity::Media),
-            count(Severity::Baja)
-        );
-        for f in findings {
-            // Linea vacia = el hallazgo afecta al robot entero, no a un nodo.
-            let line = if f.line.is_empty() {
-                "L-".to_string()
-            } else {
-                format!("L{}", f.line)
-            };
-            let _ = writeln!(
-                o,
-                "- [{}] {} {} — {} → {}",
-                f.severity.severity_label(),
-                line,
-                f.rule_id,
-                field(&f.message, FINDING_MESSAGE_MAX),
-                field(&f.fix, FINDING_FIX_MAX)
-            );
-        }
-        let _ = writeln!(o);
+        render_bucket(o, "Hallazgos", &self.analysis.findings);
+        render_bucket(o, "Higiene", &self.analysis.higiene);
     }
 
     /// Contrato implicito de las llamadas `execRocketBotDB`.

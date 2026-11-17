@@ -47,6 +47,6 @@ pub mod versions;
 
 pub use analysis::{analyse, Analysis};
 pub use error::{Error, Result};
-pub use pack::{build_from_conn, Pack, VarInfo};
+pub use pack::{build_from_conn, build_from_conn_with_logs, Pack, VarInfo};
 pub use render::{estimate_tokens, Sizing};
 pub use versions::{VersionIndex, VersionInfo};

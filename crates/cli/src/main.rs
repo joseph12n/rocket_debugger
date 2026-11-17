@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use rocketdebug_core::{build_from_conn, db};
+use rocketdebug_core::{build_from_conn_with_logs, db, logs};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -81,7 +81,14 @@ fn main() -> anyhow::Result<()> {
             let conn = db::open_readonly(&db_path)
                 .with_context(|| format!("abriendo {}", db_path.display()))?;
             let label = db_label(&db_path);
-            let pack = build_from_conn(&conn, &robot, snapshot, &label)?;
+            // Los logs son responsabilidad del CLI, no del motor: asi la suite de
+            // tests del crate core queda hermética y este binario sigue leyendo el
+            // entorno real cuando existe.
+            let logs_dir = std::path::Path::new(logs::DEFAULT_LOGS_DIR);
+            let log_source = logs_dir
+                .is_dir()
+                .then_some((logs_dir, rocketdebug_core::pack::DEFAULT_LOG_FILES));
+            let pack = build_from_conn_with_logs(&conn, &robot, snapshot, &label, log_source)?;
             let md = pack.render_markdown();
             print!("{md}");
 

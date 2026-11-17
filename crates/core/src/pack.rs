@@ -13,7 +13,6 @@ use serde_json::Value;
 use crate::analysis::{self, Analysis};
 use crate::db::{self, Snapshot};
 use crate::error::Result;
-use crate::logs;
 use crate::redact;
 use crate::render::{estimate_tokens, Sizing};
 use crate::tree::{self, FlatNode};
@@ -72,7 +71,11 @@ impl Pack {
 /// Medido en el entorno real: el directorio pesa ~6,6 MB repartidos en 13
 /// ficheros, y con los 20 mas recientes entran todas las ejecuciones recientes sin
 /// que el pack dependa de logs de semanas atras.
-const DEFAULT_LOG_FILES: usize = 20;
+/// Ficheros de log que se leen por defecto al construir un pack con logs.
+///
+/// Vive aqui y no en el CLI para que la politica (cuantos dias atras mira el motor)
+/// sea una sola: 20 ficheros cubren la semana de trabajo normal sin recorrer meses.
+pub const DEFAULT_LOG_FILES: usize = 20;
 
 /// Construye el pack del snapshot indicado (por defecto, el ultimo).
 ///
@@ -86,6 +89,24 @@ pub fn build_from_conn(
     snapshot: Option<i64>,
     db_label: &str,
 ) -> Result<Pack> {
+    // Sin logs por defecto: un pack de test no puede depender de `C:\Rocketbot`.
+    // El CLI es quien decide leerlos (ver `build_from_conn_with_logs`).
+    build_from_conn_with_logs(conn, robot, snapshot, db_label, None)
+}
+
+/// Igual que [`build_from_conn`], con un origen de logs explicito.
+///
+/// `None` deja la seccion de errores vacia y no toca el sistema de ficheros: eso es
+/// lo que usan los tests y cualquier consumidor sin logs. Que el motor no decida
+/// por su cuenta es lo que mantiene la suite hermética: antes, un test cuyo robot se
+/// llamara igual que uno real habria cambiado de resultado segun la maquina.
+pub fn build_from_conn_with_logs(
+    conn: &rusqlite::Connection,
+    robot: &str,
+    snapshot: Option<i64>,
+    db_label: &str,
+    log_source: Option<(&Path, usize)>,
+) -> Result<Pack> {
     let snaps = db::load_snapshots(conn, robot)?;
     let target = match snapshot {
         Some(id) => snaps
@@ -97,8 +118,6 @@ pub fn build_from_conn(
     // El analisis cruzado necesita la db entera (grafo de llamadas), no solo este
     // robot; por eso se resuelve aqui y se pasa ya hecho a `build`, que trabaja
     // unicamente con el snapshot pedido y no vuelve a tocar la conexion.
-    let logs_dir = Path::new(logs::DEFAULT_LOGS_DIR);
-    let log_source = logs_dir.is_dir().then_some((logs_dir, DEFAULT_LOG_FILES));
     let analysis = analysis::analyse_with_logs(conn, db_label, robot, log_source)?;
     Ok(build(robot, db_label, &snaps, target, analysis))
 }
