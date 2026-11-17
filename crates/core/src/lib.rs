@@ -24,6 +24,7 @@
 
 pub mod db;
 pub mod error;
+pub mod graph;
 pub mod pack;
 pub mod render;
 pub mod tree;
