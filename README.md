@@ -1,1 +1,80 @@
 # rocket_debugger
+
+Depurador de flujos de Rocketbot RPA. Lee `robot.db` en solo-lectura, atribuye errores al
+snapshot que estaba vivo cuando ocurrieron, y emite un **context pack** de ~2k tokens que un
+agente puede leer de una vez en lugar del JSON crudo (10x menos contexto).
+
+No es un IDE ni un editor visual. Es el motor de deteccion y el suministro de contexto.
+**Todo cambio en un robot pasa por el agente**, nunca por esta herramienta.
+
+## Estado
+
+Fase 0 cerrada: prototipo validado sobre 28 robots reales en 3 dbs.
+
+| Medido | Valor |
+|---|---|
+| Contexto crudo (JSON pretty) | 102.052 tokens |
+| Contexto renderizado | 16.326 tokens |
+| Ratio | 6,3x (1,8x en robots de 3 nodos, 10x en el de 32) |
+| Defecto critico encontrado | 34 lineas duplicadas en 13 robots |
+
+Ver [`docs/FINDINGS.md`](docs/FINDINGS.md) para el informe completo de la fase 0.
+
+## Por que existe
+
+Un robot de 300 comandos son ~250k tokens de JSON: no entra en ninguna ventana de contexto,
+ni en la del agente ni en la de una persona. El 70% de ese JSON es metadata de ejecucion
+(`img`, `screenshot`, `time`, `execute_debugg`) que no aporta nada para entender el flujo.
+
+Y un error de hace tres versiones no es un error de hoy. Sin atribucion temporal, cualquier
+panel miente sobre que esta roto.
+
+## Uso
+
+```bash
+cargo run -p rocketdebug-cli -- list
+cargo run -p rocketdebug-cli -- pack ML_06_Legacy --db "C:\rocketbot_bots\certificaciones\BBRE2\robot_run.db"
+cargo run -p rocketdebug-cli -- pack reporteMercadolibre --stats
+```
+
+## Arquitectura
+
+```
+robot.db (N dbs) ──┐
+logs/*.log ────────┤→ motor ──┬→ render markdown (el context pack)
+catalogo comandos ─┘          ├→ daemon local (HTTP/WS)
+                              └→ fachada MCP (intenciones, no datos)
+```
+
+Detalle en [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Esquema del context pack en [`docs/CONTEXT_PACK.md`](docs/CONTEXT_PACK.md).
+
+## Convenciones
+
+- Documentacion e issues en espanol. Codigo e identificadores en ingles.
+- Decisiones de diseno que no son obvias se documentan en el codigo con el *por que*,
+  no el *que*.
+- Nada de dependencia de `C:\Rocketbot` en tests: los fixtures son sinteticos.
+  Los tests de integracion contra datos reales van marcados `#[ignore]`.
+
+## Build en Windows sin Visual Studio
+
+Este equipo no tiene MSVC. El proyecto compila con el toolchain GNU y un GCC portatil
+(WinLibs) para las dependencias nativas:
+
+```powershell
+rustup toolchain install stable-x86_64-pc-windows-gnu
+# añadir el bin de mingw64 al PATH
+cargo +stable-x86_64-pc-windows-gnu build
+```
+
+En CI (Linux) se usa el toolchain por defecto.
+
+## Roadmap
+
+- [ ] #1 parser de `bots.data` e indice de versiones
+- [ ] #2 atribucion temporal de errores al snapshot vivo
+- [ ] #3 grafo de llamadas y contrato implicito de variables
+- [ ] #4 motor de reglas declarativo con umbral de precision
+- [ ] #5 render del context pack con contabilidad de tokens
+- [ ] #6 fachada MCP de lectura

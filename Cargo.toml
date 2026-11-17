@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+# preserve_order: los parametros de un comando conservan el orden en que los
+# escribio Studio. Con el orden alfabetico, un reordenamiento de claves al
+# re-guardar el robot aparece como ruido en el diff entre versiones.
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
+base64 = "0.22"
+blake3 = "1"
+
+[profile.release]
+lto = "thin"
+strip = true

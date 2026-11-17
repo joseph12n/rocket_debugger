@@ -1,0 +1,95 @@
+{
+  "project": {
+    "commands": [
+      {
+        "father": "log_message",
+        "command": "INICIO con try",
+        "group": "system",
+        "id": "aaaaaaaa-0000-0000-0000-000000000001",
+        "line": 1,
+        "option": "INFO",
+        "children": [],
+        "else": []
+      },
+      {
+        "father": "trycatch",
+        "command": "",
+        "group": "logic",
+        "id": "aaaaaaaa-0000-0000-0000-000000000002",
+        "line": 2,
+        "children": [
+          {
+            "father": "setVar",
+            "command": "\"1\"",
+            "group": "system",
+            "id": "aaaaaaaa-0000-0000-0000-000000000003",
+            "line": "2.1",
+            "var": "valor",
+            "children": [],
+            "else": []
+          },
+          {
+            "father": "setVar",
+            "command": "\"2\"",
+            "group": "system",
+            "id": "aaaaaaaa-0000-0000-0000-000000000004",
+            "line": "2.2",
+            "var": "otro",
+            "children": [],
+            "else": []
+          }
+        ],
+        "else": [
+          {
+            "father": "log_message",
+            "command": "error capturado",
+            "group": "system",
+            "id": "aaaaaaaa-0000-0000-0000-000000000005",
+            "line": "2.1",
+            "option": "ERROR",
+            "children": [],
+            "else": []
+          },
+          {
+            "father": "setVar",
+            "command": "False",
+            "group": "system",
+            "id": "aaaaaaaa-0000-0000-0000-000000000006",
+            "line": "2.2",
+            "var": "ok",
+            "children": [],
+            "else": []
+          }
+        ]
+      },
+      {
+        "father": "evaluateIf",
+        "command": "{ok} == True",
+        "group": "logic",
+        "id": "aaaaaaaa-0000-0000-0000-000000000007",
+        "line": 3,
+        "children": [
+          {
+            "father": "log_message",
+            "command": "ok",
+            "group": "system",
+            "id": "aaaaaaaa-0000-0000-0000-000000000008",
+            "line": "3.1",
+            "option": "INFO",
+            "children": [],
+            "else": []
+          }
+        ],
+        "else": []
+      }
+    ],
+    "vars": [],
+    "profile": {
+      "name": "line_collision",
+      "description": "Reproduce el defecto real: try y catch comparten numeracion de linea"
+    },
+    "ifs": [],
+    "modules": [],
+    "expose": {}
+  }
+}
