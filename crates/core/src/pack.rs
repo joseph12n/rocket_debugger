@@ -41,8 +41,10 @@ pub struct Pack {
     pub flow: Vec<FlatNode>,
     /// Hallazgos, contratos implicitos y variables muertas del robot.
     ///
-    /// Se calcula contra la db entera (grafo de llamadas) y describe el **ultimo**
-    /// snapshot de cada robot, tambien cuando el pack se pide sobre uno anterior.
+    /// Se calcula contra la db entera (grafo de llamadas) y describe **este**
+    /// snapshot: el mismo que el flujo, tambien cuando se pide uno anterior con
+    /// `--snapshot` (issue #18). Los demas robots del workspace aportan su ultimo
+    /// snapshot, que es el que el runner resolveria hoy al ejecutar este flujo.
     pub analysis: Analysis,
     /// JSON completo del snapshot, para medir el ahorro real.
     pub raw_pretty: String,
@@ -78,6 +80,10 @@ impl Pack {
 pub const DEFAULT_LOG_FILES: usize = 20;
 
 /// Construye el pack del snapshot indicado (por defecto, el ultimo).
+///
+/// Todo el pack describe ese snapshot: el flujo, las variables y tambien el
+/// analisis (hallazgos y contratos), que antes se calculaba siempre sobre el
+/// ultimo (issue #18).
 ///
 /// La seccion de errores se rellena leyendo los logs **solo si el directorio
 /// existe**: aqui, y no en `analysis`, es donde se decide si este entorno tiene
@@ -118,7 +124,13 @@ pub fn build_from_conn_with_logs(
     // El analisis cruzado necesita la db entera (grafo de llamadas), no solo este
     // robot; por eso se resuelve aqui y se pasa ya hecho a `build`, que trabaja
     // unicamente con el snapshot pedido y no vuelve a tocar la conexion.
-    let analysis = analysis::analyse_with_logs(conn, db_label, robot, log_source)?;
+    //
+    // Se pasa el `id` del snapshot objetivo, no el `--snapshot` crudo: con `None`
+    // el objetivo es el ultimo y el analisis tiene que describir ese mismo, no
+    // quedarse en "el ultimo" por su cuenta. Antes de esto, pedir la v26 daba un
+    // flujo de la v26 y hallazgos de la ultima version (issue #18).
+    let analysis =
+        analysis::analyse_with_logs_at(conn, db_label, robot, Some(target.id), log_source)?;
     Ok(build(robot, db_label, &snaps, target, analysis))
 }
 
