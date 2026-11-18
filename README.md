@@ -40,7 +40,9 @@ cargo run -p rocketdebug-cli -- pack reporteMercadolibre --stats
 La ejecucion la pide el agente por MCP con `run_robot`: pasa por un broker (una ejecucion a la vez),
 se niega si Studio esta abierto —el runner CLI delegaria sin ejecutar— y exige eventos del robot
 antes de dar la ejecucion por buena. `run_status` muestra quien corre y quien espera. Requiere
-`ROCKETBOT_EXE` apuntando a `rocketbot.exe`; el timeout es 180 s por defecto (maximo 900).
+`ROCKETBOT_EXE` apuntando a `rocketbot.exe` y **licencia de produccion**: con la licencia Studio
+Develop el CLI sale con 0 sin ejecutar y el broker lo reporta como fallo, no como exito. El timeout
+es 180 s por defecto (maximo 900).
 
 ## Arquitectura
 

@@ -109,8 +109,16 @@ de modo que despues de ejecutar, `flow_pack` ya ve los errores nuevos.
 
 `run_robot` es sincrono y puede tardar: el timeout (5-900 s, 180 por defecto) es de **ejecucion**,
 no de espera en cola. `run_status` se puede pedir en paralelo porque el servidor HTTP atiende una
-conexion por hilo. La ejecucion real contra BBRE2 vive en un test `#[ignore]`: requiere Studio
-cerrado, `ROCKETBOT_EXE` y `C:\rocketbot_bots\BBRE2\robot_run.db`.
+conexion por hilo. La ejecucion real contra BBRE2 vive en un test `#[ignore]`: requiere licencia de
+produccion, Studio cerrado, `ROCKETBOT_EXE` y `C:\rocketbot_bots\BBRE2\robot_run.db`.
+
+> **Estado del entorno (2026-11-18):** la licencia instalada es **Studio Develop**. Con Studio
+> cerrado, el CLI sigue respondiendo `Does not have a production license`, sale con `exit_code 0` y
+> no deja ni un evento; el broker lo reporta como `NoEvents`, que es exactamente el falso exito que
+> existe para evitar. La prueba real de #25 queda pendiente de activar una licencia de produccion
+> (ya estaba registrada como pendiente en `C:\rocketbot_bots\MEMORIA.md`). El `/execute` del
+> servidor de Studio ejecuta comandos sueltos y la orquestacion del flujo vive en la UI, asi que
+> "modo API" no es hoy un runner completo: se documenta como alternativa, no se implementa aqui.
 
 ## Restricciones del entorno real
 
