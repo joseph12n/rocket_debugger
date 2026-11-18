@@ -29,6 +29,7 @@ pub const FLOW_DIFF: &str = "flow_diff";
 pub const PROBLEMS_SEARCH: &str = "problems_search";
 pub const PROBLEMS_RECORD: &str = "problems_record";
 pub const PROBLEMS_FIX: &str = "problems_fix";
+pub const UI_RENDER: &str = "ui_render";
 
 /// Resultado de una tool, ya listo para el `result` de JSON-RPC.
 #[derive(Debug, Clone)]
@@ -198,6 +199,25 @@ pub fn descriptors() -> Value {
                     &["robot", "signature", "from", "to"],
                 ),
             },
+            {
+                "name": UI_RENDER,
+                "description": "Devuelve el enlace que abre la UI en un robot concreto. Sirve para \
+                                que el agente mande al humano a mirar en vez de pegar un pack de 2k \
+                                tokens en el chat: el agente ordena, el humano mira. Requiere que \
+                                el servidor HTTP este arrancado y que se haya configurado su URL \
+                                en ROCKETDEBUG_UI_URL.",
+                "inputSchema": object_schema(
+                    json!({
+                        "robot": robot_property(),
+                        "line": {
+                            "type": "string",
+                            "description": "Linea de Studio a la que se quiere llevar al humano. Queda en el enlace; la UI actual abre el robot.",
+                        },
+                        "db": db_property(),
+                    }),
+                    &["robot"],
+                ),
+            },
         ]
     })
 }
@@ -251,6 +271,7 @@ fn dispatch(name: &str, arguments: &Value, settings: &Settings) -> Result<ToolOu
         PROBLEMS_SEARCH => problems_search(arguments, settings),
         PROBLEMS_RECORD => problems_record(arguments, settings),
         PROBLEMS_FIX => problems_fix(arguments, settings),
+        UI_RENDER => ui_render(arguments),
         other => Err(CallError::InvalidParams(format!(
             "tool desconocida: `{other}`"
         ))),
@@ -554,6 +575,75 @@ fn problems_fix(arguments: &Value, settings: &Settings) -> Result<ToolOutput, Ca
             "no pude registrar el fix: {e}"
         ))),
     }
+}
+
+// ---------------------------------------------------------------- UI
+
+/// URL base de la UI.
+///
+/// El servidor HTTP no tiene puerto por defecto (se arranca con `--http`), asi que
+/// la fachada no puede adivinarlo: se configura con `ROCKETDEBUG_UI_URL`. El valor
+/// por defecto es el puerto que se usa en la documentacion, para que un agente que
+/// no lea la variable al menos acierte con el caso comun.
+fn ui_base() -> String {
+    std::env::var("ROCKETDEBUG_UI_URL")
+        .ok()
+        .map(|v| v.trim().trim_end_matches('/').to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:8765".to_string())
+}
+
+/// `%xx` de todo lo que no sea incondicionalmente seguro en una URL.
+///
+/// Hace falta porque los nombres de robot y las etiquetas de db llevan `\`, tildes y
+/// espacios, y un enlace que el humano pega en el navegador tiene que funcionar.
+fn percent_encode(texto: &str) -> String {
+    let mut out = String::with_capacity(texto.len());
+    for byte in texto.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// `ui_render`: el enlace para que el humano mire lo que el agente esta viendo.
+fn ui_render(arguments: &Value) -> Result<ToolOutput, CallError> {
+    let args = Args::new(arguments)?;
+    let robot = args.required_str("robot")?;
+    let db = args.opt_str("db")?;
+    let line = args.opt_str("line")?.unwrap_or_default();
+
+    let mut url = format!("{}/?robot={}", ui_base(), percent_encode(&robot));
+    if let Some(db) = &db {
+        url.push_str(&format!("&db={}", percent_encode(db)));
+    }
+    if !line.is_empty() {
+        url.push_str(&format!("&line={}", percent_encode(&line)));
+    }
+
+    let mut o = String::new();
+    let _ = writeln!(o, "{url}");
+    let _ = writeln!(o);
+    let _ = writeln!(
+        o,
+        "Abre ese enlace: la bandeja queda con `{robot}` seleccionado."
+    );
+    if !line.is_empty() {
+        let _ = writeln!(
+            o,
+            "La linea {line} viaja en el enlace; la UI actual abre el robot y deja la linea para cuando la pinte."
+        );
+    }
+    let _ = writeln!(
+        o,
+        "Si no responde: `rocketdebug-mcp --http <puerto>` y ROCKETDEBUG_UI_URL={}",
+        ui_base()
+    );
+    Ok(ToolOutput::ok(o))
 }
 
 /// `robot_errors`: solo la seccion de errores del pack.
@@ -900,10 +990,10 @@ mod tests {
     }
 
     #[test]
-    fn el_catalogo_declara_las_siete_tools_con_schema() {
+    fn el_catalogo_declara_las_ocho_tools_con_schema() {
         let catalogo = descriptors();
         let tools = catalogo["tools"].as_array().expect("array de tools");
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 8);
         let nombres: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert_eq!(
             nombres,
@@ -914,7 +1004,8 @@ mod tests {
                 FLOW_DIFF,
                 PROBLEMS_SEARCH,
                 PROBLEMS_RECORD,
-                PROBLEMS_FIX
+                PROBLEMS_FIX,
+                UI_RENDER
             ],
             "el orden del catalogo es el que ve el agente"
         );

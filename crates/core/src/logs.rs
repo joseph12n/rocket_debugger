@@ -25,8 +25,30 @@
 //! ciegas: todo corte sale de [`str::find`], que cae siempre en frontera de
 //! caracter. Un byte invalido se degrada a `U+FFFD` y la linea sigue siendo
 //! parseable.
+//!
+//! # Cache de ficheros parseados
+//!
+//! Un barrido pide los **mismos** ficheros una vez por robot: la bandeja recorre
+//! 32 instancias sobre los mismos 13 logs y lee 416 veces el mismo contenido, con
+//! el mismo resultado. [`parse_file_cached`] guarda las entradas ya parseadas por
+//! `(ruta, mtime, tamano)` y devuelve la lista **compartida** (`Arc`, sin copiarla)
+//! mientras el fichero no cambie.
+//!
+//! La invalidacion mira fecha **y** tamano porque las dos cambian por motivos
+//! distintos: un log que crece durante la ejecucion cambia de tamano (y el `mtime`
+//! puede tardar en refrescarse), y un log que se reescribe -incluso mas pequeno-
+//! cambia de fecha. Un fichero ilegible devuelve `None` y **no se cachea**: el
+//! fallo puede ser transitorio (un log a medio escribir) y memorizarlo lo volveria
+//! permanente.
+//!
+//! El cache es **de proceso** y tiene tope (`CACHE_MAX_ENTRIES`): lo usan la UI y
+//! el servidor MCP, que viven horas, y un cache sin limite seria una fuga de
+//! memoria lenta. Se desaloja el fichero usado menos recientemente, que en un
+//! barrido es el de una pasada anterior y no el que se acaba de leer.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use chrono::NaiveDateTime;
@@ -192,23 +214,29 @@ pub fn parse_text(text: &str) -> Vec<LogEntry> {
     out
 }
 
-/// Entradas de un robot, comparando sin distinguir mayusculas.
+/// Entradas de un robot **por referencia**, comparando sin distinguir mayusculas.
 ///
 /// Solo se atribuyen las lineas con `request` (propia o heredada). El ruido de
 /// motor (`zdev`, `getbot`) y los contadores de bucle no pertenecen a ningun
 /// robot: reclamarlos por cercania es exactamente el tipo de falso positivo que
 /// hace que el panel se deje de mirar.
-pub fn for_robot(entries: &[LogEntry], robot: &str) -> Vec<LogEntry> {
+///
+/// Es la variante que no clona, y la que conviene cuando la lista viene del cache:
+/// de un log entero, a un robot le toca una fraccion, y clonar todo para descartar
+/// el resto era el gasto que el cache evita. Quien necesite las entradas, que
+/// clone lo que sobreviva a su filtro (asi lo hace `analysis::robot_errors`).
+pub fn of_robot<'a>(entries: &'a [LogEntry], robot: &str) -> impl Iterator<Item = &'a LogEntry> {
     let buscado = robot.trim().to_lowercase();
-    entries
-        .iter()
-        .filter(|e| {
-            e.request
-                .as_ref()
-                .is_some_and(|r| r.robot.to_lowercase() == buscado)
-        })
-        .cloned()
-        .collect()
+    entries.iter().filter(move |e| {
+        e.request
+            .as_ref()
+            .is_some_and(|r| r.robot.to_lowercase() == buscado)
+    })
+}
+
+/// [`of_robot`] con las entradas ya clonadas.
+pub fn for_robot(entries: &[LogEntry], robot: &str) -> Vec<LogEntry> {
+    of_robot(entries, robot).cloned().collect()
 }
 
 /// Ficheros `*.log` bajo `dir`, recursivo, del mas nuevo al mas viejo, como mucho
@@ -283,6 +311,177 @@ pub fn recent_files(dir: &Path, max: usize) -> Vec<PathBuf> {
 pub fn read_text(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Tope de ficheros cacheados.
+///
+/// 64 deja holgura sobre lo que pide un pack ([`crate::pack::DEFAULT_LOG_FILES`] =
+/// 20 ficheros) y varios dias de logs, y sobre todo acota la memoria de un proceso
+/// que no muere entre peticiones: el cache es de proceso y sin tope creceria con
+/// cada dia nuevo de logs.
+const CACHE_MAX_ENTRIES: usize = 64;
+
+/// Cache de proceso, `OnceLock` porque solo hay `std` (sin dependencias nuevas).
+///
+/// El candado protege el mapa, **no** el parseo: [`parse_file_cached`] lo suelta
+/// mientras lee y parsea, asi que dos lectores concurrentes del mismo fichero
+/// pueden parsearlo dos veces. Se acepta: el resultado es identico y serializar
+/// toda la I/O de logs detras de un candado global costaria mas que ese trabajo
+/// duplicado, que como mucho pasa en el primer acceso.
+static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+
+/// Identidad de una version concreta de un fichero.
+///
+/// La ruta sola no basta (un log se reescribe) y el `mtime` solo tampoco (un log
+/// que crece durante la ejecucion puede cambiar de tamano antes de que el sistema
+/// de ficheros refresque la fecha): la clave lleva los tres.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CacheKey {
+    path: PathBuf,
+    /// Fecha de modificacion: cambio garantizado al reescribir el fichero.
+    modified: SystemTime,
+    /// Tamano en bytes: cambio garantizado cuando el runner sigue escribiendo.
+    len: u64,
+}
+
+impl CacheKey {
+    /// Clave de la version actual del fichero; `None` si no se puede leer su
+    /// metadata, porque entonces no hay forma de saber si el contenido caduco.
+    fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Self {
+            path: path.to_path_buf(),
+            modified: meta.modified().ok()?,
+            len: meta.len(),
+        })
+    }
+}
+
+/// Una entrada del cache y cuando se uso por ultima vez.
+struct Cached {
+    /// Entradas ya parseadas. Se comparte en vez de copiarse: el `Arc` es el que
+    /// hace que reutilizar el parseo sea barato de verdad.
+    entries: Arc<[LogEntry]>,
+    /// Reloj del ultimo uso: decide el desalojo. No es la fecha de insercion para
+    /// que un fichero muy consultado no se desaloje por haber entrado pronto.
+    used: u64,
+}
+
+/// Estado del cache: entradas vivas, reloj de uso y aciertos acumulados.
+#[derive(Default)]
+struct Cache {
+    files: HashMap<CacheKey, Cached>,
+    /// Reloj monotono: sube en cada consulta, asi que `used` siempre crece.
+    tick: u64,
+    /// Aciertos desde el arranque o desde [`clear_cache`]: diagnostico y tests.
+    hits: usize,
+}
+
+impl Cache {
+    /// Busca la version exacta del fichero y anota el acierto.
+    fn lookup(&mut self, key: &CacheKey) -> Option<Arc<[LogEntry]>> {
+        self.tick += 1;
+        let tick = self.tick;
+        let hit = self.files.get_mut(key)?;
+        hit.used = tick;
+        // Clonar el `Arc` no copia las entradas: solo sube el contador de refs.
+        let entries = Arc::clone(&hit.entries);
+        self.hits += 1;
+        Some(entries)
+    }
+
+    /// Guarda una version del fichero y, si el cache esta lleno, desaloja la menos
+    /// usada.
+    fn insert(&mut self, key: CacheKey, entries: Arc<[LogEntry]>) {
+        // Reemplazar una clave que ya existe no anade una entrada: si se desalojara
+        // aqui, una carrera entre dos hilos que parsean el mismo fichero tiraria
+        // una entrada que se esta volviendo a insertar.
+        if self.files.len() >= CACHE_MAX_ENTRIES && !self.files.contains_key(&key) {
+            let menos_usada = self
+                .files
+                .iter()
+                .min_by_key(|(_, cached)| cached.used)
+                .map(|(key, _)| key.clone());
+            if let Some(vieja) = menos_usada {
+                self.files.remove(&vieja);
+            }
+        }
+        self.tick += 1;
+        self.files.insert(
+            key,
+            Cached {
+                entries,
+                used: self.tick,
+            },
+        );
+    }
+}
+
+/// Entradas de un fichero de log, cacheadas por (ruta, mtime, tamano).
+/// El vigilante y la bandeja barren los mismos ficheros una vez por robot: sin
+/// cache, el coste crece con robots x ficheros y el resultado es el mismo.
+///
+/// Devuelve la lista compartida: el llamador no debe mutarla (es un `Arc<[..]>`, no
+/// puede) y no la copia. Si el fichero no se puede leer, `None` y **sin cachear**:
+/// un fallo de lectura puede ser transitorio y el cache no puede convertirlo en
+/// permanente.
+pub fn parse_file_cached(path: &Path) -> Option<Arc<[LogEntry]>> {
+    let Some(key) = CacheKey::of(path) else {
+        // Sin fecha ni tamano fiables no hay con que invalidar: se parsea cada vez
+        // antes que arriesgarse a servir contenido que ya no esta en disco.
+        return read_text(path).map(|text| parse_text(&text).into());
+    };
+
+    if let Some(entries) = with_cache(|cache| cache.lookup(&key)) {
+        return Some(entries);
+    }
+
+    // Fuera del candado: leer y parsear sin bloquear a los demas hilos.
+    let entries: Arc<[LogEntry]> = parse_text(&read_text(path)?).into();
+    with_cache(|cache| cache.insert(key, Arc::clone(&entries)));
+    Some(entries)
+}
+
+/// Vacia el cache y reinicia el contador de aciertos.
+///
+/// Es lo que necesita un test para medir en aislamiento y lo que puede querer un
+/// llamador para liberar memoria (por ejemplo el vigilante entre pasadas). El
+/// contador se reinicia porque los aciertos son diagnostico, no estado: un cache
+/// vacio que dijera "12 aciertos" mentiria sobre lo que tiene dentro.
+pub fn clear_cache() {
+    with_cache(|cache| *cache = Cache::default());
+}
+
+/// `(entradas, aciertos)` del cache: cuantos ficheros guarda y cuantas veces se
+/// reutilizo un parseo.
+pub fn cache_stats() -> (usize, usize) {
+    with_cache(|cache| (cache.files.len(), cache.hits))
+}
+
+/// Acceso al cache con recuperacion del candado envenenado.
+///
+/// Un hilo que entra en panico con el candado tomado no deja el mapa a medias (se
+/// inserta un `Arc` ya construido), asi que se recupera el dato en vez de propagar
+/// el panico como si fuera un fallo de lectura del log.
+fn with_cache<T>(f: impl FnOnce(&mut Cache) -> T) -> T {
+    let mut guard = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut guard)
+}
+
+/// Turno para los tests que miden el cache.
+///
+/// [`cache_stats`] cuenta un estado **global al proceso** y los tests de un crate
+/// corren en paralelo: sin este candado, un test mediria los aciertos de otro. Se
+/// usa desde `logs` y desde `analysis`.
+#[cfg(test)]
+pub(crate) fn cache_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static TURNO: Mutex<()> = Mutex::new(());
+    TURNO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Cabecera estricta: la fecha tiene que ser real. `db::parse_date` degrada a
@@ -655,5 +854,170 @@ mod tests {
             "el fichero sigue siendo parseable"
         );
         assert!(read_text(&tmp.path().join("no_existe.log")).is_none());
+    }
+
+    /// Cabecera valida de una peticion del robot: la forma minima que pasa por
+    /// [`parse_line`] sin depender de ningun fichero del entorno.
+    fn linea(robot: &str, mensaje: &str) -> String {
+        format!(
+            "2026-11-17 12:43:47.586814 - rocketbot - INFO - request: {robot} : line 1 - rpasystem \
+             : log_message  id: {robot}-1 - INFO - {mensaje}\n"
+        )
+    }
+
+    #[test]
+    fn el_cache_reutiliza_el_parseo_y_cuenta_un_acierto() {
+        let _turno = cache_test_guard();
+        clear_cache();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("logfile.log");
+        std::fs::write(&path, linea("alfa", "hola")).expect("escribo el log");
+
+        let primera = parse_file_cached(&path).expect("leo el log");
+        assert_eq!(primera.len(), 1);
+        assert_eq!(
+            cache_stats(),
+            (1, 0),
+            "la primera pasada parsea y guarda, no acierta"
+        );
+
+        let segunda = parse_file_cached(&path).expect("leo el log");
+        assert_eq!(segunda.len(), 1, "mismo contenido");
+        assert_eq!(segunda[0].message, primera[0].message);
+        assert!(
+            Arc::ptr_eq(&primera, &segunda),
+            "el segundo acceso tiene que reutilizar la lista cacheada, no reparsearla"
+        );
+        assert_eq!(cache_stats(), (1, 1), "un acierto mas");
+    }
+
+    #[test]
+    fn un_log_que_crece_se_reparsea() {
+        let _turno = cache_test_guard();
+        clear_cache();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("logfile.log");
+        let mut texto = linea("alfa", "uno");
+        std::fs::write(&path, &texto).expect("escribo el log");
+        let primera = parse_file_cached(&path).expect("leo el log");
+        assert_eq!(primera.len(), 1);
+
+        // El runner sigue escribiendo: el tamano cambia y la clave ya no vale.
+        texto.push_str(&linea("alfa", "dos"));
+        std::fs::write(&path, &texto).expect("anado una linea");
+
+        let segunda = parse_file_cached(&path).expect("leo el log");
+        assert_eq!(segunda.len(), 2, "el fichero crecido se reparsea");
+        assert!(segunda[1].message.contains("dos"), "se ve la linea nueva");
+        assert!(
+            !Arc::ptr_eq(&primera, &segunda),
+            "no se sirve la lista vieja"
+        );
+    }
+
+    #[test]
+    fn un_log_retocado_sin_cambiar_de_tamano_se_reparsea() {
+        let _turno = cache_test_guard();
+        clear_cache();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("logfile.log");
+        std::fs::write(&path, linea("alfa", "uno")).expect("escribo el log");
+        let primera = parse_file_cached(&path).expect("leo el log");
+
+        // Mismo contenido y mismo tamano: solo cambia la fecha. Sin el `mtime` en
+        // la clave, este fichero se serviria del cache para siempre.
+        fechar(&path, 42);
+        let segunda = parse_file_cached(&path).expect("leo el log");
+        assert_eq!(segunda.len(), 1);
+        assert!(
+            !Arc::ptr_eq(&primera, &segunda),
+            "un fichero retocado se reparsea aunque pese lo mismo"
+        );
+    }
+
+    #[test]
+    fn clear_cache_deja_el_cache_vacio() {
+        let _turno = cache_test_guard();
+        // Otro test pudo dejar entradas: la medida empieza siempre del mismo sitio.
+        clear_cache();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("logfile.log");
+        std::fs::write(&path, linea("alfa", "hola")).expect("escribo el log");
+        parse_file_cached(&path).expect("leo el log");
+        parse_file_cached(&path).expect("leo el log");
+        let (entradas, aciertos) = cache_stats();
+        assert_eq!(entradas, 1);
+        assert_eq!(aciertos, 1);
+
+        clear_cache();
+        assert_eq!(cache_stats(), (0, 0), "sin entradas y sin aciertos");
+
+        // Y sigue funcionando despues: el fichero se vuelve a parsear.
+        let otra_vez = parse_file_cached(&path).expect("leo el log");
+        assert_eq!(otra_vez.len(), 1);
+        assert_eq!(cache_stats(), (1, 0));
+    }
+
+    #[test]
+    fn el_cache_tiene_tope_y_desaloja_el_menos_usado() {
+        let _turno = cache_test_guard();
+        clear_cache();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut rutas = Vec::new();
+        let mut parseadas = Vec::new();
+        for i in 0..=CACHE_MAX_ENTRIES {
+            let path = tmp.path().join(format!("logfile_{i}.log"));
+            std::fs::write(&path, linea("alfa", "hola")).expect("escribo el log");
+            rutas.push(path);
+        }
+        // Al primero no se vuelve a tocar: es el candidato al desalojo.
+        for path in &rutas {
+            parseadas.push(parse_file_cached(path).expect("leo el log"));
+        }
+        assert_eq!(
+            cache_stats().0,
+            CACHE_MAX_ENTRIES,
+            "el cache no puede crecer por encima del tope"
+        );
+
+        // El primero salio del cache: se reparsea en vez de reutilizarse.
+        let readmitido = parse_file_cached(&rutas[0]).expect("leo el log");
+        assert!(
+            !Arc::ptr_eq(&parseadas[0], &readmitido),
+            "se desaloja la entrada usada menos recientemente"
+        );
+        // Y el ultimo, que si se acaba de usar, sigue dentro.
+        let ultimo = parse_file_cached(&rutas[CACHE_MAX_ENTRIES]).expect("leo el log");
+        assert!(
+            Arc::ptr_eq(&parseadas[CACHE_MAX_ENTRIES], &ultimo),
+            "el desalojo no puede tirar la entrada recien usada"
+        );
+        assert_eq!(cache_stats().0, CACHE_MAX_ENTRIES);
+    }
+
+    #[test]
+    fn un_fichero_ilegible_no_se_cachea() {
+        let _turno = cache_test_guard();
+        clear_cache();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("no_existe.log");
+        assert!(parse_file_cached(&path).is_none());
+        assert_eq!(
+            cache_stats(),
+            (0, 0),
+            "un fallo de lectura no entra al cache"
+        );
+
+        // Si el fichero aparece despues, se lee: el fallo no se memorizo.
+        std::fs::write(&path, linea("alfa", "hola")).expect("escribo el log");
+        let entradas = parse_file_cached(&path).expect("ahora si se lee");
+        assert_eq!(entradas.len(), 1);
+        assert_eq!(cache_stats(), (1, 0));
     }
 }
