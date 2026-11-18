@@ -41,7 +41,7 @@ fn initialize_devuelve_protocolo_y_capacidades() {
 }
 
 #[test]
-fn tools_list_devuelve_las_cuatro_tools_con_schema_valido() {
+fn tools_list_devuelve_las_siete_tools_con_schema_valido() {
     let value = respuesta(&request(2, "tools/list", json!({})));
     let tools = value["result"]["tools"]
         .as_array()
@@ -53,7 +53,15 @@ fn tools_list_devuelve_las_cuatro_tools_con_schema_valido() {
         .collect();
     assert_eq!(
         nombres,
-        vec!["list_robots", "flow_pack", "robot_errors", "flow_diff"]
+        vec![
+            "list_robots",
+            "flow_pack",
+            "robot_errors",
+            "flow_diff",
+            "problems_search",
+            "problems_record",
+            "problems_fix"
+        ]
     );
 
     for tool in tools {

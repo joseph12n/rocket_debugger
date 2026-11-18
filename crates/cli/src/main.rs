@@ -9,6 +9,8 @@ use clap::{Parser, Subcommand};
 use rocketdebug_core::analysis::{analyse_with_workspace, load_workspace};
 use rocketdebug_core::{build_from_conn_with_logs, db, logs};
 
+mod review;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "rocketdebug",
@@ -59,6 +61,30 @@ enum Cmd {
     Dbs {
         #[arg(long, default_value = r"C:\rocketbot_bots")]
         root: PathBuf,
+    },
+
+    /// Vista de bandeja de entrada: que robots estan mal y cuanto, en una pantalla.
+    ///
+    /// Analiza cada robot de la db con el mismo motor que el context pack y resume
+    /// sus hallazgos accionables, su higiene y sus errores vivos, ordenado por lo
+    /// que hay que atender primero. Evita pedir un pack por robot para decidir por
+    /// donde empezar.
+    Review {
+        /// Recorre todas las dbs de robots bajo este directorio.
+        ///
+        /// Mismos dbs que ve `pack --workspace` (`db::discover_databases`, que ya
+        /// excluye `backups/`). Sin el flag solo se analiza la db de `--db`.
+        #[arg(long, value_name = "DIR")]
+        workspace: Option<PathBuf>,
+        /// Maximo de robots en la tabla; el resto se resume en una linea.
+        #[arg(long, default_value_t = review::DEFAULT_LIMIT, value_name = "N")]
+        limit: usize,
+        /// No lee `C:\Rocketbot\logs`: mas rapido y hermetico.
+        ///
+        /// Los errores vivos salen a cero, igual que en un pack sin logs: el
+        /// analisis del codigo no depende de que este entorno tenga logs.
+        #[arg(long)]
+        no_logs: bool,
     },
 }
 
@@ -172,6 +198,24 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Cmd::Review {
+            workspace,
+            limit,
+            no_logs,
+        } => {
+            // El motor no lee logs por su cuenta: este CLI decide si este entorno
+            // los tiene. `--no-logs` corta antes de tocar el disco, que es lo que
+            // hace el barrido hermetico (y rapido).
+            let log_source = if no_logs {
+                None
+            } else {
+                let logs_dir = Path::new(logs::DEFAULT_LOGS_DIR);
+                logs_dir
+                    .is_dir()
+                    .then_some((logs_dir, rocketdebug_core::pack::DEFAULT_LOG_FILES))
+            };
+            review::run(&db_path, workspace.as_deref(), limit, log_source)
+        }
     }
 }
 
@@ -236,7 +280,10 @@ fn print_robots(label: &str, robots: &[db::RobotSummary]) {
 /// Se normalizan las dos formas de separador a proposito: `Path` solo reconoce
 /// `\` en Windows, y con la implementacion ingenua la funcion devolvia la ruta
 /// absoluta completa cuando se compilaba en Linux (lo detecto CI).
-fn db_label(path: &Path) -> String {
+///
+/// La comparte `review`: la cabecera del panorama lleva la misma etiqueta que el
+/// pack para no filtrar el arbol de directorios del usuario.
+pub(crate) fn db_label(path: &Path) -> String {
     let normalizado = path.to_string_lossy().replace('\\', "/");
     let mut partes: Vec<&str> = normalizado.split('/').filter(|p| !p.is_empty()).collect();
     let Some(file) = partes.pop() else {

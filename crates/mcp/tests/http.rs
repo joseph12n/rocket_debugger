@@ -277,6 +277,7 @@ fn una_tool_por_http_usa_el_entorno_del_servidor() {
     let port = start(Settings {
         env_db: Some(db),
         logs: None,
+        registry: None,
     });
 
     let line = call_request(3, "list_robots", json!({}));
