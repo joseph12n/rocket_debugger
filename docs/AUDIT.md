@@ -90,6 +90,13 @@ nombre), y tres sitios que deciden "esto es una ruta" acabaran discrepando.
 `paths` y `redact` lo consumen, cada uno con su semantica. Test: fixture donde las tres reglas
 ven el mismo conjunto donde aplican.
 
+**Hecho:** `core::pathscan` tiene una sola copia de las primitivas (`url_spans`, `inside_any`,
+`continues_scheme`, `inside_url_token`, `opens_token`). Los tres consumidores las usan. Lo que
+sigue en cada uno es politica, no esqueleto: `rules` solo marca unidades, `paths` acepta POSIX
+abierto para comprobar el disco y `redact` suma UNC y seis raices para privacidad; los dos
+`path_snippet` difieren a proposito (60/comas para el mensaje, 260 para el diagnostico). El indice
+de lineas de arriba queda como foto de cuando se audito.
+
 ### H3 · Lectura del formato `bots.data` duplicada — ALTA (trivial)
 
 - `fn commands_of` identica en `analysis.rs:987` y `pack.rs:214`.
