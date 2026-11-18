@@ -334,6 +334,93 @@ fn masked_prefix_at(text: &str, at: usize) -> Option<MaskedPrefix> {
     windows_users_at(text, at).or_else(|| posix_home_at(text, at))
 }
 
+/// Enmascara direcciones de correo conservando el dominio.
+///
+/// El pack se comparte con el agente y los parametros de un envio (`to`,
+/// `from_name`) llevan datos personales. La marca conserva la primera letra y el
+/// dominio (`j***@ejemplo.com`): el agente sabe a que proveedor apunta el envio,
+/// pero no a quien. El patron es estrecho a proposito: exige local, `@`, un
+/// dominio con punto y una extension alfabetica de dos o mas letras; `foo@bar` o
+/// un `@` de JavaScript no se tocan.
+///
+/// Es idempotente: la marca ya no casa con el patron porque `*` no es un caracter
+/// valido del tramo local.
+pub fn mask_emails(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::new();
+    let mut copied = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] != b'@' {
+            at += 1;
+            continue;
+        }
+        let mut start = at;
+        while start > 0 && is_email_local(bytes[start - 1]) {
+            start -= 1;
+        }
+        if start == at {
+            at += 1;
+            continue;
+        }
+        let mut end = at + 1;
+        while end < bytes.len() && is_email_domain(bytes[end]) {
+            end += 1;
+        }
+        let domain = &text[at + 1..end];
+        if !is_valid_email_domain(domain) {
+            at += 1;
+            continue;
+        }
+        let local = &text[start..at];
+        out.push_str(&text[copied..start]);
+        out.push(local.chars().next().unwrap_or('*'));
+        out.push_str("***@");
+        out.push_str(domain);
+        copied = end;
+        at = end;
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
+fn is_email_local(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'%' | b'+' | b'-')
+}
+
+fn is_email_domain(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')
+}
+
+/// Dominio con al menos un punto y una extension alfabetica de 2+ letras.
+///
+/// No se aceptan etiquetas vacias (`a..b`), ni que empiecen o acaben en guion:
+/// son formas que un parser estricto rechaza y que en un log suelen ser trozos de
+/// una expresion, no un correo.
+fn is_valid_email_domain(domain: &str) -> bool {
+    if domain.len() > 253 || domain.contains("..") {
+        return false;
+    }
+    let labels: Vec<&str> = domain.split('.').collect();
+    if labels.len() < 2 {
+        return false;
+    }
+    for label in &labels {
+        if label.is_empty()
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || label.len() > 63
+            || !label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return false;
+        }
+    }
+    let tld = labels.last().copied().unwrap_or_default();
+    tld.len() >= 2 && tld.bytes().all(|byte| byte.is_ascii_alphabetic())
+}
+
 /// `C:\Users\<x>` / `C:/Users/<x>`: se conserva el separador que sigue al usuario.
 ///
 /// Tambien reconoce la forma escapada de un parametro JSON
@@ -508,8 +595,9 @@ pub fn redacted_value(name: &str, value: &str) -> Option<String> {
     if is_absolute_path(value) {
         return Some(PATH_MARK.to_string());
     }
-    // Se devuelve el original sin recortar: el render ya normaliza y corta.
-    Some(value.to_string())
+    // Un correo en el panel de variables tambien es dato personal; se conserva el
+    // dominio para no cegar el diagnostico.
+    Some(mask_emails(value))
 }
 
 #[cfg(test)]
@@ -801,6 +889,50 @@ mod tests {
     /// Un texto normal con espacios se queda quieto: sin un patron de ruta no hay
     /// tramo de usuario que esconder, y enmascarar de mas cambiaria el parametro
     /// que el agente usa para entender el flujo.
+    /// El correo de un envio es dato personal; el dominio se conserva para que el
+    /// agente sepa a que proveedor apunta sin ver la direccion completa.
+    #[test]
+    fn enmascara_correos_y_conserva_el_dominio() {
+        assert_eq!(
+            mask_emails("escribe a juan.perez+tag@ejemplo.com"),
+            "escribe a j***@ejemplo.com"
+        );
+        assert_eq!(
+            mask_emails("to=<ana@b.co>, cc=<luis@sub.dominio.org>"),
+            "to=<a***@b.co>, cc=<l***@sub.dominio.org>"
+        );
+        // La marca ya no vuelve a casar: no se enmascara dos veces.
+        assert_eq!(mask_emails("j***@ejemplo.com"), "j***@ejemplo.com");
+    }
+
+    #[test]
+    fn no_confunde_una_arroba_cualquiera_con_un_correo() {
+        for text in [
+            "foo@bar",
+            "@ejemplo.com",
+            "a@b.c",
+            "a@-b.com",
+            "a@b..com",
+            "usuario@localhost",
+            "const f = decorador@clase;",
+        ] {
+            assert_eq!(mask_emails(text), text, "se toco: {text}");
+        }
+    }
+
+    #[test]
+    fn un_correo_en_una_variable_se_redacta() {
+        assert_eq!(
+            redacted_value("from_name", "juan@example.com").as_deref(),
+            Some("j***@example.com")
+        );
+        assert_eq!(
+            redacted_value("url", "https://ejemplo.com").as_deref(),
+            Some("https://ejemplo.com"),
+            "una URL normal no se toca"
+        );
+    }
+
     #[test]
     fn el_texto_con_espacios_normales_no_se_toca() {
         for text in [

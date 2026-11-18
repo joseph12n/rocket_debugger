@@ -114,8 +114,10 @@ fn field(s: &str, max: usize) -> String {
     // dia que se anada una seccion nueva (issue #16).
     //
     // Enmascarar antes de recortar importa: si el corte cae dentro del nombre del
-    // usuario, el tramo ya no coincide con el patron y se escaparia medio nombre.
-    clip(&redact::mask_user_paths(&one_line(s)), max)
+    // usuario o del correo, el tramo ya no coincide con el patron y se escaparia
+    // medio dato.
+    let masked = redact::mask_user_paths(&one_line(s));
+    clip(&redact::mask_emails(&masked), max)
 }
 
 /// Pinta un cubo de hallazgos con tope y aviso de lo omitido.
@@ -641,6 +643,19 @@ mod tests {
     /// El diff pasa por el mismo enmascarado que el resto del render: `diff`
     /// devuelve los params crudos a proposito, y la politica de redaccion vive en
     /// `field`. Sin esto, comparar dos versiones publicaria el nombre de usuario.
+    #[test]
+    fn el_render_enmascara_un_correo() {
+        assert_eq!(
+            field("avisa a juan@ejemplo.com", 100),
+            "avisa a j***@ejemplo.com"
+        );
+        assert_eq!(
+            field("juan@ejemplo.com", 12),
+            "j***@ejemplo...",
+            "primero se enmascara y luego se recorta"
+        );
+    }
+
     #[test]
     fn el_diff_enmascara_la_ruta_y_resume() {
         let cambios = vec![

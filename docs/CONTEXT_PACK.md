@@ -62,6 +62,7 @@ higiene): **2,7 accionables por robot afectado y 0 ocultos por el tope**.
 | Nombre sensible (`pass`, `token`, `serial`, …) | `(oculto)` |
 | Ruta absoluta en el panel de variables | `(ruta)` |
 | Tramo de usuario en cualquier ruta (`C:/Users/x`, `/home/x`) | `%USERPROFILE%` / `~` |
+| Correo electronico (`juan@dominio.com`) | `j***@dominio.com` |
 
 Un pack esta pensado para compartirse y para pasarselo a un agente: el material de credenciales y el
 arbol de directorios del desarrollador no viajan.
