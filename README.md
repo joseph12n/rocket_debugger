@@ -82,6 +82,26 @@ cargo +stable-x86_64-pc-windows-gnu build
 
 En CI (Linux) se usa el toolchain por defecto.
 
+## Calidad y PRs
+
+Cada cambio sube como PR: el CI (fmt, clippy `-D warnings`, tests en Linux y build
+release en Windows) y SonarCloud son la senal de calidad, no la revision local a ojo.
+Antes de subir, el gate local replica lo que exige CI:
+
+```powershell
+pwsh scripts/gate.ps1           # fmt + clippy + tests
+pwsh scripts/gate.ps1 -Quick    # sin tests, al iterar sobre comentarios
+pwsh scripts/gate.ps1 -Release  # anade el build release del job de Windows
+```
+
+El ciclo completo (push, alta del PR si no existe y espera de comprobaciones) se
+automatiza con:
+
+```powershell
+pwsh scripts/pr.ps1 -BodyFile C:\tmp\pr.md   # deja el PR en verde
+pwsh scripts/pr.ps1 -Merge                   # y lo aterriza con merge rebase
+```
+
 ## Roadmap
 
 - [x] #1 parser de `bots.data` e indice de versiones
