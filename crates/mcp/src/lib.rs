@@ -40,8 +40,11 @@
 //! solo se diagnostica.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use rocketdebug_core::db;
+use rocketdebug_core::exec::{self, Broker, ExecConfig, ProcessRunner, StudioProbe};
 use rocketdebug_core::logs;
 use rocketdebug_core::pack::DEFAULT_LOG_FILES;
 
@@ -50,6 +53,31 @@ mod protocol;
 mod tools;
 
 pub use http::{serve, MAX_BODY_BYTES};
+
+/// La ejecucion configurada en este servidor.
+///
+/// Vive en [`Settings`] y no en un `static` para que los tests inyecten un
+/// broker con un runner falso: la misma tool se prueba sin `rocketbot.exe` y
+/// sin depender de que Studio este cerrado en la maquina que corre la suite.
+#[derive(Clone)]
+pub struct ExecSettings {
+    /// Broker compartido por todas las conexiones HTTP del proceso.
+    pub broker: Arc<Broker>,
+    /// Directorio de logs bajo el que se crean los de cada ejecucion. Es el
+    /// mismo que lee el pack, para que `flow_pack` vea los errores nuevos.
+    pub logs_dir: PathBuf,
+    /// Timeout cuando la peticion no trae uno.
+    pub default_timeout: Duration,
+}
+
+impl std::fmt::Debug for ExecSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecSettings")
+            .field("logs_dir", &self.logs_dir)
+            .field("default_timeout", &self.default_timeout)
+            .finish_non_exhaustive()
+    }
+}
 
 /// Entorno que el servidor resuelve **una vez** al arrancar, no en cada peticion.
 ///
@@ -80,6 +108,9 @@ pub struct Settings {
     /// como el resto del entorno, para que dos peticiones seguidas no hablen de
     /// workspaces distintos.
     pub workspace: Option<PathBuf>,
+    /// Broker de ejecucion. `None` = `run_robot` no esta configurado (no hay
+    /// `rocketbot.exe`) y lo dice en vez de fallar por la espalda.
+    pub exec: Option<ExecSettings>,
 }
 
 /// Ruta del registro de problemas.
@@ -100,6 +131,50 @@ fn registry_from_env() -> Option<PathBuf> {
         .or_else(|| Some(rocketdebug_core::registry::default_path()))
 }
 
+/// Directorio de logs pedido explicitamente, si lo hay.
+fn logs_from_env() -> Option<PathBuf> {
+    std::env::var_os("ROCKETDEBUG_LOGS")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+}
+
+/// Configura el broker si hay un `rocketbot.exe` al que apuntar.
+///
+/// Basta con que `ROCKETBOT_EXE` este definido aunque la ruta no exista: el
+/// fallo se reporta al ejecutar, con la ruta concreta, en vez de desactivar la
+/// tool en silencio. Sin variable, solo se activa si existe la ruta estandar.
+fn exec_from_env(logs_env: Option<PathBuf>) -> Option<ExecSettings> {
+    let exe_env = std::env::var_os("ROCKETBOT_EXE")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty());
+    let exe = exe_env
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(exec::DEFAULT_EXE));
+    if exe_env.is_none() && !exe.is_file() {
+        return None;
+    }
+
+    // Los logs de ejecucion van bajo el mismo directorio que lee el pack: si
+    // `--log` funciona, quedan en un subdirectorio y `recent_files` los
+    // encuentra; si la version instalada lo ignora, el runner escribe en el
+    // directorio por defecto de Rocketbot y el respaldo del broker los lee.
+    let logs_dir = logs_env
+        .or_else(|| exe.parent().map(|dir| dir.join("logs")))
+        .unwrap_or_else(|| PathBuf::from(logs::DEFAULT_LOGS_DIR));
+    let _ = std::fs::create_dir_all(&logs_dir);
+
+    let config = ExecConfig {
+        exe,
+        logs_dir: logs_dir.clone(),
+        probe: StudioProbe::System,
+    };
+    Some(ExecSettings {
+        broker: Arc::new(Broker::new(Arc::new(ProcessRunner::new(config)))),
+        logs_dir,
+        default_timeout: Duration::from_secs(exec::DEFAULT_TIMEOUT_SECS),
+    })
+}
+
 impl Settings {
     /// Entorno vacio: ni `ROCKETBOT_DB`, ni logs, ni registro.
     ///
@@ -111,6 +186,7 @@ impl Settings {
             logs: None,
             registry: None,
             workspace: None,
+            exec: None,
         }
     }
 
@@ -124,11 +200,18 @@ impl Settings {
             .map(PathBuf::from)
             .filter(|path| !path.as_os_str().is_empty());
 
-        let logs_dir = Path::new(logs::DEFAULT_LOGS_DIR);
-        let logs = if logs_dir.is_dir() {
-            Some((logs_dir.to_path_buf(), DEFAULT_LOG_FILES))
+        let logs_env = logs_from_env();
+        let exec = exec_from_env(logs_env.clone());
+
+        // Con broker configurado, el directorio de logs es el suyo (se acaba de
+        // crear si no existia): el pack tiene que ver la ejecucion.
+        let logs = if let Some(exec) = &exec {
+            Some((exec.logs_dir.clone(), DEFAULT_LOG_FILES))
+        } else if let Some(dir) = logs_env {
+            dir.is_dir().then_some((dir, DEFAULT_LOG_FILES))
         } else {
-            None
+            let dir = Path::new(logs::DEFAULT_LOGS_DIR);
+            dir.is_dir().then(|| (dir.to_path_buf(), DEFAULT_LOG_FILES))
         };
 
         Self {
@@ -136,6 +219,7 @@ impl Settings {
             logs,
             registry: registry_from_env(),
             workspace: workspace_from_env(),
+            exec,
         }
     }
 
@@ -176,6 +260,7 @@ mod tests {
             logs: None,
             registry: None,
             workspace: None,
+            exec: None,
         };
         assert_eq!(
             settings.default_db(),

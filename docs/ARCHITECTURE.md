@@ -19,7 +19,7 @@ catalogo comandos ─┘          ├→ daemon local (HTTP/WS)  ← lo que pint
 |---|---|---|
 | Motor | `rocketdebug-core` | parseo, arbol, indice de versiones, grafo, reglas, atribucion, render |
 | CLI | `rocketdebug-cli` | inspeccion manual y debug del motor |
-| MCP | `rocketdebug-mcp` | fachada para el agente por stdio y HTTP (8 tools) |
+| MCP | `rocketdebug-mcp` | fachada para el agente por stdio y HTTP (10 tools) |
 | Registro | `registry` (core) | memoria de firmas y fixes; **el unico sitio donde se escribe** |
 | Vigilante | `rocketdebug-cli watch` | barrido periodico que alimenta el registro sin intervencion |
 | UI | `rocketdebug-mcp --http` | bandeja de entrada en el navegador (`/`, `/api/review`, `/api/pack`); Tauri solo la envolveria |
@@ -83,11 +83,41 @@ usa `build_from_conn_with_logs` y decide el directorio. Sin esa separacion, un t
 llamara igual que uno real cambiaria de resultado segun la maquina que lo ejecute, y el golden del
 render dejaria de ser un golden.
 
+### El broker no se fia del `exit_code`
+
+`rocketbot.exe -start=... -db=...` con Studio abierto **delega en la instancia que ya corre** y
+puede devolver `exit_code 0` sin ejecutar el robot: es el hallazgo operativo de `docs/CICLO.md`
+(`eventos_del_robot: 0`). Por eso la fachada no expone "lanza y devuelve el exit code": expone
+`run_robot`, que pasa por un broker.
+
+- **Una ejecucion a la vez** en el workspace: cola FIFO con mutex y condvar. `run_status` publica
+  quien esta corriendo, quien espera turno y como termino la ultima ejecucion.
+- **Deteccion de Studio abierto antes de lanzar** (procesos `rocketbot.exe` del sistema). No se
+  lanza nada y el mensaje da las dos alternativas: cerrar Studio o usar el modo API del servidor
+  de Rocketbot.
+- **Verificacion de eventos:** despues de lanzar, el broker exige al menos una entrada de log con
+  `request: <robot>`. Sin eventos el resultado es fallo aunque el `exit_code` sea 0. El log de
+  fichero es la prueba; el codigo de salida no lo es.
+- **Atribucion temporal:** los errores de esa ejecucion se cruzan con el historial de `bots` y se
+  atribuyen al snapshot vivo de su instante, no al ultimo guardado.
+
+El runner recibe un directorio de logs nuevo por ejecucion (`--log=<dir>`). Si la version instalada
+ignora la opcion, el broker prueba el `Log path:` que el CLI anuncia en stdout y, como ultimo
+recurso, el directorio de logs configurado; los tres caminos se filtran por la hora de arranque,
+asi que un log viejo no cuenta como ejecucion de ahora. Ese directorio es el mismo que lee el pack,
+de modo que despues de ejecutar, `flow_pack` ya ve los errores nuevos.
+
+`run_robot` es sincrono y puede tardar: el timeout (5-900 s, 180 por defecto) es de **ejecucion**,
+no de espera en cola. `run_status` se puede pedir en paralelo porque el servidor HTTP atiende una
+conexion por hilo. La ejecucion real contra BBRE2 vive en un test `#[ignore]`: requiere Studio
+cerrado, `ROCKETBOT_EXE` y `C:\rocketbot_bots\BBRE2\robot_run.db`.
+
 ## Restricciones del entorno real
 
-- `max_executions: 1` en la licencia y un unico ChromeDriver. La app debe ser **broker de ejecucion**
-  (cola + mutex), no un espectador: si el agente ejecuta mientras Studio esta abierto, el resultado es
-  `SessionNotCreatedException: Chrome failed to start: crashed`.
+- `max_executions: 1` en la licencia y un unico ChromeDriver. Por eso `run_robot` pasa por el
+  **broker de ejecucion** (cola + mutex) y se niega con Studio abierto: si el agente ejecuta mientras
+  Studio esta abierto, el resultado es `SessionNotCreatedException: Chrome failed to start: crashed`
+  o, peor, un `exit_code 0` sin eventos. El broker convierte ese falso exito en fallo.
 - Cada guardado crea un snapshot nuevo: **el undo del agente es gratis**. El diff y el rollback se
   construyen sobre datos que ya existen.
 - Ruido de motor: buena parte de los `ERROR` del log son `zdev`/`getbot` (fallos del propio Rocketbot,
@@ -106,6 +136,7 @@ Medido sobre 28 robots reales:
 
 Objetivo de diseno: **un robot en <= 2,5k tokens**, para que un agente pueda tener el workspace
 entero en contexto y diagnosticar sin pedir el flujo crudo.
+
 ### El registro es el unico sitio donde se escribe
 
 `robot.db` se abre siempre en solo lectura. Lo unico que la herramienta persiste es su propio

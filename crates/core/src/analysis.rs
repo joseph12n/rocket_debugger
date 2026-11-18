@@ -552,7 +552,14 @@ fn robot_errors(robot: &str, logs_dir: &Path, max_files: usize) -> Vec<logs::Log
 }
 
 /// Snapshots del robot reducidos a `cmd_id -> nodo`, para la atribucion.
-fn snapshot_views(conn: &rusqlite::Connection, robot: &str) -> Result<Vec<SnapshotView>> {
+///
+/// `pub(crate)` porque el broker de ejecucion atribuye los errores de **una**
+/// ejecucion con la misma vista: duplicar el aplanado aqui haria que el pack y el
+/// informe de ejecucion pudieran dar lineas distintas para el mismo error.
+pub(crate) fn snapshot_views(
+    conn: &rusqlite::Connection,
+    robot: &str,
+) -> Result<Vec<SnapshotView>> {
     let mut out = Vec::new();
     for snap in db::load_snapshots(conn, robot)? {
         let root = db::project_root(&snap.project);
