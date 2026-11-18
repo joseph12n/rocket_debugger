@@ -235,8 +235,14 @@ fn pasada(
             };
             match analisis {
                 Ok(analisis) => {
-                    let recuento =
-                        registrar(registry, &fuente.label, &resumen.name, &analisis, visto_en);
+                    let recuento = registrar(
+                        registry,
+                        &conn,
+                        &fuente.label,
+                        &resumen.name,
+                        &analisis,
+                        visto_en,
+                    );
                     writeln!(out, "{}", linea_robot(&nombre, &recuento, lee_logs))?;
                     analizados += 1;
                 }
@@ -270,11 +276,19 @@ struct EstadoPasada {
 /// del motor, que ni siquiera se recorre porque no es culpa del robot.
 fn registrar(
     registry: &mut Registry,
+    conn: &rusqlite::Connection,
     label: &str,
     robot: &str,
     analysis: &Analysis,
-    visto_en: chrono::NaiveDateTime,
+    respaldo: chrono::NaiveDateTime,
 ) -> Recuento {
+    // La hora de la observacion es la del **snapshot** observado, no la del barrido:
+    // si fuera la del reloj, cada pasada contaria la misma version como un
+    // avistamiento nuevo y el contador del registro dejaria de significar nada.
+    let visto_en = rocketdebug_core::db::latest_created_at(conn, robot)
+        .ok()
+        .flatten()
+        .unwrap_or(respaldo);
     let mut recuento = Recuento::default();
     for item in analysis
         .errors

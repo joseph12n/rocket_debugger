@@ -240,6 +240,11 @@ impl Registry {
 
         // `version IS ?` compara NULL con NULL; con `=` el resultado seria
         // siempre falso y una observacion sin version entraria en cada barrido.
+        //
+        // `seen_at` NO es la hora del barrido: quien registra pasa la hora del
+        // snapshot observado (ver `db::latest_created_at`). Si fuera el reloj del
+        // escaneo, dos pasadas de la misma version contarian como dos
+        // avistamientos y el contador dejaria de significar nada.
         let already: bool = tx.query_row(
             "SELECT EXISTS(
                  SELECT 1 FROM observations
@@ -556,6 +561,32 @@ mod tests {
         assert!(antes < despues, "{antes} no ordena antes de {despues}");
         // Un valor corrupto degrada a epoch en vez de tumbar la busqueda.
         assert_eq!(parse_ts("no-es-fecha"), NaiveDateTime::default());
+    }
+
+    /// Re-escanear la misma version no puede inflar el contador: la identidad
+    /// incluye el instante, pero quien registra pasa el del **snapshot**, no el del
+    /// barrido (ver `db::latest_created_at`). Con la misma hora, la segunda pasada
+    /// es idempotente.
+    #[test]
+    fn la_misma_version_escaneada_dos_veces_no_suma() {
+        let mut registro = Registry::in_memory().expect("registro");
+        let obs = Observation {
+            signature: "NameError:name:{var}:not_defined".to_string(),
+            robot: "ML_06_Legacy".to_string(),
+            db_label: "test\\robot.db".to_string(),
+            version: Some(25),
+            line: "2.10".to_string(),
+            message: "NameError: name 'contador' is not defined".to_string(),
+            // La hora del snapshot v25, no la del reloj.
+            seen_at: crate::db::parse_date("2026-11-17 12:47:10"),
+        };
+        assert!(registro.record_observation(&obs).expect("primera"));
+        assert!(
+            !registro.record_observation(&obs).expect("segunda"),
+            "la misma version no debe sumar dos veces"
+        );
+        let stats = registro.search("NameError", 5).expect("busqueda");
+        assert_eq!(stats[0].occurrences, 1);
     }
 
     #[test]

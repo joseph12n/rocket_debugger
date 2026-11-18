@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use rocketdebug_core::analysis::{analyse_with_workspace, load_workspace};
+use rocketdebug_core::analysis::{analyse_with_workspace_at, load_workspace};
 use rocketdebug_core::{build_from_conn_with_logs, db, logs};
 
 mod review;
@@ -197,7 +197,8 @@ fn main() -> anyhow::Result<()> {
                         refs.push((ws_conn, ws_label.as_str()));
                     }
 
-                    let analysis = analyse_with_workspace(&refs, &label, &robot, log_source)?;
+                    let analysis =
+                        analyse_with_workspace_at(&refs, &label, &robot, snapshot, log_source)?;
                     eprintln!(
                         "workspace: {} dbs | {} llamadas ambiguas | {} llamadas sin destino",
                         refs.len(),
