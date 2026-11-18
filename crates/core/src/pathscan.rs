@@ -64,10 +64,9 @@ pub fn continues_scheme(text: &str, at: usize) -> bool {
 /// Lo usa la deteccion de raices POSIX: en `carpeta/home/x` el prefijo aparece,
 /// pero la ruta es relativa y se conserva.
 pub fn opens_token(text: &str, at: usize) -> bool {
-    text[..at]
-        .chars()
-        .next_back()
-        .is_none_or(|c| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+    text[..at].chars().next_back().map_or(true, |c| {
+        !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    })
 }
 
 /// Un caracter que corta la URL: a partir de ahi empieza otro token del valor.
