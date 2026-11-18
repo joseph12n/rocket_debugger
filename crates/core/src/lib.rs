@@ -20,6 +20,7 @@
 //! - [`redact`]   redaccion de valores cifrados y nombres sensibles
 //! - [`pack`]    ensamblado del context pack
 //! - [`render`]  markdown + contabilidad de tokens
+//! - [`review`]  agregacion de la vista de bandeja (una fila por robot)
 //!
 //! # Decisiones de diseno
 //!
@@ -43,6 +44,7 @@ pub mod pack;
 pub mod redact;
 pub mod registry;
 pub mod render;
+pub mod review;
 pub mod rules;
 pub mod signature;
 pub mod tree;
@@ -52,4 +54,5 @@ pub use analysis::{analyse, Analysis};
 pub use error::{Error, Result};
 pub use pack::{build_from_conn, build_from_conn_with_logs, Pack, VarInfo};
 pub use render::{estimate_tokens, render_changes, Sizing};
+pub use review::{review_conn, review_workspace, Review, ReviewRow};
 pub use versions::{VersionIndex, VersionInfo};
