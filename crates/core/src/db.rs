@@ -58,6 +58,26 @@ pub fn latest_created_at(conn: &Connection, name: &str) -> Result<Option<NaiveDa
         .filter(|d| *d != NaiveDateTime::default()))
 }
 
+/// `(id, created_at)` del ultimo snapshot del robot, sin decodificar el JSON.
+///
+/// El broker de ejecucion lo usa para decir contra que version se atribuyeron
+/// los errores. Decodificar todas las versiones solo para leer la ultima
+/// costaria lo mismo que construir el pack entero.
+pub fn latest_snapshot(conn: &Connection, name: &str) -> Result<Option<(i64, NaiveDateTime)>> {
+    let mut stmt =
+        conn.prepare("SELECT id, created_at FROM bots WHERE name = ?1 ORDER BY id DESC LIMIT 1")?;
+    let mut rows = stmt.query([name])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    let id: i64 = row.get(0)?;
+    let created: Option<String> = row.get(1).ok();
+    Ok(Some((
+        id,
+        created.as_deref().map(parse_date).unwrap_or_default(),
+    )))
+}
+
 /// Abre en solo lectura. La herramienta nunca escribe `robot.db`.
 pub fn open_readonly(path: &Path) -> Result<Connection> {
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|source| {
@@ -199,6 +219,25 @@ pub fn discover_databases(root: &Path) -> Result<Vec<PathBuf>> {
     }
     out.sort();
     Ok(out)
+}
+
+/// Etiqueta de una db sin ruta absoluta: `BBRE2\robot_run.db`.
+///
+/// El pack y los informes se comparten (agente, incidencia, UI), asi que no
+/// llevan el arbol de directorios del desarrollador. Se normalizan los dos
+/// separadores a proposito: `Path` solo reconoce `\` en Windows y la etiqueta no
+/// puede depender del host que la construye.
+pub fn label(path: &Path) -> String {
+    let normalizado = path.to_string_lossy().replace('\\', "/");
+    let mut partes: Vec<&str> = normalizado.split('/').filter(|p| !p.is_empty()).collect();
+
+    let Some(file) = partes.pop() else {
+        return "robot.db".to_string();
+    };
+    match partes.pop() {
+        Some(dir) => format!("{dir}\\{file}"),
+        None => file.to_string(),
+    }
 }
 
 fn has_bots_table(path: &Path) -> bool {

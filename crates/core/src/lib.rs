@@ -11,6 +11,7 @@
 //! - [`tree`]    arbol de comandos -> lista plana con linea, rama y profundidad
 //! - [`versions`] historial de snapshots + indice temporal
 //! - [`logs`]    parser de los logs de ejecucion del runner
+//! - [`exec`]    broker de ejecucion: cola, deteccion de Studio y verificacion de eventos
 //! - [`signature`] normalizacion de firmas de error y clasificacion del ruido
 //! - [`attribution`] atribucion de cada error al snapshot vivo (veredicto y linea)
 //! - [`diff`]     diff estructural entre dos snapshots del mismo robot
@@ -38,6 +39,7 @@ pub mod attribution;
 pub mod db;
 pub mod diff;
 pub mod error;
+pub mod exec;
 pub mod graph;
 pub mod logs;
 pub mod pack;

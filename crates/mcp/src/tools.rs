@@ -15,8 +15,11 @@ use std::fmt::Write as _;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
+use rocketdebug_core::attribution::Verdict;
 use rocketdebug_core::db;
+use rocketdebug_core::exec::{self, BrokerStatus, RunFailure, RunReport, RunRequest};
 use rocketdebug_core::logs;
+use rocketdebug_core::redact;
 use rocketdebug_core::{build_from_conn_with_logs, Error};
 use serde_json::{json, Map, Value};
 
@@ -26,10 +29,15 @@ pub const LIST_ROBOTS: &str = "list_robots";
 pub const FLOW_PACK: &str = "flow_pack";
 pub const ROBOT_ERRORS: &str = "robot_errors";
 pub const FLOW_DIFF: &str = "flow_diff";
+pub const RUN_ROBOT: &str = "run_robot";
+pub const RUN_STATUS: &str = "run_status";
 pub const PROBLEMS_SEARCH: &str = "problems_search";
 pub const PROBLEMS_RECORD: &str = "problems_record";
 pub const PROBLEMS_FIX: &str = "problems_fix";
 pub const UI_RENDER: &str = "ui_render";
+
+/// Errores distintos que se pintan en la respuesta de `run_robot`.
+const MAX_ERRORS_IN_TEXT: usize = 10;
 
 /// Resultado de una tool, ya listo para el `result` de JSON-RPC.
 #[derive(Debug, Clone)]
@@ -136,6 +144,35 @@ pub fn descriptors() -> Value {
                     }),
                     &["robot", "from", "to"],
                 ),
+            },
+            {
+                "name": RUN_ROBOT,
+                "description": "Ejecuta un robot por el broker de ejecucion: una ejecucion a la \
+                                vez en el workspace, deteccion de Studio abierto antes de lanzar y \
+                                verificacion de que hubo eventos del robot. Un exit_code 0 sin \
+                                eventos es fallo, nunca exito. Devuelve eventos, errores \
+                                atribuidos al snapshot vivo y duracion. Puede tardar (timeout por \
+                                defecto 180 s); usa run_status para ver la cola.",
+                "inputSchema": object_schema(
+                    json!({
+                        "robot": robot_property(),
+                        "db": db_property(),
+                        "timeout": {
+                            "type": "integer",
+                            "minimum": 5,
+                            "maximum": 900,
+                            "description": "Segundos maximos de ejecucion (por defecto 180).",
+                        },
+                    }),
+                    &["robot"],
+                ),
+            },
+            {
+                "name": RUN_STATUS,
+                "description": "Estado del broker de ejecucion: que robot se esta ejecutando ahora, \
+                                cuales esperan turno y como termino la ultima ejecucion. Sirve para \
+                                mirar la cola mientras un run_robot esta bloqueado.",
+                "inputSchema": object_schema(json!({}), &[]),
             },
             {
                 "name": PROBLEMS_SEARCH,
@@ -268,6 +305,8 @@ fn dispatch(name: &str, arguments: &Value, settings: &Settings) -> Result<ToolOu
         FLOW_PACK => flow_pack(arguments, settings),
         ROBOT_ERRORS => robot_errors(arguments, settings),
         FLOW_DIFF => flow_diff(arguments, settings),
+        RUN_ROBOT => run_robot(arguments, settings),
+        RUN_STATUS => run_status(arguments, settings),
         PROBLEMS_SEARCH => problems_search(arguments, settings),
         PROBLEMS_RECORD => problems_record(arguments, settings),
         PROBLEMS_FIX => problems_fix(arguments, settings),
@@ -354,6 +393,246 @@ fn nodes_of(
         .map(|v| v.as_slice())
         .unwrap_or(&[]);
     Ok(rocketdebug_core::tree::flatten(commands))
+}
+
+// ---------------------------------------------------------------- ejecucion
+
+/// Texto cuando no hay `rocketbot.exe` configurado.
+fn sin_broker() -> String {
+    "la ejecucion no esta configurada: define ROCKETBOT_EXE con la ruta a \
+     rocketbot.exe y reinicia el servidor. Con Studio abierto el runner CLI delega \
+     en la instancia existente y no ejecuta; el broker lo detecta y se niega antes \
+     de lanzar."
+        .to_string()
+}
+
+/// Comprueba que el robot existe **antes** de ocupar un turno de la cola.
+fn ensure_robot(db_path: &Path, robot: &str) -> Result<(), Error> {
+    let conn = db::open_readonly(db_path)?;
+    let robots = db::list_robots(&conn)?;
+    if robots.iter().any(|summary| summary.name == robot) {
+        Ok(())
+    } else {
+        Err(Error::RobotNotFound(robot.to_string()))
+    }
+}
+
+/// `run_robot`: el agente pide, el broker serializa.
+fn run_robot(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
+    let args = Args::new(arguments)?;
+    let robot = args.required_str("robot")?;
+    let db_path = resolve_db(args.opt_str("db")?, settings);
+    let Some(exec_settings) = &settings.exec else {
+        return Ok(ToolOutput::business_error(sin_broker()));
+    };
+
+    let timeout = match args.opt_i64("timeout")? {
+        Some(seconds) => exec::timeout_from_secs(seconds),
+        None => exec_settings.default_timeout,
+    };
+
+    // Un nombre mal escrito no debe esperar a que termine otra ejecucion para
+    // descubrirse: se valida antes de encolar.
+    if let Err(source) = ensure_robot(&db_path, &robot) {
+        return Ok(ToolOutput::business_error(describe_failure(
+            &source, &db_path,
+        )));
+    }
+
+    let report = exec_settings.broker.execute(RunRequest {
+        robot,
+        db: db_path,
+        timeout,
+    });
+    let text = render_run(&report);
+    if report.ok {
+        Ok(ToolOutput::ok(text))
+    } else {
+        Ok(ToolOutput::business_error(text))
+    }
+}
+
+/// `run_status`: la cola visible mientras un `run_robot` esta bloqueado.
+fn run_status(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
+    let _ = Args::new(arguments)?;
+    let Some(exec_settings) = &settings.exec else {
+        return Ok(ToolOutput::business_error(sin_broker()));
+    };
+    Ok(ToolOutput::ok(render_status(
+        &exec_settings.broker.status(),
+    )))
+}
+
+fn render_run(report: &RunReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# run {}  ({})", report.robot, report.db_label);
+    let _ = writeln!(out, "ok: {}", report.ok);
+    if let Some(failure) = &report.failure {
+        let _ = writeln!(
+            out,
+            "motivo: {}",
+            clip(&redact::mask_user_paths(&failure.explain()), 400)
+        );
+    }
+    let exit = report
+        .exit_code
+        .map_or_else(|| "sin codigo".to_string(), |code| code.to_string());
+    let _ = writeln!(
+        out,
+        "exit: {exit} | timeout: {} | duracion: {:.1} s | cola: {:.1} s",
+        if report.timed_out { "si" } else { "no" },
+        report.duration_ms as f64 / 1000.0,
+        report.queue_wait_ms as f64 / 1000.0
+    );
+    let _ = writeln!(out, "eventos del robot: {}", report.events);
+    if let Some(id) = report.snapshot_id {
+        let at = report
+            .snapshot_at
+            .map(|date| date.to_string())
+            .unwrap_or_default();
+        let _ = writeln!(out, "snapshot vivo: {id} ({at})");
+    }
+    if !report.log_files.is_empty() {
+        let _ = writeln!(out, "logs: {} fichero(s)", report.log_files.len());
+    }
+
+    if !report.errors.is_empty() {
+        let _ = writeln!(out, "\n## Errores ({} distintos)", report.errors.len());
+        for error in report.errors.iter().take(MAX_ERRORS_IN_TEXT) {
+            let line = if error.line.is_empty() {
+                "L-".to_string()
+            } else {
+                format!("L{}", error.line)
+            };
+            let version = error
+                .version
+                .map_or_else(String::new, |version| format!(" v{version}"));
+            let times = if error.occurrences > 1 {
+                format!(" x{}", error.occurrences)
+            } else {
+                String::new()
+            };
+            let message = clip(&redact::mask_user_paths(&error.message), 140);
+            let _ = writeln!(
+                out,
+                "- {line} {} [{}{version}]{times}: {message}",
+                error.command,
+                verdict_label(error.verdict)
+            );
+        }
+        if report.errors.len() > MAX_ERRORS_IN_TEXT {
+            let _ = writeln!(
+                out,
+                "… y {} errores distintos mas",
+                report.errors.len() - MAX_ERRORS_IN_TEXT
+            );
+        }
+    } else if report.ok {
+        let _ = writeln!(out, "errores: ninguno");
+    }
+
+    if !report.ok {
+        if let Some(hint) = output_hint(report) {
+            let _ = writeln!(out, "\nsalida: {hint}");
+        }
+    }
+    out.trim_end().to_string()
+}
+
+fn verdict_label(verdict: Verdict) -> &'static str {
+    match verdict {
+        Verdict::Vivo => "vivo",
+        Verdict::PayloadCambiado => "payload cambiado",
+        Verdict::Historico => "historico",
+        Verdict::Desconocido => "sin atribuir",
+    }
+}
+
+/// Ultimas lineas utiles de la salida del runner, ya enmascaradas.
+///
+/// El caso tipico es el aviso de licencia de produccion: explica por que un
+/// `exit_code 0` no ejecuto nada. Se filtran las lineas de asteriscos del banner
+/// para que no se coman el unico dato que importa.
+fn output_hint(report: &RunReport) -> Option<String> {
+    let source = if report.stderr_tail.trim().is_empty() {
+        &report.stdout_tail
+    } else {
+        &report.stderr_tail
+    };
+    let lines: Vec<&str> = source
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.trim_matches('*').trim().is_empty())
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let tail = lines
+        .iter()
+        .rev()
+        .take(3)
+        .rev()
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" / ");
+    Some(clip(&redact::mask_user_paths(&tail), 400))
+}
+
+fn render_status(status: &BrokerStatus) -> String {
+    let mut out = String::new();
+    match &status.running {
+        Some(running) => {
+            let _ = writeln!(
+                out,
+                "broker: ocupado — {} ({}) desde hace {:.1} s",
+                running.robot,
+                running.db_label,
+                running.elapsed_ms as f64 / 1000.0
+            );
+        }
+        None => {
+            let _ = writeln!(out, "broker: libre");
+        }
+    }
+    if !status.queue.is_empty() {
+        let _ = writeln!(out, "en cola ({}):", status.queue.len());
+        for (index, queued) in status.queue.iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "  {}. {} ({}) esperando {:.1} s",
+                index + 1,
+                queued.robot,
+                queued.db_label,
+                queued.elapsed_ms as f64 / 1000.0
+            );
+        }
+    }
+    if let Some(last) = &status.last {
+        let result = if last.ok {
+            "ok".to_string()
+        } else {
+            last.failure
+                .as_ref()
+                .map(RunFailure::explain)
+                .unwrap_or_else(|| "fallo".to_string())
+        };
+        let _ = writeln!(
+            out,
+            "ultima: {} — {} hace {:.1} s",
+            last.robot,
+            clip(&redact::mask_user_paths(&result), 140),
+            last.at.elapsed().as_secs_f64()
+        );
+    }
+    out.trim_end().to_string()
+}
+
+fn clip(text: &str, max: usize) -> String {
+    let mut out: String = text.chars().take(max).collect();
+    if text.chars().count() > max {
+        out.push('…');
+    }
+    out
 }
 
 // ---------------------------------------------------------------- registro
@@ -850,20 +1129,10 @@ fn errors_section(markdown: &str) -> Option<String> {
 
 /// Etiqueta de la db sin ruta absoluta: `BBRE2\robot_run.db`.
 ///
-/// El pack se comparte (agente, incidencia, UI): no lleva el arbol de
-/// directorios del desarrollador. Se normalizan los dos separadores a proposito:
-/// `Path` solo reconoce `\` en Windows y la etiqueta no puede depender del host.
+/// El calculo vive en el motor ([`db::label`]) porque el informe del broker
+/// tambien lo necesita y dos implementaciones acabarian discrepando.
 pub(crate) fn db_label(path: &Path) -> String {
-    let normalizado = path.to_string_lossy().replace('\\', "/");
-    let mut partes: Vec<&str> = normalizado.split('/').filter(|p| !p.is_empty()).collect();
-
-    let Some(file) = partes.pop() else {
-        return "robot.db".to_string();
-    };
-    match partes.pop() {
-        Some(dir) => format!("{dir}\\{file}"),
-        None => file.to_string(),
-    }
+    db::label(path)
 }
 
 /// Mensaje de negocio: el del motor y, detras, la db que se consulto.
@@ -899,6 +1168,7 @@ mod tests {
             logs: None,
             registry: None,
             workspace: None,
+            exec: None,
         };
         assert_eq!(
             resolve_db(Some(r"C:\otra\robot.db".to_string()), &settings),
@@ -990,10 +1260,10 @@ mod tests {
     }
 
     #[test]
-    fn el_catalogo_declara_las_ocho_tools_con_schema() {
+    fn el_catalogo_declara_las_diez_tools_con_schema() {
         let catalogo = descriptors();
         let tools = catalogo["tools"].as_array().expect("array de tools");
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 10);
         let nombres: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert_eq!(
             nombres,
@@ -1002,6 +1272,8 @@ mod tests {
                 FLOW_PACK,
                 ROBOT_ERRORS,
                 FLOW_DIFF,
+                RUN_ROBOT,
+                RUN_STATUS,
                 PROBLEMS_SEARCH,
                 PROBLEMS_RECORD,
                 PROBLEMS_FIX,
@@ -1013,5 +1285,20 @@ mod tests {
             assert_eq!(tool["inputSchema"]["type"], "object");
             assert!(tool["inputSchema"]["properties"].is_object());
         }
+    }
+
+    #[test]
+    fn run_robot_sin_broker_es_error_de_negocio() {
+        let salida = call(RUN_ROBOT, &json!({"robot": "demo"}), &Settings::hermetic())
+            .expect("la tool no rompe");
+        assert!(salida.is_error, "{salida:?}");
+        assert!(salida.text.contains("ROCKETBOT_EXE"), "{}", salida.text);
+    }
+
+    #[test]
+    fn run_status_sin_broker_es_error_de_negocio() {
+        let salida = call(RUN_STATUS, &json!({}), &Settings::hermetic()).expect("la tool no rompe");
+        assert!(salida.is_error, "{salida:?}");
+        assert!(salida.text.contains("ROCKETBOT_EXE"), "{}", salida.text);
     }
 }

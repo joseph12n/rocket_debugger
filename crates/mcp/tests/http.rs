@@ -279,6 +279,7 @@ fn una_tool_por_http_usa_el_entorno_del_servidor() {
         logs: None,
         registry: None,
         workspace: None,
+        exec: None,
     });
 
     let line = call_request(3, "list_robots", json!({}));

@@ -37,6 +37,11 @@ cargo run -p rocketdebug-cli -- pack ML_06_Legacy --db "C:\rocketbot_bots\certif
 cargo run -p rocketdebug-cli -- pack reporteMercadolibre --stats
 ```
 
+La ejecucion la pide el agente por MCP con `run_robot`: pasa por un broker (una ejecucion a la vez),
+se niega si Studio esta abierto —el runner CLI delegaria sin ejecutar— y exige eventos del robot
+antes de dar la ejecucion por buena. `run_status` muestra quien corre y quien espera. Requiere
+`ROCKETBOT_EXE` apuntando a `rocketbot.exe`; el timeout es 180 s por defecto (maximo 900).
+
 ## Arquitectura
 
 ```
