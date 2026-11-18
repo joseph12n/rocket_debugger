@@ -26,6 +26,9 @@ pub const LIST_ROBOTS: &str = "list_robots";
 pub const FLOW_PACK: &str = "flow_pack";
 pub const ROBOT_ERRORS: &str = "robot_errors";
 pub const FLOW_DIFF: &str = "flow_diff";
+pub const PROBLEMS_SEARCH: &str = "problems_search";
+pub const PROBLEMS_RECORD: &str = "problems_record";
+pub const PROBLEMS_FIX: &str = "problems_fix";
 
 /// Resultado de una tool, ya listo para el `result` de JSON-RPC.
 #[derive(Debug, Clone)]
@@ -133,6 +136,68 @@ pub fn descriptors() -> Value {
                     &["robot", "from", "to"],
                 ),
             },
+            {
+                "name": PROBLEMS_SEARCH,
+                "description": "Busca en el registro historico de problemas: que firmas ya se \
+                                vieron, cuantas veces, en que robots y si alguien las arreglo. Es \
+                                la memoria que evita redescubrir el mismo fallo en cada sesion.",
+                "inputSchema": object_schema(
+                    json!({
+                        "query": {
+                            "type": "string",
+                            "description": "Subcadena a buscar en la firma o en el nombre de robot. Vacio = todo.",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 200,
+                            "description": "Maximo de firmas a devolver (por defecto 20).",
+                        },
+                    }),
+                    &[],
+                ),
+            },
+            {
+                "name": PROBLEMS_RECORD,
+                "description": "Guarda en el registro los errores que el motor ve ahora en un \
+                                robot (vivos, historicos y defectos de modulo; el ruido del motor no \
+                                se registra). Es idempotente: repetir el barrido no infla los contadores.",
+                "inputSchema": object_schema(
+                    json!({"robot": robot_property(), "db": db_property()}),
+                    &["robot"],
+                ),
+            },
+            {
+                "name": PROBLEMS_FIX,
+                "description": "Registra como se cerro un problema: el diff entre la version que \
+                                fallaba y la arreglada, mas una nota del agente. Convierte un \
+                                diagnostico en conocimiento reutilizable.",
+                "inputSchema": object_schema(
+                    json!({
+                        "robot": robot_property(),
+                        "signature": {
+                            "type": "string",
+                            "description": "Firma normalizada del problema (tal como la devuelve problems_search).",
+                        },
+                        "from": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "bots.id de la version que fallaba.",
+                        },
+                        "to": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "bots.id de la version arreglada.",
+                        },
+                        "note": {
+                            "type": "string",
+                            "description": "Que se probo, que no funciono, efectos laterales.",
+                        },
+                        "db": db_property(),
+                    }),
+                    &["robot", "signature", "from", "to"],
+                ),
+            },
         ]
     })
 }
@@ -183,6 +248,9 @@ fn dispatch(name: &str, arguments: &Value, settings: &Settings) -> Result<ToolOu
         FLOW_PACK => flow_pack(arguments, settings),
         ROBOT_ERRORS => robot_errors(arguments, settings),
         FLOW_DIFF => flow_diff(arguments, settings),
+        PROBLEMS_SEARCH => problems_search(arguments, settings),
+        PROBLEMS_RECORD => problems_record(arguments, settings),
+        PROBLEMS_FIX => problems_fix(arguments, settings),
         other => Err(CallError::InvalidParams(format!(
             "tool desconocida: `{other}`"
         ))),
@@ -265,6 +333,222 @@ fn nodes_of(
         .map(|v| v.as_slice())
         .unwrap_or(&[]);
     Ok(rocketdebug_core::tree::flatten(commands))
+}
+
+// ---------------------------------------------------------------- registro
+
+/// Texto que se devuelve cuando no hay registro configurado.
+fn sin_registro() -> String {
+    "no hay registro de problemas configurado: define ROCKETDEBUG_REGISTRY (o \
+     ROCKETDEBUG_HOME) y vuelve a arrancar el servidor"
+        .to_string()
+}
+
+fn abrir_registro(settings: &Settings) -> Result<rocketdebug_core::registry::Registry, String> {
+    let path = settings.registry.as_deref().ok_or_else(sin_registro)?;
+    rocketdebug_core::registry::Registry::open(path)
+        .map_err(|e| format!("no pude abrir el registro {}: {e}", path.display()))
+}
+
+/// Hora del sello de una observacion.
+///
+/// `chrono` va sin la feature `clock` en todo el workspace, asi que el reloj lo
+/// pone quien llama; aqui se toma del sistema una sola vez por peticion.
+fn ahora() -> chrono::NaiveDateTime {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    chrono::DateTime::from_timestamp(secs, 0)
+        .map(|d| d.naive_utc())
+        .unwrap_or_default()
+}
+
+fn render_problems(stats: &[rocketdebug_core::registry::SignatureStats]) -> String {
+    let mut o = String::new();
+    if stats.is_empty() {
+        return "sin coincidencias en el registro\n".to_string();
+    }
+    let _ = writeln!(o, "{} firmas en el registro", stats.len());
+    for s in stats {
+        let _ = writeln!(o);
+        let _ = writeln!(o, "{}", s.signature);
+        let _ = writeln!(
+            o,
+            "  {} avistamientos | {} .. {} | {} fixes",
+            s.occurrences, s.first_seen, s.last_seen, s.fixes
+        );
+        let robots = if s.robots.is_empty() {
+            "(ninguno)".to_string()
+        } else {
+            s.robots.join(", ")
+        };
+        let _ = writeln!(o, "  robots: {robots}");
+    }
+    o
+}
+
+/// `problems_search`: que se ha visto ya.
+fn problems_search(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
+    let args = Args::new(arguments)?;
+    let query = args.opt_str("query")?.unwrap_or_default();
+    let limit = args.opt_i64("limit")?.unwrap_or(20).clamp(1, 200) as usize;
+
+    let registro = match abrir_registro(settings) {
+        Ok(r) => r,
+        Err(texto) => return Ok(ToolOutput::business_error(texto)),
+    };
+    match registro.search(&query, limit) {
+        Ok(stats) => Ok(ToolOutput::ok(render_problems(&stats))),
+        Err(e) => Ok(ToolOutput::business_error(format!(
+            "no pude consultar el registro: {e}"
+        ))),
+    }
+}
+
+/// `problems_record`: guardar lo que el motor ve ahora.
+///
+/// Es la unica tool que escribe algo, y escribe **su** fichero: el registro.
+/// `robot.db` se sigue abriendo en solo lectura.
+fn problems_record(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
+    let args = Args::new(arguments)?;
+    let robot = args.required_str("robot")?;
+    let db_path = resolve_db(args.opt_str("db")?, settings);
+
+    let mut registro = match abrir_registro(settings) {
+        Ok(r) => r,
+        Err(texto) => return Ok(ToolOutput::business_error(texto)),
+    };
+    let conn = match db::open_readonly(&db_path) {
+        Ok(c) => c,
+        Err(source) => {
+            return Ok(ToolOutput::business_error(describe_failure(
+                &source, &db_path,
+            )))
+        }
+    };
+    let label = db_label(&db_path);
+    let log_source = settings
+        .logs
+        .as_ref()
+        .map(|(dir, max_files)| (dir.as_path(), *max_files));
+    let analysis =
+        match rocketdebug_core::analysis::analyse_with_logs(&conn, &label, &robot, log_source) {
+            Ok(a) => a,
+            Err(source) => {
+                return Ok(ToolOutput::business_error(describe_failure(
+                    &source, &db_path,
+                )))
+            }
+        };
+
+    let visto_en = ahora();
+    let mut vistas = 0usize;
+    let mut nuevas = 0usize;
+    let mut omitidas = 0usize;
+    let mut fallos: Vec<String> = Vec::new();
+    // El ruido del motor no se registra: no es un defecto del robot y llenaria el
+    // historial de firmas que nadie va a arreglar.
+    for item in analysis
+        .errors
+        .live
+        .iter()
+        .chain(analysis.errors.payload_changed.iter())
+        .chain(analysis.errors.historical.iter())
+        .chain(analysis.errors.platform.iter())
+    {
+        vistas += 1;
+        // Los mensajes que el propio robot escribe con `log_message` no son firmas
+        // de defecto: nadie los va a "arreglar" y ensucian el registro.
+        if item.command == "log_message" {
+            omitidas += 1;
+            continue;
+        }
+        let observacion = rocketdebug_core::registry::Observation {
+            signature: item.signature.clone(),
+            robot: robot.clone(),
+            db_label: label.clone(),
+            version: item.version,
+            line: item.line.clone(),
+            message: item.message.clone(),
+            seen_at: visto_en,
+        };
+        match registro.record_observation(&observacion) {
+            Ok(true) => nuevas += 1,
+            Ok(false) => {}
+            Err(e) => fallos.push(e.to_string()),
+        }
+    }
+
+    let mut o = String::new();
+    let _ = writeln!(o, "robot: {robot} ({label})");
+    let _ = writeln!(
+        o,
+        "{vistas} errores vistos, {nuevas} observaciones nuevas (idempotente: repetir no infla)"
+    );
+    if omitidas > 0 {
+        let _ = writeln!(
+            o,
+            "{omitidas} mensajes de log_message omitidos: son del robot, no defectos"
+        );
+    }
+    if !fallos.is_empty() {
+        let _ = writeln!(o, "avisos: {}", fallos.join("; "));
+    }
+    Ok(ToolOutput::ok(o))
+}
+
+/// `problems_fix`: convertir un diagnostico en conocimiento.
+fn problems_fix(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
+    let args = Args::new(arguments)?;
+    let robot = args.required_str("robot")?;
+    let signature = args.required_str("signature")?;
+    let db_path = resolve_db(args.opt_str("db")?, settings);
+    let from = args.opt_i64("from")?.ok_or_else(|| {
+        CallError::InvalidParams("falta `from` (version que fallaba)".to_string())
+    })?;
+    let to = args
+        .opt_i64("to")?
+        .ok_or_else(|| CallError::InvalidParams("falta `to` (version arreglada)".to_string()))?;
+    let note = args.opt_str("note")?.unwrap_or_default();
+
+    let mut registro = match abrir_registro(settings) {
+        Ok(r) => r,
+        Err(texto) => return Ok(ToolOutput::business_error(texto)),
+    };
+    let detalle = match diff_markdown(&db_path, &robot, from, to) {
+        Ok(t) => t,
+        Err(source) => {
+            return Ok(ToolOutput::business_error(describe_failure(
+                &source, &db_path,
+            )))
+        }
+    };
+    let summary = detalle
+        .lines()
+        .next()
+        .unwrap_or("sin cambios")
+        .trim()
+        .to_string();
+
+    let fix = rocketdebug_core::registry::FixRecord {
+        signature: signature.clone(),
+        robot: robot.clone(),
+        from_version: Some(from),
+        to_version: Some(to),
+        summary: summary.clone(),
+        detail: detalle,
+        note,
+        recorded_at: ahora(),
+    };
+    match registro.record_fix(&fix) {
+        Ok(id) => Ok(ToolOutput::ok(format!(
+            "fix #{id} registrado: {signature} en {robot} v{from}->v{to} ({summary})"
+        ))),
+        Err(e) => Ok(ToolOutput::business_error(format!(
+            "no pude registrar el fix: {e}"
+        ))),
+    }
 }
 
 /// `robot_errors`: solo la seccion de errores del pack.
@@ -518,6 +802,7 @@ mod tests {
         let settings = Settings {
             env_db: Some(PathBuf::from(r"D:\proyecto\robot.db")),
             logs: None,
+            registry: None,
         };
         assert_eq!(
             resolve_db(Some(r"C:\otra\robot.db".to_string()), &settings),
@@ -609,14 +894,22 @@ mod tests {
     }
 
     #[test]
-    fn el_catalogo_declara_las_cuatro_tools_con_schema() {
+    fn el_catalogo_declara_las_siete_tools_con_schema() {
         let catalogo = descriptors();
         let tools = catalogo["tools"].as_array().expect("array de tools");
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 7);
         let nombres: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert_eq!(
             nombres,
-            vec![LIST_ROBOTS, FLOW_PACK, ROBOT_ERRORS, FLOW_DIFF],
+            vec![
+                LIST_ROBOTS,
+                FLOW_PACK,
+                ROBOT_ERRORS,
+                FLOW_DIFF,
+                PROBLEMS_SEARCH,
+                PROBLEMS_RECORD,
+                PROBLEMS_FIX
+            ],
             "el orden del catalogo es el que ve el agente"
         );
         for tool in tools {

@@ -13,6 +13,9 @@ path = "src/main.rs"
 [dependencies]
 rocketdebug-core = { path = "../core" }
 serde_json = { workspace = true }
+# Solo para sellar la hora de una observacion: `registry` no lee el reloj, se lo
+# inyecta quien llama (chrono va sin la feature `clock` en todo el workspace).
+chrono = { workspace = true }
 
 [dev-dependencies]
 # Solo para crear el `robot.db` sintetico de los tests de integracion. La fachada

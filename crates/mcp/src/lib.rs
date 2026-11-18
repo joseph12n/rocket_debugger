@@ -68,10 +68,28 @@ pub struct Settings {
     /// cuenta, y la fachada solo lo hace cuando el entorno los tiene. Sin logs,
     /// las tools lo dicen en vez de fingir que el robot esta limpio.
     pub logs: Option<(PathBuf, usize)>,
+    /// Fichero del registro de problemas, si hay uno configurado.
+    ///
+    /// El registro es el **unico** sitio donde esta herramienta escribe algo, y es
+    /// su propio fichero: nunca `robot.db`. `None` desactiva las tools `problems_*`
+    /// con un mensaje claro en vez de fallar por la espalda.
+    pub registry: Option<PathBuf>,
+}
+
+/// Ruta del registro de problemas.
+///
+/// `ROCKETDEBUG_REGISTRY` manda (util para tests y para separar registros por
+/// proyecto); si no esta, se usa el camino por defecto del motor, que respeta
+/// `ROCKETDEBUG_HOME`.
+fn registry_from_env() -> Option<PathBuf> {
+    std::env::var_os("ROCKETDEBUG_REGISTRY")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| Some(rocketdebug_core::registry::default_path()))
 }
 
 impl Settings {
-    /// Entorno vacio: ni `ROCKETBOT_DB` ni logs.
+    /// Entorno vacio: ni `ROCKETBOT_DB`, ni logs, ni registro.
     ///
     /// Es lo que usan los tests para no depender de `C:\Rocketbot`, y lo que
     /// usaria cualquier consumidor embebido que quiera un pack puro (solo db).
@@ -79,6 +97,7 @@ impl Settings {
         Self {
             env_db: None,
             logs: None,
+            registry: None,
         }
     }
 
@@ -99,7 +118,11 @@ impl Settings {
             None
         };
 
-        Self { env_db, logs }
+        Self {
+            env_db,
+            logs,
+            registry: registry_from_env(),
+        }
     }
 
     /// Db que se usa cuando la peticion no trae `db`: `ROCKETBOT_DB` o la del
@@ -137,6 +160,7 @@ mod tests {
         let settings = Settings {
             env_db: Some(PathBuf::from(r"D:\proyecto\robot.db")),
             logs: None,
+            registry: None,
         };
         assert_eq!(
             settings.default_db(),

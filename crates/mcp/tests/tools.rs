@@ -71,6 +71,189 @@ fn proyecto_con_comando(cmd: &str) -> String {
     )
 }
 
+// ---------------------------------------------------------------- registro
+
+/// Settings hermetico con un registro propio: es lo minimo para ejercitar las
+/// tools `problems_*` sin depender de `%LOCALAPPDATA%` ni de `C:\Rocketbot`.
+fn con_registro(dir: &std::path::Path) -> (Settings, std::path::PathBuf) {
+    let ruta = dir.join("problems.db");
+    let mut settings = Settings::hermetic();
+    settings.registry = Some(ruta.clone());
+    (settings, ruta)
+}
+
+#[test]
+fn las_tools_del_registro_dicen_que_falta_si_no_hay_registro() {
+    let respuesta = call(&Settings::hermetic(), 1, "problems_search", json!({}));
+    assert!(is_error(&respuesta), "{respuesta}");
+    let texto = tool_text(&respuesta);
+    assert!(
+        texto.contains("ROCKETDEBUG_REGISTRY"),
+        "el mensaje tiene que decir como configurarlo:\n{texto}"
+    );
+}
+
+#[test]
+fn problems_search_encuentra_lo_sembrado_y_cuenta_los_fixes() {
+    use rocketdebug_core::db::parse_date;
+    use rocketdebug_core::registry::{FixRecord, Observation, Registry};
+
+    let tmp = TempDir::new("search");
+    let (settings, ruta) = con_registro(tmp.path());
+
+    // Se siembra el registro por la puerta del motor, no por SQL a mano.
+    let mut registro = Registry::open(&ruta).expect("registro");
+    let firma = "NameError:name:{var}:not_defined";
+    for robot in ["orq", "hijo"] {
+        registro
+            .record_observation(&Observation {
+                signature: firma.to_string(),
+                robot: robot.to_string(),
+                db_label: "test\\robot.db".to_string(),
+                version: Some(1),
+                line: "2".to_string(),
+                message: "NameError: name 'contador' is not defined".to_string(),
+                seen_at: parse_date("2026-11-17 12:49:22"),
+            })
+            .expect("observacion");
+    }
+    registro
+        .record_fix(&FixRecord {
+            signature: firma.to_string(),
+            robot: "orq".to_string(),
+            from_version: Some(1),
+            to_version: Some(2),
+            summary: "1 cambiado".to_string(),
+            detail: "~ L2 setVar  0 → 1".to_string(),
+            note: "era una asignacion a si misma".to_string(),
+            recorded_at: parse_date("2026-11-17 13:00:00"),
+        })
+        .expect("fix");
+
+    let respuesta = call(
+        &settings,
+        1,
+        "problems_search",
+        json!({"query": "NameError"}),
+    );
+    assert!(!is_error(&respuesta), "{respuesta}");
+    let texto = tool_text(&respuesta);
+    assert!(texto.contains(firma), "la firma aparece:\n{texto}");
+    assert!(texto.contains("2 avistamientos"), "{texto}");
+    assert!(texto.contains("1 fixes"), "{texto}");
+    assert!(texto.contains("hijo") && texto.contains("orq"), "{texto}");
+
+    // Busqueda por robot y busqueda vacia.
+    let por_robot = call(&settings, 2, "problems_search", json!({"query": "hijo"}));
+    assert!(
+        tool_text(&por_robot).contains(firma),
+        "{}",
+        tool_text(&por_robot)
+    );
+    let todo = call(&settings, 3, "problems_search", json!({}));
+    assert!(tool_text(&todo).contains(firma), "{}", tool_text(&todo));
+    let nada = call(
+        &settings,
+        4,
+        "problems_search",
+        json!({"query": "no-existe-esto"}),
+    );
+    assert!(tool_text(&nada).contains("sin coincidencias"));
+}
+
+#[test]
+fn problems_record_sin_logs_no_inventa_observaciones() {
+    let tmp = TempDir::new("record");
+    let db = make_db(
+        tmp.path(),
+        "demo",
+        &[(1, "2026-11-17 10:00:00", demo_project().as_str())],
+    );
+    let (settings, _) = con_registro(tmp.path());
+
+    let respuesta = call(
+        &settings,
+        1,
+        "problems_record",
+        json!({"robot": "demo", "db": db}),
+    );
+    assert!(!is_error(&respuesta), "{respuesta}");
+    let texto = tool_text(&respuesta);
+    assert!(texto.contains("0 errores vistos"), "{texto}");
+    assert!(texto.contains("0 observaciones nuevas"), "{texto}");
+
+    // El registro se creo y la busqueda ya no falla por falta de fichero.
+    let buscado = call(&settings, 2, "problems_search", json!({}));
+    assert!(!is_error(&buscado), "{buscado}");
+    assert!(tool_text(&buscado).contains("sin coincidencias"));
+}
+
+#[test]
+fn problems_fix_guarda_el_diff_entre_dos_versiones() {
+    let tmp = TempDir::new("fix");
+    let antes = proyecto_con_comando("1");
+    let despues = proyecto_con_comando("2");
+    let db = make_db(
+        tmp.path(),
+        "demo",
+        &[
+            (1, "2026-11-17 10:00:00", antes.as_str()),
+            (2, "2026-11-17 11:00:00", despues.as_str()),
+        ],
+    );
+    let (settings, _) = con_registro(tmp.path());
+
+    let respuesta = call(
+        &settings,
+        1,
+        "problems_fix",
+        json!({
+            "robot": "demo",
+            "signature": "NameError:name:{var}:not_defined",
+            "from": 1,
+            "to": 2,
+            "note": "inicializar antes de usar",
+            "db": db,
+        }),
+    );
+    assert!(!is_error(&respuesta), "{respuesta}");
+    let texto = tool_text(&respuesta);
+    assert!(texto.contains("fix #1 registrado"), "{texto}");
+    assert!(
+        texto.contains("1 cambiado"),
+        "el resumen sale del diff:\n{texto}"
+    );
+
+    // Y queda consultable.
+    let buscado = call(
+        &settings,
+        2,
+        "problems_search",
+        json!({"query": "NameError"}),
+    );
+    assert!(
+        tool_text(&buscado).contains("1 fixes"),
+        "{}",
+        tool_text(&buscado)
+    );
+}
+
+#[test]
+fn problems_fix_exige_las_dos_versiones() {
+    let tmp = TempDir::new("fixargs");
+    let (settings, _) = con_registro(tmp.path());
+    let respuesta = call(
+        &settings,
+        1,
+        "problems_fix",
+        json!({"robot": "demo", "signature": "x", "from": 1}),
+    );
+    assert!(
+        respuesta["error"].is_object(),
+        "falta `to` es error de protocolo: {respuesta}"
+    );
+}
+
 #[test]
 fn list_robots_dice_que_db_leyo_y_que_robots_tiene() {
     let tmp = TempDir::new("list");

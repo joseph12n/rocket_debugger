@@ -19,7 +19,8 @@ catalogo comandos ─┘          ├→ daemon local (HTTP/WS)  ← lo que pint
 |---|---|---|
 | Motor | `rocketdebug-core` | parseo, arbol, indice de versiones, grafo, reglas, atribucion, render |
 | CLI | `rocketdebug-cli` | inspeccion manual y debug del motor |
-| MCP | `rocketdebug-mcp` | fachada de lectura por stdio y HTTP para el agente (4 tools) |
+| MCP | `rocketdebug-mcp` | fachada para el agente por stdio y HTTP (7 tools) |
+| Registro | `registry` (core) | memoria de firmas y fixes; **el unico sitio donde se escribe** |
 | Daemon | *(pendiente)* | vigilancia de logs y `robot.db`, servidor local |
 | UI | *(pendiente)* | Tauri: canvas, heatmap, diff, inbox de hallazgos |
 
@@ -105,3 +106,14 @@ Medido sobre 28 robots reales:
 
 Objetivo de diseno: **un robot en <= 2,5k tokens**, para que un agente pueda tener el workspace
 entero en contexto y diagnosticar sin pedir el flujo crudo.
+### El registro es el unico sitio donde se escribe
+
+`robot.db` se abre siempre en solo lectura. Lo unico que la herramienta persiste es su propio
+`problems.db`: firmas de problema normalizadas, avistamientos (con idempotencia: repetir un barrido no
+infla los contadores) y fixes con el diff que los cerro. Es el activo que convierte sesiones aisladas
+en aprendizaje acumulado; sin el, cada diagnostico empieza de cero.
+
+Ruta: `ROCKETDEBUG_REGISTRY`, o `ROCKETDEBUG_HOME`, o el directorio de datos del usuario.
+
+Los mensajes que el robot escribe con `log_message` **no** se registran: son del robot, no defectos, y
+nadie los va a arreglar. El ruido del motor (`zdev`, `getbot`) tampoco.
