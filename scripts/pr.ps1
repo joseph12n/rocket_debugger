@@ -53,7 +53,7 @@ function Fail([string]$Message) {
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { Fail 'gh no esta en PATH' }
 
 $branch = (git rev-parse --abbrev-ref HEAD).Trim()
-if ($branch -eq $Base) { Fail "estas en $Base: crea una rama para el cambio" }
+if ($branch -eq $Base) { Fail "estas en ${Base}: crea una rama para el cambio" }
 if (git status --porcelain) { Fail 'hay cambios sin commitear' }
 
 Write-Host "==> push $branch" -ForegroundColor Cyan
