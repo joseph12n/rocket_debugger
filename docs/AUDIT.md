@@ -100,6 +100,9 @@ ven el mismo conjunto donde aplican.
 politica de ningun consumidor); que `pack::vars_of` consuma `paths::vars_of` y solo anada la
 redaccion.
 
+**Hecho:** `db::commands_of` y `paths::declared_vars` son la fuente unica; `paths::vars_of` y
+`pack::vars_of` se construyen encima (el pack sigue convirtiendo no escalares a texto y redactando).
+
 ### H4 · Siete variantes de `analyse_*` + `Workspace::analyse` — MEDIA
 
 `analyse`, `analyse_with_logs`, `analyse_with_logs_at`, `analyse_with_logs_at_paths`,
