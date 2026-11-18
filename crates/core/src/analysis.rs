@@ -309,8 +309,141 @@ pub fn analyse_with_workspace(
 ///
 /// Mismos errores que [`analyse_with_workspace`], mas [`Error::SnapshotNotFound`]
 /// si el robot pedido no tiene esa version.
-/// Analisis sin comprobacion de rutas en disco: el que usan los consumidores
-/// hermeticos (tests, `review`, registro de problemas).
+/// Hechos del workspace ya cargados, con los derivados comunes calculados una
+/// sola vez.
+///
+/// La bandeja recorre N robots de la misma db. Antes cada uno llamaba a
+/// [`analyse_with_workspace`], que volvia a decodificar todos los hechos: O(N^2)
+/// (issue #18). Un [`Workspace`] se construye una vez y cada [`Workspace::analyse`]
+/// reutiliza los hechos, las aristas, las variables muertas y las llamadas sin
+/// destino.
+///
+/// `facts` es publico porque la bandeja necesita contar nodos sin volver a
+/// decodificar; el resto queda encapsulado.
+pub struct Workspace {
+    pub facts: Vec<RobotFacts>,
+    edges: Vec<Edge>,
+    unused: BTreeMap<String, Vec<String>>,
+    missing: Vec<graph::MissingCall>,
+}
+
+impl Workspace {
+    /// Carga y deduplica los hechos de todas las dbs, sin analizar ningun robot.
+    pub fn load(conns: &[(&rusqlite::Connection, &str)]) -> Result<Self> {
+        let facts = load_workspace_of(conns, None)?;
+        Ok(Self::from_facts(facts))
+    }
+
+    fn from_facts(facts: Vec<RobotFacts>) -> Self {
+        let edges = graph::build_edges(&facts);
+        let contracts = graph::contracts(&facts, &edges);
+        let unused = graph::unused_declared(&facts, &contracts);
+        let missing = graph::missing_calls(&facts);
+        Self {
+            facts,
+            edges,
+            unused,
+            missing,
+        }
+    }
+
+    /// Analiza un robot sobre esta foto.
+    ///
+    /// `conn` es la conexion de la db del robot: solo se usa para leer **sus**
+    /// logs. No se vuelve a decodificar ni a cargar el workspace.
+    pub fn analyse(
+        &self,
+        conn: &rusqlite::Connection,
+        db_label: &str,
+        robot: &str,
+        logs: Option<(&Path, usize)>,
+        path_probe: &dyn PathProbe,
+    ) -> Result<Analysis> {
+        analyse_loaded(self, conn, db_label, robot, logs, path_probe)
+    }
+}
+
+/// Analiza un robot reutilizando los hechos y derivados de [`Workspace`].
+fn analyse_loaded(
+    workspace: &Workspace,
+    conn: &rusqlite::Connection,
+    db_label: &str,
+    robot: &str,
+    logs: Option<(&Path, usize)>,
+    path_probe: &dyn PathProbe,
+) -> Result<Analysis> {
+    // Un homonimo de otra db es otro hecho: se busca el que vive en la db pedida.
+    let this = workspace
+        .facts
+        .iter()
+        .find(|fact| fact.name == robot && fact.lives_in(db_label))
+        .ok_or_else(|| Error::RobotNotFound(robot.to_string()))?;
+
+    // `unused_declared` se calculo una vez para todo el workspace; aqui solo se
+    // saca la entrada de este robot (vacia si no tiene variables muertas).
+    let unused_declared = workspace.unused.get(robot).cloned().unwrap_or_default();
+
+    let collisions = tree::collisions(&this.nodes);
+    // `usize::MAX`: no se recorta aqui. El render decide el tope por seccion y dice
+    // cuantos hallazgos quedaron fuera.
+    let (mut findings, higiene) = rules::evaluate_split(
+        &this.nodes,
+        &collisions,
+        &unused_declared,
+        this.declared.len(),
+        usize::MAX,
+    );
+
+    // `RUTA_MIGRADA` no vive en `evaluate_split`: necesita comprobar el disco y
+    // solo se evalua cuando el consumidor pasa un probe. El orden por severidad
+    // se restablece despues de anadirla para que una alta no quede al final.
+    if path_probe.enabled() {
+        let line_hints = variable_lines(this, &workspace.facts, &workspace.edges);
+        findings.extend(paths::findings(
+            &this.nodes,
+            &this.vars,
+            path_probe,
+            &line_hints,
+        ));
+        findings.sort_by_key(|finding| std::cmp::Reverse(finding.severity));
+    }
+
+    // Los contratos se recalculan sobre las aristas de **este** hecho: las de un
+    // homologo con contenido distinto no son suyas y presentarlas juntas haria que
+    // el pack de un robot hablara de las llamadas de otro.
+    let own_edges: Vec<Edge> = workspace
+        .edges
+        .iter()
+        .filter(|edge| edge.parent == this.name && this.lives_in(&edge.parent_db))
+        .cloned()
+        .collect();
+    let contracts_out = graph::contracts(&workspace.facts, &own_edges);
+    let inbound_edges: Vec<Edge> = workspace
+        .edges
+        .iter()
+        .filter(|edge| edge.child == this.name && this.lives_in(&edge.child_db))
+        .cloned()
+        .collect();
+    let contracts_in = graph::contracts(&workspace.facts, &inbound_edges);
+
+    // Los logs se leen despues de resolver el robot: si no existe, el error tiene
+    // que ser el de siempre y no el de un directorio de logs ausente.
+    let errors = match logs {
+        Some((dir, max_files)) => errors_for(conn, robot, dir, max_files)?,
+        None => ErrorReport::default(),
+    };
+
+    Ok(Analysis {
+        findings,
+        higiene,
+        contracts_out,
+        contracts_in,
+        unused_declared,
+        ambiguous_calls: ambiguous_calls(&workspace.edges, this),
+        missing_calls: missing_call_labels(&workspace.missing, this),
+        errors,
+    })
+}
 pub fn analyse_with_workspace_at(
     conns: &[(&rusqlite::Connection, &str)],
     db_label: &str,
@@ -350,6 +483,8 @@ pub fn analyse_with_workspace_at_and_paths(
             .filter(|(_, label)| *label != db_label),
     );
 
+    // El snapshot pedido se fija solo en este robot; los demas hechos del
+    // workspace aportan su ultimo guardado, que es lo que el runner resolveria.
     let facts = load_workspace_of(
         &ordered,
         Some(Target {
@@ -358,89 +493,16 @@ pub fn analyse_with_workspace_at_and_paths(
             snapshot,
         }),
     )?;
-    let edges = graph::build_edges(&facts);
-    let all_contracts = graph::contracts(&facts, &edges);
+    let workspace = Workspace::from_facts(facts);
 
-    // Un homonimo de otra db es otro hecho: se busca el que vive en la db pedida.
-    let this = facts
+    // La db pedida esta en `conns` por construccion: el robot se busco en ella.
+    let analysed = conns
         .iter()
-        .find(|fact| fact.name == robot && fact.lives_in(db_label))
+        .find(|(_, label)| *label == db_label)
+        .map(|(conn, _)| *conn)
         .ok_or_else(|| Error::RobotNotFound(robot.to_string()))?;
 
-    // `unused_declared` devuelve un mapa por robot y omite los que no tienen
-    // variables muertas: hay que sacar la entrada de este robot y asumir vacio.
-    let mut dead_by_robot = graph::unused_declared(&facts, &all_contracts);
-    let unused_declared = dead_by_robot.remove(robot).unwrap_or_default();
-
-    let collisions = tree::collisions(&this.nodes);
-    // `usize::MAX`: no se recorta aqui. El render decide el tope por seccion y dice
-    // cuantos hallazgos quedaron fuera.
-    let (mut findings, higiene) = rules::evaluate_split(
-        &this.nodes,
-        &collisions,
-        &unused_declared,
-        this.declared.len(),
-        usize::MAX,
-    );
-
-    // `RUTA_MIGRADA` no vive en `evaluate_split`: necesita comprobar el disco y
-    // solo se evalua cuando el consumidor pasa un probe. El orden por severidad
-    // se restablece despues de anadirla para que una alta no quede al final.
-    if path_probe.enabled() {
-        let line_hints = variable_lines(this, &facts, &edges);
-        findings.extend(paths::findings(
-            &this.nodes,
-            &this.vars,
-            path_probe,
-            &line_hints,
-        ));
-        findings.sort_by_key(|finding| std::cmp::Reverse(finding.severity));
-    }
-
-    // Los contratos se recalculan sobre las aristas de **este** hecho: las de un
-    // homologo con contenido distinto no son suyas y presentarlas juntas haria que
-    // el pack de un robot hablara de las llamadas de otro.
-    let own_edges: Vec<Edge> = edges
-        .iter()
-        .filter(|edge| edge.parent == this.name && this.lives_in(&edge.parent_db))
-        .cloned()
-        .collect();
-    let contracts_out = graph::contracts(&facts, &own_edges);
-    let inbound_edges: Vec<Edge> = edges
-        .iter()
-        .filter(|edge| edge.child == this.name && this.lives_in(&edge.child_db))
-        .cloned()
-        .collect();
-    let contracts_in = graph::contracts(&facts, &inbound_edges);
-
-    // Los logs se leen despues de cargar los hechos: si el robot no existe, el
-    // error tiene que ser el de siempre y no el de un directorio de logs ausente.
-    let errors = match logs {
-        Some((dir, max_files)) => {
-            // La db pedida esta en `conns` por construccion: el robot se encontro en
-            // ella, luego alguna conexion lleva esa etiqueta.
-            let Some(analysed) = conns
-                .iter()
-                .find(|(_, label)| *label == db_label)
-                .map(|(conn, _)| *conn)
-            else {
-                return Err(Error::RobotNotFound(robot.to_string()));
-            };
-            errors_for(analysed, robot, dir, max_files)?
-        }
-        None => ErrorReport::default(),
-    };
-
-    Ok(Analysis {
-        findings,
-        higiene,
-        contracts_out,
-        contracts_in,
-        unused_declared,
-        ambiguous_calls: ambiguous_calls(&edges, this),
-        missing_calls: missing_call_labels(&graph::missing_calls(&facts), this),
-        errors,
-    })
+    workspace.analyse(analysed, db_label, robot, logs, path_probe)
 }
 
 /// Lee los logs del directorio y devuelve los errores del robot ya clasificados.
