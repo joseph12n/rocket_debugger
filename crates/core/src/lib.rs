@@ -45,6 +45,7 @@ pub mod graph;
 pub mod logs;
 pub mod pack;
 pub mod paths;
+pub mod pathscan;
 pub mod redact;
 pub mod registry;
 pub mod render;

@@ -22,6 +22,8 @@
 //! - Ese enmascarado va en el render: el pack conserva el parametro fiel y la
 //!   garantia queda concentrada en un punto de salida (ver [`crate::render`]).
 
+use crate::pathscan;
+
 /// Firma de Fernet: Rocketbot cifra asi lo que guarda en `project.vars`.
 const FERNET_PREFIX: &str = "gAAAAA";
 
@@ -116,9 +118,6 @@ fn strip_separators(s: &str) -> String {
 /// nadie escribe `/home/...` para referirse a una carpeta relativa del proyecto.
 const POSIX_ROOTS: [&str; 6] = ["/home/", "/Users/", "/var/", "/tmp/", "/etc/", "/opt/"];
 
-/// Separador de esquema URL: lo que sigue a `://` es una direccion, no el disco.
-const URL_SEP: &str = "://";
-
 /// UNC de Windows: `\\servidor\recurso`.
 const UNC_PREFIX: &str = r"\\";
 
@@ -132,54 +131,8 @@ pub fn is_absolute_path(value: &str) -> bool {
     }
     // Los tramos de URL se calculan una sola vez: `file:///C:/x` contiene `C:/`
     // y aun asi no es una ruta del usuario.
-    let urls = url_spans(v);
+    let urls = pathscan::url_spans(v);
     has_windows_drive(v, &urls) || has_unc(v) || has_posix_root(v, &urls)
-}
-
-/// Tramos que ocupa cada URL (`esquema://resto`) dentro del valor. El resto del
-/// texto puede ser una ruta aunque comparta cadena con ellas.
-fn url_spans(text: &str) -> Vec<(usize, usize)> {
-    let mut spans = Vec::new();
-    let mut from = 0;
-    while let Some(sep) = find_from(text, URL_SEP, from) {
-        let start = text[..sep]
-            .char_indices()
-            .rev()
-            .take_while(|(_, c)| is_scheme_char(*c))
-            .last()
-            .map_or(sep, |(i, _)| i);
-        let body = sep + URL_SEP.len();
-        let end = text[body..]
-            .char_indices()
-            .find(|(_, c)| is_url_stop(*c))
-            .map_or(text.len(), |(i, _)| body + i);
-        spans.push((start, end));
-        // `body` garantiza avance aunque la URL se corte justo tras `://`.
-        from = end.max(body);
-    }
-    spans
-}
-
-fn find_from(text: &str, needle: &str, from: usize) -> Option<usize> {
-    text.get(from..)?.find(needle).map(|i| from + i)
-}
-
-/// Caracteres que puede llevar un esquema (`https`, `file`, `git+ssh`).
-fn is_scheme_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')
-}
-
-/// Un caracter que corta la URL: a partir de ahi empieza otro token del valor.
-fn is_url_stop(c: char) -> bool {
-    c.is_whitespace()
-        || matches!(
-            c,
-            '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';'
-        )
-}
-
-fn inside_any(spans: &[(usize, usize)], at: usize) -> bool {
-    spans.iter().any(|&(start, end)| (start..end).contains(&at))
 }
 
 /// Unidad Windows (`C:\`, `C:/`). La letra no puede continuar un esquema: en
@@ -191,13 +144,9 @@ fn has_windows_drive(text: &str, urls: &[(usize, usize)]) -> bool {
         w[0].is_ascii_alphabetic()
             && w[1] == b':'
             && matches!(w[2], b'\\' | b'/')
-            && !continues_scheme(text, i)
-            && !inside_any(urls, i)
+            && !pathscan::continues_scheme(text, i)
+            && !pathscan::inside_any(urls, i)
     })
-}
-
-fn continues_scheme(text: &str, at: usize) -> bool {
-    text[..at].chars().next_back().is_some_and(is_scheme_char)
 }
 
 /// UNC (`\\servidor\recurso`), al principio del valor o embebida en una
@@ -224,14 +173,8 @@ fn has_unc(text: &str) -> bool {
 fn has_posix_root(text: &str, urls: &[(usize, usize)]) -> bool {
     POSIX_ROOTS.iter().any(|root| {
         text.match_indices(root)
-            .any(|(at, _)| !inside_any(urls, at) && opens_token(text, at))
+            .any(|(at, _)| !pathscan::inside_any(urls, at) && pathscan::opens_token(text, at))
     })
-}
-
-fn opens_token(text: &str, at: usize) -> bool {
-    let prev = text[..at].chars().next_back();
-    prev.is_none()
-        || prev.is_some_and(|c| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
 }
 
 /// Marcador del tramo del usuario en una ruta Windows.
@@ -256,7 +199,7 @@ struct MaskedPrefix {
 /// Es idempotente. No toca URLs ni texto normal: un falso positivo aqui cambiaria
 /// el parametro con el que el agente entiende el flujo.
 pub fn mask_user_paths(text: &str) -> String {
-    let urls = url_spans(text);
+    let urls = pathscan::url_spans(text);
     // `None` hasta el primer reemplazo: cuando no hay nada que enmascarar se
     // devuelve el original sin asignar ni una cadena nueva.
     let mut out: Option<String> = None;
@@ -265,7 +208,7 @@ pub fn mask_user_paths(text: &str) -> String {
     while let Some((at, _)) = chars.next() {
         // Una ruta dentro de una URL (incluido `file:///C:/Users/...`) no es una
         // ruta del disco para efectos de privacidad: se deja como esta.
-        if inside_any(&urls, at) {
+        if pathscan::inside_any(&urls, at) {
             continue;
         }
         let Some(prefix) = masked_prefix_at(text, at) else {
@@ -396,7 +339,7 @@ fn windows_users_at(text: &str, at: usize) -> Option<MaskedPrefix> {
         || bytes.get(at + 1) != Some(&b':')
         // La letra no puede continuar un esquema: en `https://` la `s` va detras
         // de una letra y el patron la confundiria con una unidad.
-        || !opens_token(text, at)
+        || !pathscan::opens_token(text, at)
     {
         return None;
     }
