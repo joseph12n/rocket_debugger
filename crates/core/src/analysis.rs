@@ -1,63 +1,27 @@
 //! Cableado del grafo, las reglas y los errores: lo que convierte cuatro modulos
 //! en producto.
 //!
-//! [`crate::graph`] sabe de llamadas entre robots, [`crate::rules`] sabe de
-//! defectos dentro de un flujo y [`crate::attribution`] sabe a que version
-//! pertenece un error del log, pero ninguno sirve solo: el grafo, por separado, no
-//! dice nada al agente; las reglas sin grafo marcan como muertas las variables que
-//! en realidad son la interfaz de los subrobots (medido: 86 falsos positivos de 89
-//! en un orquestador de 8 hijos); y los errores sin atribucion temporal mezclan
-//! los de hoy con los de una version que ya no corre (medido: de las 51 firmas de
-//! `reporteMercadolibre` en la entrega BBRE2, 49 son de versiones anteriores y
-//! ninguna esta viva).
+//! Ninguno sirve solo: el grafo no dice nada al agente; las reglas sin grafo
+//! marcan como muertas las variables que son la interfaz de los subrobots
+//! (medido: 86 falsos positivos de 89 en un orquestador de 8 hijos); y los
+//! errores sin atribucion temporal mezclan los de hoy con los de una version que
+//! ya no corre (medido: de 51 firmas de `reporteMercadolibre` en BBRE2, 49 son de
+//! versiones anteriores y ninguna esta viva).
 //!
-//! Este modulo hace el recorrido completo y devuelve ya resuelto lo que el render
-//! necesita: los hallazgos del robot pedido, sus contratos de entrada y salida,
-//! las variables que siguen sin uso incluso contando lo que consumen sus hijos y
-//! los errores del log ya clasificados por responsable.
+//! # Decisiones
 //!
-//! # Por que necesita la db entera
-//!
-//! El grafo solo existe si se tienen los hechos de **todos** los robots de la db:
-//! para saber que provee el padre y que lee el hijo hay que mirar los dos lados.
-//! Por eso se aplanan las ultimas versiones de toda la db, no solo la del robot
-//! pedido.
-//!
-//! # Workspace: varias dbs y dedupe por contenido
-//!
-//! Una sola db no basta para juzgar una llamada: `execRocketBotDB` resuelve el
-//! nombre contra la db del padre, pero el robot puede vivir en otra db del
-//! workspace (una entrega corregida, el sandbox). Con una sola db el grafo no
-//! distingue "no existe" de "no lo veo", asi que [`Analysis::ambiguous_calls`]
-//! salia siempre vacia y una llamada a un robot inexistente se perdia en silencio
-//! (issue #12), que es justo lo que fallaria en runtime. [`analyse_with_workspace`]
-//! carga los hechos de todas las dbs y [`Analysis::missing_calls`] recoge las
-//! llamadas cuyo destino no esta en ninguna.
-//!
-//! El mismo robot esta copiado en varias dbs de entrega, asi que [`load_workspace`]
-//! deduplica por contenido: medido en el workspace real, 31 filas son 20 robots
-//! distintos y sin dedupe se cuentan 11 robots de mas, con sus contratos
-//! duplicados. La db analizada va primera para que el hecho del robot pedido
-//! conserve su etiqueta.
-//!
-//! # Snapshot concreto (issue #18)
-//!
-//! Por defecto el analisis describe el **ultimo** snapshot de cada robot, pero el
-//! pack puede construirse sobre uno anterior (`--snapshot`) y entonces el flujo y
-//! los hallazgos hablaban de versiones distintas del mismo robot. Con
-//! [`analyse_with_logs_at`] el consumidor fija el snapshot: los nodos, los
-//! hallazgos, los contratos y las llamadas del robot pedido salen de esa version.
-//!
-//! Los **demas** robots del workspace siguen aportando su ultimo snapshot, y es a
-//! proposito: el grafo responde "que le pasa a este flujo si se ejecuta hoy", y
-//! hoy los subrobots que corren son los actuales, no los de la fecha del snapshot
-//! pedido. Fijarlos tambien a esa fecha contestaria otra pregunta (un historico) y
-//! ni siquiera siempre se podria: un hijo puede no tener snapshot de ese dia.
-//!
-//! Los errores no cambian con el pin: [`errors_for`] los atribuye al snapshot que
-//! estaba vivo en su timestamp, asi que el informe ya era coherente con el
-//! historial y sigue siendolo. Es justo lo que distingue este motor de un vistazo
-//! al log.
+//! - Se cargan los hechos de **toda** la db y de todas las dbs del workspace: el
+//!   grafo necesita los dos lados de cada llamada. [`Analysis::ambiguous_calls`] y
+//!   [`Analysis::missing_calls`] separan "no existe" de "no lo veo" (issue #12),
+//!   que es lo que fallaria en runtime.
+//! - El workspace deduplica por `(nombre, hash)`: la misma entrega esta copiada en
+//!   varias dbs y, medido, 31 filas son 20 robots distintos.
+//! - El snapshot (`--snapshot`, issue #18) fija solo el robot analizado; los demas
+//!   aportan su ultimo guardado, que es el que el runner resuelve hoy. Fijarlos
+//!   tambien contestaria otra pregunta (un historico) y un hijo puede no tener
+//!   snapshot de esa fecha.
+//! - El pin no toca los errores: [`errors_for`] los atribuye al snapshot vivo en su
+//!   timestamp, que es lo que distingue este motor de un vistazo al log.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -79,16 +43,14 @@ use crate::tree;
 pub struct Analysis {
     /// Hallazgos **accionables**: senalan una linea con un defecto concreto.
     ///
-    /// Van **sin recortar**: el tope y el aviso de lo que queda fuera son cosa del
-    /// render. Recortar aqui era el defecto del issue #13: 18 variables muertas y
-    /// solo 2 visibles, sin que el lector supiera que faltaban 16.
+    /// Van **sin recortar**: el tope y el aviso de lo que queda fuera son del
+    /// render (issue #13: 18 variables muertas y solo 2 visibles, sin aviso).
     pub findings: Vec<Finding>,
     /// Hallazgos de **higiene**: afectan al robot entero (sin Try/Catch, IF sin
     /// else, anidamiento, variables muertas).
     ///
-    /// Se separan para que no compitan por el cupo con lo accionable. Medido: eran
-    /// el 36% de los hallazgos mostrados y son justo los que un lector ignora; en
-    /// una seccion aparte no ensucian la lista que hay que atender.
+    /// En seccion aparte no compiten por el cupo con lo accionable: medido, eran
+    /// el 36% de lo mostrado y son justo los que un lector ignora.
     pub higiene: Vec<Finding>,
     /// Contratos en los que este robot es el padre: lo que ofrece a sus hijos.
     pub contracts_out: Vec<Contract>,
@@ -96,35 +58,30 @@ pub struct Analysis {
     pub contracts_in: Vec<Contract>,
     /// Declaradas que siguen sin uso despues de descontar lo que leen los hijos.
     pub unused_declared: Vec<String>,
-    /// Llamadas cuyo hijo no se puede resolver con certeza, como `"padre -> hijo"`.
+    /// Llamadas cuyo hijo solo existe fuera de la db del padre, como
+    /// `"padre -> hijo"`.
     ///
-    /// Se llena cuando el nombre existe **solo** fuera de la db del padre
-    /// ([`Edge::ambiguous`]): el runner lo buscaria en su propia db, asi que la
-    /// arista es la mejor conjetura y no una certeza. Con una sola db de hechos no
-    /// hay forma de saberlo y la lista queda vacia; [`analyse_with_workspace`] es
-    /// quien la puede llenar.
+    /// Son la mejor conjetura y no una certeza: el runner busca el nombre en su
+    /// propia db ([`Edge::ambiguous`]). Con una sola db la lista queda vacia;
+    /// [`analyse_with_workspace`] es quien la puede llenar.
     pub ambiguous_calls: Vec<String>,
-    /// Llamadas cuyo destino no existe en **ninguna** db del workspace, como
+    /// Llamadas cuyo destino no existe en **ninguna** db, como
     /// `"padre L2.3 -> hijo"`.
     ///
-    /// [`graph::build_edges`] las omite porque sin los hechos del hijo no hay
-    /// contrato que calcular, y por eso una llamada a un robot inexistente se
-    /// perdia en silencio: en runtime el runner no resuelve el nombre y el padre
-    /// falla. La linea es la del nodo de llamada en el padre, que es lo unico que
-    /// permite localizarla.
+    /// [`graph::build_edges`] las omite (sin hechos del hijo no hay contrato que
+    /// calcular) y por eso una llamada inexistente se perdia en silencio; en
+    /// runtime el padre falla. La linea del nodo es lo unico que permite hallarla.
     pub missing_calls: Vec<String>,
-    /// Errores del log del robot, ya clasificados y agrupados por firma.
+    /// Errores del log del robot, clasificados y agrupados por firma.
     ///
-    /// Vacio cuando no se pidieron logs: el analisis del codigo no depende de que
-    /// el entorno tenga logs, y un pack sin ellos sigue siendo valido.
+    /// Vacio si no se pidieron logs: el pack sin ellos es valido.
     pub errors: ErrorReport,
 }
 
 /// Longitud a la que se recorta el mensaje de un error.
 ///
-/// El mensaje completo de un error real puede llevar una traza de Python de 20
-/// lineas; con 160 caracteres cabe el defecto y el detalle que lo identifica de un
-/// vistazo, que es lo que el agente necesita para decidir si abre el log.
+/// Con 160 caracteres caben el defecto y su detalle; la traza de Python de 20
+/// lineas no es parte de el y el presupuesto del pack es de ~2,5k tokens.
 pub const ERROR_MESSAGE_MAX: usize = 160;
 
 /// Un error del log agrupado por firma.
@@ -147,13 +104,12 @@ pub struct ErrorItem {
 
 /// Errores del robot repartidos por lo que se puede hacer con ellos.
 ///
-/// La separacion no es cosmetica: sumar los cinco cubos es el panel en rojo
-/// permanente que hace que se deje de mirar. `live` es lo accionable hoy;
-/// `historical` es evidencia de un defecto ya corregido (o de codigo retirado);
-/// `platform` y `noise` no se arreglan desde el robot.
+/// Sumar los cinco cubos es el panel en rojo permanente que hace que se deje de
+/// mirar: `live` es lo accionable hoy; `historical`, evidencia de un defecto ya
+/// corregido (o de codigo retirado); `platform` y `noise` no se arreglan desde el
+/// robot.
 ///
-/// `PartialEq` no es decorativo: es lo que permite fijar en un test que reutilizar
-/// los logs ya parseados no cambia ni un cubo del informe.
+/// `PartialEq` fija en un test que reutilizar los logs parseados no cambia un cubo.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ErrorReport {
     /// Viven en la version actual y el nodo conserva sus parametros.
@@ -192,30 +148,20 @@ impl ErrorReport {
 
 /// Analiza un robot usando el resto de la db como contexto, **sin** logs.
 ///
-/// Es la firma historica y la que usan los consumidores que no tienen (o no
-/// quieren) el directorio de logs del entorno. Delega en [`analyse_with_logs`] con
-/// `None`, asi que el informe de errores sale vacio y el render omite su seccion.
+/// Es la firma historica; el informe de errores sale vacio y el render lo omite.
 pub fn analyse(conn: &rusqlite::Connection, db_label: &str, robot: &str) -> Result<Analysis> {
     analyse_with_logs(conn, db_label, robot, None)
 }
 
 /// Analiza un robot usando el resto de la db como contexto y, si se pide, los
-/// logs de ejecucion.
+/// logs de ejecucion: `(directorio, maximo de ficheros)`.
 ///
-/// `logs` es `(directorio, maximo de ficheros)`. Se pide como `Option` en vez de
-/// tener una ruta por defecto aqui a proposito: el motor no decide leer disco. El
-/// que sabe si hay logs en este entorno es `pack::build_from_conn`, y asi un test
-/// nunca acaba dependiendo de `C:\Rocketbot`.
+/// `logs` es `Option` a proposito: el motor no decide leer disco. Quien sabe si
+/// hay logs es `pack::build_from_conn`, y asi un test no depende de `C:\Rocketbot`.
 ///
-/// Devuelve [`Error::RobotNotFound`] si el robot no esta en la db y deja pasar el
-/// error de lectura si es **el robot pedido** el que no se puede decodificar: un
-/// pack del que no se pueden leer los nodos no es un pack degradado, es una
-/// mentira. Un robot distinto e ilegible solo se omite, porque como mucho hara
-/// que su contrato no aparezca.
-///
-/// Delega en [`analyse_with_logs_at`] con `None`: describe el **ultimo** snapshot,
-/// que es lo que necesita un consumidor que no elige version (un barrido de toda
-/// la db).
+/// El robot pedido ilegible es error ([`Error::RobotNotFound`] o el de lectura):
+/// un pack sin nodos no es degradado, es una mentira. Un robot distinto e
+/// ilegible solo se omite. Delega con `None` en [`analyse_with_logs_at`].
 pub fn analyse_with_logs(
     conn: &rusqlite::Connection,
     db_label: &str,
@@ -225,21 +171,13 @@ pub fn analyse_with_logs(
     analyse_with_logs_at(conn, db_label, robot, None, logs)
 }
 
-/// Como [`analyse_with_logs`], pero fija el snapshot del que salen los hechos del
-/// robot analizado.
+/// Como [`analyse_with_logs`], pero fija el snapshot (`bots.id`) del robot
+/// analizado: nodos, hallazgos, contratos y llamadas salen de esa version, que es
+/// lo que hace que un pack de la v26 hable de la v26 (issue #18).
 ///
-/// `snapshot` es el `bots.id` que el consumidor va a describir (el del render del
-/// pack). Con `Some(id)` los nodos, los hallazgos, los contratos y las llamadas
-/// son los de esa version, que es lo que hace que un pack de la v26 hable de la
-/// v26 (issue #18). Con `None` se usa el ultimo snapshot y el resultado es
-/// identico al de siempre: por eso [`analyse_with_logs`] y [`analyse`] conservan
-/// su firma.
-///
-/// El pin es solo para este robot: los demas del workspace siguen aportando su
-/// ultimo snapshot (ver doc del modulo). Si el robot existe pero esa version no,
-/// devuelve [`Error::SnapshotNotFound`] en vez de caer al ultimo: describir otra
-/// version en silencio es justo el defecto que el pin corrige. Si el robot no
-/// esta en la db, [`Error::RobotNotFound`] como siempre.
+/// El pin es solo para este robot; los demas aportan su ultimo snapshot (ver doc
+/// del modulo). Una version inexistente es [`Error::SnapshotNotFound`] y no una
+/// caida al ultimo: describir otra version en silencio es el defecto que corrige.
 pub fn analyse_with_logs_at(
     conn: &rusqlite::Connection,
     db_label: &str,
@@ -253,8 +191,8 @@ pub fn analyse_with_logs_at(
 /// Como [`analyse_with_logs_at`], comprobando ademas las rutas contra el
 /// dispositivo mediante `path_probe`.
 ///
-/// Es la variante que usa el pack real: `RUTA_MIGRADA` necesita saber si una ruta
-/// existe aqui, y el motor no lo decide por su cuenta.
+/// Es la que usa el pack real: `RUTA_MIGRADA` necesita saber si la ruta existe
+/// aqui y el motor no lo decide por su cuenta.
 pub fn analyse_with_logs_at_paths(
     conn: &rusqlite::Connection,
     db_label: &str,
@@ -275,20 +213,13 @@ pub fn analyse_with_logs_at_paths(
 
 /// Analiza un robot con los hechos de **todas** las dbs del workspace.
 ///
-/// `conns` son las bases abiertas en solo lectura y su etiqueta (sin ruta
-/// absoluta); `db_label` marca cual es la db del robot analizado, que debe estar
-/// en la lista: es de donde salen sus nodos y, si se piden, sus logs.
+/// `conns` son las conexiones de solo lectura con su etiqueta; la db pedida va
+/// primera para que el hecho del robot conserve su etiqueta y sus copias queden
+/// en [`RobotFacts::also_in`] (asi se resuelven las aristas que el runner
+/// resolveria en la db del padre).
 ///
-/// La db pedida se procesa primero. Si el robot esta copiado en varias dbs, el
-/// hecho que sobrevive al dedupe conserva su etiqueta, y las demas quedan en
-/// [`RobotFacts::also_in`], que es lo que permite resolver las aristas que el
-/// runner resolveria en la db del padre.
-///
-/// Devuelve [`Error::RobotNotFound`] si el robot no esta en `db_label` —aunque
-/// exista en otra db del workspace— o si no se puede leer de ella: el pack de un
-/// robot que no se puede decodificar es una mentira, no un pack degradado.
-///
-/// Delega en [`analyse_with_workspace_at`] con `None` (ultimo snapshot).
+/// [`Error::RobotNotFound`] si el robot no esta en `db_label`, aunque exista en
+/// otra db. Delega con `None` (ultimo snapshot) en [`analyse_with_workspace_at`].
 pub fn analyse_with_workspace(
     conns: &[(&rusqlite::Connection, &str)],
     db_label: &str,
@@ -298,28 +229,13 @@ pub fn analyse_with_workspace(
     analyse_with_workspace_at(conns, db_label, robot, None, logs)
 }
 
-/// Como [`analyse_with_workspace`], pero con los hechos del robot pedido tomados
-/// del snapshot `snapshot` cuando se indica.
-///
-/// Es la variante que necesita el pack (`--snapshot`): el flujo y el analisis
-/// tienen que describir la misma version. La implementacion esta aqui y no en
-/// [`analyse_with_workspace`] porque casi todo el trabajo (grafo, contratos,
-/// hallazgos) es comun; el pin solo cambia de que fila de `bots` salen los hechos
-/// de **ese** robot.
-///
-/// Mismos errores que [`analyse_with_workspace`], mas [`Error::SnapshotNotFound`]
-/// si el robot pedido no tiene esa version.
 /// Hechos del workspace ya cargados, con los derivados comunes calculados una
 /// sola vez.
 ///
-/// La bandeja recorre N robots de la misma db. Antes cada uno llamaba a
-/// [`analyse_with_workspace`], que volvia a decodificar todos los hechos: O(N^2)
-/// (issue #18). Un [`Workspace`] se construye una vez y cada [`Workspace::analyse`]
-/// reutiliza los hechos, las aristas, las variables muertas y las llamadas sin
-/// destino.
+/// La bandeja recorre N robots de la misma db; antes cada uno llamaba a
+/// [`analyse_with_workspace`] y volvia a decodificar todo: O(N^2) (issue #18).
 ///
-/// `facts` es publico porque la bandeja necesita contar nodos sin volver a
-/// decodificar; el resto queda encapsulado.
+/// `facts` es publico porque la bandeja cuenta nodos sin volver a decodificar.
 pub struct Workspace {
     pub facts: Vec<RobotFacts>,
     edges: Vec<Edge>,
@@ -444,6 +360,15 @@ fn analyse_loaded(
         errors,
     })
 }
+/// Como [`analyse_with_workspace`], pero con los hechos del robot pedido tomados
+/// del snapshot `snapshot` cuando se indica.
+///
+/// Es la variante que necesita el pack (`--snapshot`): el flujo y el analisis
+/// tienen que describir la misma version, y el pin solo cambia de que fila de
+/// `bots` salen los hechos de **ese** robot.
+///
+/// Mismos errores que [`analyse_with_workspace`], mas [`Error::SnapshotNotFound`]
+/// si el robot pedido no tiene esa version.
 pub fn analyse_with_workspace_at(
     conns: &[(&rusqlite::Connection, &str)],
     db_label: &str,
@@ -738,23 +663,18 @@ fn sorted(cubo: BTreeMap<String, ErrorItem>) -> Vec<ErrorItem> {
 }
 
 /// Carga los hechos del ultimo snapshot de cada robot de cada db, deduplicando
-/// por contenido: el mismo robot esta copiado en `robot_run.db` y
-/// `entrega_corregida/robot_run.db`, y sin dedupe un workspace de 28 robots se
-/// cuenta como 50 (medido en el real: 31 filas -> 20 robots distintos).
+/// por contenido: la misma entrega esta copiada en varias dbs y, medido, 31 filas
+/// son 20 robots distintos (sin dedupe, un workspace de 28 se cuenta como 50).
 ///
-/// La clave es `(nombre, hash del raw_b64)`. Dos homonimos con contenido distinto
-/// son dos hechos y se conservan: la db del padre decide cual resuelve el runner y
-/// el consumidor necesita ver los dos. El mismo contenido bajo el mismo nombre es
-/// el mismo robot copiado: se queda un hecho y las demas etiquetas van a
-/// [`RobotFacts::also_in`], porque el runner busca el nombre en la db del padre y
-/// una copia descartada no puede convertir una arista en ambigua. El nombre va en
-/// la clave porque dos robots distintos con el mismo contenido (un renombrado)
-/// siguen siendo dos nombres en el grafo: colapsarlos haria que las llamadas al
-/// nombre descartado parecieran inexistentes.
+/// La clave es `(nombre, hash del raw_b64)`: mismo nombre y contenido es una
+/// copia, se queda un hecho y las demas etiquetas van a [`RobotFacts::also_in`]
+/// (una copia descartada no puede convertir una arista en ambigua). Contenido
+/// distinto o nombre distinto son dos hechos: un renombrado sigue siendo dos
+/// nombres en el grafo, y colapsarlo haria que sus llamadas parecieran
+/// inexistentes.
 ///
-/// El hash es el mismo `blake3` del `raw_b64` que usa
-/// [`crate::versions::VersionInfo::hash`], sin recortar: aqui no se muestra, solo
-/// se compara.
+/// El hash es el `blake3` del `raw_b64` de [`crate::versions::VersionInfo::hash`]:
+/// aqui solo se compara, no se muestra.
 pub fn load_workspace(dbs: &[(&rusqlite::Connection, &str)]) -> Result<Vec<RobotFacts>> {
     load_workspace_of(dbs, None)
 }
