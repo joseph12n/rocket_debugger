@@ -1,46 +1,23 @@
 //! Broker de ejecucion: lanza `rocketbot.exe`, serializa las ejecuciones y no se
 //! fia del `exit_code`.
 //!
-//! # El problema que resuelve
+//! Con Studio abierto —o sin licencia de produccion— el runner CLI puede devolver
+//! `exit_code 0` sin ejecutar el robot (fase 0: `eventos_del_robot: 0`,
+//! `docs/CICLO.md`). Por eso [`Broker`]:
 //!
-//! Con Studio abierto, `rocketbot.exe -start=... -db=...` **delega en la
-//! instancia que ya esta corriendo** y puede devolver `exit_code 0` sin haber
-//! ejecutado el robot. La fase 0 lo midio (`docs/CICLO.md`): `eventos_del_robot:
-//! 0`. Un agente que se fie del codigo de salida concluye que el robot funciona
-//! cuando en realidad no corrio nunca.
-//!
-//! Por eso este modulo no expone "lanza y devuelve el exit code": expone
-//! [`Broker`], que
-//!
-//! 1. admite **una sola ejecucion a la vez** (cola FIFO con mutex y condvar),
-//! 2. detecta Studio abierto **antes de lanzar** y se niega,
-//! 3. despues de lanzar exige **al menos un evento del robot** en los logs: sin
-//!    eventos el resultado es fallo, aunque el proceso haya salido con 0,
+//! 1. admite una sola ejecucion a la vez (cola FIFO con mutex y condvar),
+//! 2. detecta Studio abierto antes de lanzar y se niega,
+//! 3. exige al menos un **evento del robot** en los logs: sin eventos el
+//!    resultado es fallo, aunque el proceso haya salido con 0,
 //! 4. atribuye cada error de esa ejecucion al snapshot que estaba vivo.
 //!
-//! # Que cuenta como evento
-//!
-//! Una entrada de log con bloque `request: <robot> : line ...`, es decir, un
-//! comando que el runner reporto de **ese** robot. Los contadores de bucle
-//! (`For count: 1`) y el ruido del motor (`zdev`, `getbot`) no son eventos del
-//! robot y no sirven para demostrar que se ejecuto. [`crate::logs::of_robot`] ya
-//! aplica exactamente ese filtro; aqui solo se le anade la ventana temporal.
-//!
-//! # Donde se leen los logs
-//!
-//! El runner recibe `--log=<dir>` con un directorio nuevo por ejecucion. Si esa
-//! opcion fuera ignorada por la version instalada, se intenta el fichero que el
-//! propio CLI anuncia en stdout (`Log path: ...`) y, como ultimo recurso, el
-//! directorio de logs configurado. Los tres caminos filtran por la hora de
-//! arranque, asi que un log viejo no se cuenta como ejecucion de ahora.
-//!
-//! # Por que no hay dependencias nuevas
-//!
-//! La cola es `Mutex` + `Condvar` de la biblioteca estandar y el timeout se
-//! implementa con `try_wait` + `sleep`: anadir `wait-timeout` o un runtime async
-//! a un binario que habla con un agente local no aporta nada. La deteccion de
-//! Studio usa `tasklist` en Windows y devuelve vacio en el resto: es la unica
-//! forma de enumerar procesos sin `unsafe` adicional.
+//! Evento = entrada de log con `request: <robot> : line ...` (el filtro exacto es
+//! [`crate::logs::of_robot`]); contadores de bucle y ruido del motor no cuentan.
+//! Los logs se buscan en el directorio nuevo de la ejecucion (`--log=<dir>`) y,
+//! si la version instalada lo ignora, en el `Log path:` que anuncia el CLI o en el
+//! directorio de respaldo; los tres caminos filtran por la hora de arranque. Sin
+//! dependencias nuevas: cola con `Mutex`+`Condvar` de std, timeout con
+//! `try_wait`, deteccion con `tasklist`.
 
 use std::collections::VecDeque;
 use std::io::Read;
@@ -1122,32 +1099,35 @@ fn reported_log_path(stdout: &str, cwd: &Path, exe: &Path) -> Option<PathBuf> {
     Some(from_cwd)
 }
 
+/// `SYSTEMTIME` de Win32: `repr(C)` con los siete campos `WORD`.
+#[cfg(windows)]
+#[repr(C)]
+struct WinSystemTime {
+    year: u16,
+    month: u16,
+    day_of_week: u16,
+    day: u16,
+    hour: u16,
+    minute: u16,
+    second: u16,
+    milliseconds: u16,
+}
+
+// `GetLocalTime` con enlazado explicito: el CI de Windows usa MSVC y no conviene
+// fiarse de que `kernel32` llegue por defecto en la linea de enlazado.
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetLocalTime(system_time: *mut WinSystemTime);
+}
+
 /// Hora local del sistema.
 ///
 /// `chrono` va sin la feature `clock` en todo el workspace (quien necesita la
 /// hora la inyecta), y los logs de Rocketbot estan en hora local. En Windows se
-/// pregunta al SO con `GetLocalTime`; en el resto se usa UTC, que es lo que
-/// usan los tests sinteticos.
+/// pregunta al SO con `GetLocalTime`; en el resto se usa UTC.
 #[cfg(windows)]
 fn now_local() -> NaiveDateTime {
-    use std::os::raw::c_ushort;
-
-    #[repr(C)]
-    struct WinSystemTime {
-        year: c_ushort,
-        month: c_ushort,
-        day_of_week: c_ushort,
-        day: c_ushort,
-        hour: c_ushort,
-        minute: c_ushort,
-        second: c_ushort,
-        milliseconds: c_ushort,
-    }
-
-    extern "system" {
-        fn GetLocalTime(system_time: *mut WinSystemTime);
-    }
-
     let mut time = WinSystemTime {
         year: 0,
         month: 0,
