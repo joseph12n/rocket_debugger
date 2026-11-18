@@ -82,6 +82,17 @@ En CI (Linux) se usa el toolchain por defecto.
 - [x] #6 fachada MCP de lectura para el agente
 - [x] #12 workspace multi-db (el grafo ve todas las dbs)
 - [x] #13 aviso de hallazgos omitidos por el tope
+- [x] #16 enmascarado de rutas en los parametros de los comandos
+- [x] #19 transporte HTTP, ui.render, registro de problemas y bandeja de entrada
+
+## Plan 2 (2026-11)
+
+Orden acordado: el broker primero; las rutas migradas habilitan el ciclo real sobre BBRE2.
+
+- [ ] #25 exec: broker de ejecucion con cola, mutex y verificacion de eventos
+- [ ] #26 analysis: regla RUTA_MIGRADA para rutas de otro dispositivo
+- [ ] #27 ciclo: cierre end-to-end con un robot real no trivial (BBRE2)
+- [ ] #18 deuda conocida del motor y la fachada, cada punto cerrado con su test
 
 ## Estado medido
 
