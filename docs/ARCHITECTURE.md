@@ -231,3 +231,7 @@ El otro O(N^2) del barrido era recargar los hechos de la db por robot. `analysis
 deduplica los hechos una vez y cada fila analiza su robot sobre esa misma foto. Medido con el binario
 de depuracion sobre 16 robots de 4 dbs sin logs: **0,7 s -> 0,1 s**, con un test que compara campo a
 campo el analisis compartido con el analisis individual de cada robot.
+
+Ademas, los hechos leen solo la fila del snapshot que necesitan (`load_latest_snapshot` o
+`load_snapshot`), no el historial entero: una version vieja corrupta ya no bloquea el analisis de la
+ultima, y el coste deja de crecer con las versiones que no se van a mirar.
