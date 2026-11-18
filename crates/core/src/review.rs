@@ -7,10 +7,10 @@
 //!
 //! # Los numeros son los del pack
 //!
-//! Cada fila sale del mismo [`analysis::analyse_with_logs`] que alimenta el
-//! context pack, sobre la misma db y con el mismo origen de logs: la vista no es
-//! un resumen paralelo que pueda desincronizarse del pack, es el pack contado. Por
-//! eso no hay un camino rapido con numeros propios.
+//! Cada fila sale del mismo [`analysis::Workspace`] que alimenta el context pack,
+//! sobre la misma db y con el mismo origen de logs: la vista no es un resumen
+//! paralelo que pueda desincronizarse del pack, es el pack contado. Por eso no hay
+//! un camino rapido con numeros propios.
 //!
 //! * `accionables` = `analysis.findings.len()`
 //! * `higiene` = `analysis.higiene.len()`
@@ -20,19 +20,12 @@
 //! render: tres `zdev` iguales son un problema, no tres, y sumar ocurrencias
 //! inflaria el panel. La vista hereda la cifra del pack sin reinterpretarla.
 //!
-//! # Coste conocido (issue #18)
+//! # Coste (issue #18)
 //!
-//! `analyse_with_logs` carga los hechos de **todos** los robots de la db en cada
-//! llamada, asi que recorrer N robots decodifica la misma db N veces: O(N^2).
-//! Medido con el binario de depuracion sobre el workspace real: la db de BBRE2
-//! (10 robots) tarda 0,3 s sin logs y 2,4 s con logs, las dos entregas de BBRE2
-//! (20 instancias) 0,4 s y 4,6 s, y el workspace entero (4 dbs, 32 instancias) 1,1 s
-//! y 7,6 s; con logs, casi todo el coste es volver a parsear los ~20 ficheros de
-//! `C:\Rocketbot\logs` una vez por robot. El cacheo por (db, robot, ultimo_id) esta
-//! en #18; reutilizar aqui los hechos ya cargados exigiria una firma nueva en
-//! `crates/core`, que no es de este issue. Se acepta el coste porque la vista es una
-//! foto de estado y no un bucle de vigilancia, y `--no-logs` deja el barrido en el
-//! orden del segundo.
+//! [`analysis::Workspace`] carga y deduplica los hechos **una sola vez** y cada
+//! fila analiza su robot sobre esa foto: recorrer N robots ya no decodifica la db
+//! N veces. Con logs, el coste que queda es leer los ficheros de log una vez por
+//! robot, y el cache de [`crate::logs::parse_file_cached`] lo absorbe.
 //!
 //! # Una db o un workspace
 //!
@@ -61,6 +54,7 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
+use crate::paths::NoPaths;
 use crate::{analysis, db, Result};
 
 /// Una fila del panorama: un robot de una db y sus contadores.
@@ -174,23 +168,19 @@ pub fn review_workspace(
 fn rows_of(conn: &Connection, label: &str, logs: Option<(&Path, usize)>) -> Result<Vec<ReviewRow>> {
     let summaries = db::list_robots(conn)?;
 
-    // El analisis no devuelve el numero de nodos, y contar por robot con
-    // `load_snapshots` decodificaria **todas** sus versiones: `load_workspace` ya
-    // decodifica una sola vez el ultimo snapshot de cada robot de la db, que es
-    // justo el que analiza `analyse`. Es una carga mas sobre las N del barrido: el
-    // coste sigue siendo O(N^2), no O(N^3).
-    let nodes: BTreeMap<String, usize> = analysis::load_workspace(&[(conn, label)])?
-        .into_iter()
-        .map(|facts| (facts.name, facts.nodes.len()))
+    // Una sola carga de hechos para toda la db (issue #18): cada fila analiza su
+    // robot sobre la misma foto en lugar de volver a decodificar todos los
+    // snapshots. El contador de nodos sale de la misma foto, sin otra pasada.
+    let workspace = analysis::Workspace::load(&[(conn, label)])?;
+    let nodes: BTreeMap<String, usize> = workspace
+        .facts
+        .iter()
+        .map(|fact| (fact.name.clone(), fact.nodes.len()))
         .collect();
 
     let mut rows = Vec::with_capacity(summaries.len());
     for summary in summaries {
-        let result = match logs {
-            Some(source) => analysis::analyse_with_logs(conn, label, &summary.name, Some(source)),
-            None => analysis::analyse(conn, label, &summary.name),
-        };
-        let analysis = match result {
+        let analysis = match workspace.analyse(conn, label, &summary.name, logs, &NoPaths) {
             Ok(analysis) => analysis,
             // Un robot ilegible no puede ocultar el panorama de los demas: se omite
             // y se sigue. No se pinta una fila a cero porque "no se pudo leer" no es

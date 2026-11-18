@@ -194,6 +194,49 @@ fn workspace(dir: &Path) -> PathBuf {
 }
 
 #[test]
+fn el_workspace_compartido_da_el_mismo_analisis_que_cada_robot_por_separado() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = workspace(tmp.path());
+    let conn = db::open_readonly(&path).expect("abro");
+
+    // La bandeja carga los hechos una vez y analiza N robots sobre la misma foto
+    // (issue #18). El resultado tiene que ser identico al camino por robot.
+    let shared_workspace =
+        rocketdebug_core::analysis::Workspace::load(&[(&conn, DB)]).expect("workspace");
+
+    for robot in ["orq", "hijo_web", "hijo_excel"] {
+        let individual = analyse_with_logs(&conn, DB, robot, None).expect("analisis individual");
+        let shared = shared_workspace
+            .analyse(&conn, DB, robot, None, &rocketdebug_core::paths::NoPaths)
+            .expect("analisis compartido");
+
+        assert_eq!(shared.findings, individual.findings, "{robot}: hallazgos");
+        assert_eq!(shared.higiene, individual.higiene, "{robot}: higiene");
+        assert_eq!(
+            shared.contracts_out, individual.contracts_out,
+            "{robot}: contratos de salida"
+        );
+        assert_eq!(
+            shared.contracts_in, individual.contracts_in,
+            "{robot}: contratos de entrada"
+        );
+        assert_eq!(
+            shared.unused_declared, individual.unused_declared,
+            "{robot}: variables muertas"
+        );
+        assert_eq!(
+            shared.ambiguous_calls, individual.ambiguous_calls,
+            "{robot}: llamadas ambiguas"
+        );
+        assert_eq!(
+            shared.missing_calls, individual.missing_calls,
+            "{robot}: llamadas sin destino"
+        );
+        assert_eq!(shared.errors, individual.errors, "{robot}: errores");
+    }
+}
+
+#[test]
 fn el_orquestador_ve_a_sus_hijos_y_solo_marca_lo_que_esta_muerto() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = workspace(tmp.path());

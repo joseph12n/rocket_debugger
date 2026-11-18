@@ -226,3 +226,8 @@ Detalle de rendimiento: con el cache de logs parseados (`logs::parse_file_cached
 `mtime` y tamano) el barrido de `review` sobre 32 robots bajo de ~2 s a ~0,8 s sin cambiar una coma de
 la salida (sha256 identico). Sin cache, la bandeja releia y reparaba los mismos ~20 ficheros una vez
 por robot.
+
+El otro O(N^2) del barrido era recargar los hechos de la db por robot. `analysis::Workspace` carga y
+deduplica los hechos una vez y cada fila analiza su robot sobre esa misma foto. Medido con el binario
+de depuracion sobre 16 robots de 4 dbs sin logs: **0,7 s -> 0,1 s**, con un test que compara campo a
+campo el analisis compartido con el analisis individual de cada robot.
