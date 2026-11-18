@@ -12,30 +12,20 @@
 //! los subrobots. El grafo no es una feature opcional, es un requisito de
 //! correccion de las reglas.
 //!
-//! El modulo separa los pasos para poder probarlos y reutilizarlos por separado:
+//! Los pasos estan separados para probarlos y reutilizarlos: [`reads_and_writes`]
+//! (uso de variables), [`build_edges`] (quien llama a quien) y [`contracts`] /
+//! [`unused_declared`] (que provee el padre en la llamada, que lee el hijo y nadie
+//! le da, y que variables del padre siguen sin uso contando a los hijos).
 //!
-//! 1. [`reads_and_writes`]: uso de variables dentro de un robot.
-//! 2. [`build_edges`]: quien llama a quien, resolviendo el nombre del hijo contra
-//!    las dbs disponibles.
-//! 3. [`contracts`] y [`unused_declared`]: que provee el padre en la linea de la
-//!    llamada, que lee el hijo y nadie le da, y que variables del padre siguen
-//!    sin uso incluso contando lo que consumen sus hijos.
+//! Un hijo inexistente **se omite** en [`build_edges`] (sin hechos no hay contrato)
+//! y la llamada sale en [`missing_calls`]: en runtime el runner no resuelve el
+//! nombre y el padre falla. Si solo existe en otras dbs, la arista se marca
+//! [`Edge::ambiguous`].
 //!
-//! Los robots que no existen en ninguna db **se omiten** en [`build_edges`]: un
-//! hijo que no esta no tiene contrato que analizar, y una arista a un nombre
-//! inexistente solo produciria `missing` falsos. La llamada no se pierde: sale en
-//! [`missing_calls`], porque en runtime el runner no resuelve ese nombre y el
-//! padre falla. Si el nombre solo existe en otras dbs la arista se emite con
-//! [`Edge::ambiguous`], porque en ese caso no se puede afirmar que sea el robot
-//! que resuelve el runner.
-//!
-//! Un workspace son **varias dbs** y el mismo robot suele estar copiado en mas de
-//! una. `analysis::load_workspace` deduplica por contenido y guarda las etiquetas
-//! descartadas en [`RobotFacts::also_in`]: el runner busca el hijo en la db del
-//! padre, asi que una copia identica cuenta como "esta en la db del padre" aunque
-//! el hecho que sobrevive al dedupe lleve la etiqueta de otra db. Sin eso, una
-//! copia deduplicada pareceria un homologo ausente y marcaria la arista ambigua
-//! sin serlo.
+//! El workspace son varias dbs y el robot suele estar copiado:
+//! [`analysis::load_workspace`] deduplica por contenido y guarda las etiquetas
+//! descartadas en [`RobotFacts::also_in`], porque el runner busca al hijo en la db
+//! del padre y una copia identica cuenta como presente.
 
 use std::collections::{BTreeMap, BTreeSet};
 
