@@ -61,6 +61,37 @@ git diff --numstat origin/main...HEAD
 `pr.ps1` hace la misma cuenta (tope 400) y no sube si se pasa. Si el cambio no cabe, se parte
 en PRs apilados por tema, no en uno gigante.
 
+## Firma de commits
+
+Todos los commits van firmados: el `commit.gpgsign` global esta activo y la firma es SSH
+(`gpg.format=ssh`), asi que un commit sin firma es un error de configuracion, no una eleccion.
+
+```powershell
+ssh-keygen -t ed25519 -f $HOME\.ssh\id_github_signing -N '""'
+git config --global gpg.format ssh
+git config --global user.signingkey $HOME\.ssh\id_github_signing.pub
+git config --global commit.gpgsign true
+```
+
+Para que GitHub lo muestre como **Verified**, la clave publica tiene que estar registrada como
+clave de firma: Settings -> SSH and GPG keys -> New SSH key -> tipo *Signing Key*, o
+`gh ssh-key add <pub> --type signing` (pide el scope `admin:ssh_signing_key`). Comprobar:
+
+```powershell
+git log -1 --format='%G? %GS'   # G = firma buena
+```
+
+## Hooks locales
+
+`lefthook` corre en cada commit: `gitleaks protect --staged` (secretos), bloqueo de `.env` en
+staging y `cog verify` sobre el mensaje (Conventional Commits). Se instala una vez por clon:
+
+```powershell
+lefthook install
+```
+
+`--no-verify` no se usa. Si un hook falla, se arregla la causa.
+
 ## Ciclo de trabajo
 
 Orden: rama -> cambios -> gate -> `pr.ps1` -> CI y Sonar -> merge (tope->base si hay cadena).
