@@ -1330,7 +1330,7 @@
       sort: { key: "", direction: 1 },
       reviewController: null,
       packController: null,
-      panel: { robot: "", opener: null },
+      panel: { robot: "", db: "", opener: null },
     };
 
     /* ------------------------------------------------------------------ */
@@ -1725,6 +1725,7 @@
 
     function openPanel(row, opener) {
       state.panel.robot = row.robot;
+      state.panel.db = row.db || "";
       state.panel.opener = opener instanceof HTMLElement ? opener : document.activeElement;
       panelTitle.textContent = row.robot || "(robot sin nombre)";
       panelMeta.textContent = panelMetaFor(row);
@@ -1751,6 +1752,7 @@
       const opener = state.panel.opener;
       state.panel.opener = null;
       state.panel.robot = "";
+      state.panel.db = "";
       if (restoreFocus && opener && document.contains(opener)) {
         opener.focus();
       }
@@ -1761,10 +1763,11 @@
       const controller = new AbortController();
       state.packController = controller;
       const robot = state.panel.robot;
+      const db = state.panel.db;
       setPanelView("loading");
 
       try {
-        const response = await fetch(`${API_PACK}?robot=${encodeURIComponent(robot)}`, {
+        const response = await fetch(`${API_PACK}?robot=${encodeURIComponent(robot)}${db ? `&db=${encodeURIComponent(db)}` : ""}`, {
           cache: "no-store",
           signal: controller.signal,
           headers: { Accept: "text/plain" },

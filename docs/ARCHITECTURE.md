@@ -22,7 +22,7 @@ catalogo comandos ─┘          ├→ daemon local (HTTP/WS)  ← lo que pint
 | MCP | `rocketdebug-mcp` | fachada para el agente por stdio y HTTP (7 tools) |
 | Registro | `registry` (core) | memoria de firmas y fixes; **el unico sitio donde se escribe** |
 | Vigilante | `rocketdebug-cli watch` | barrido periodico que alimenta el registro sin intervencion |
-| UI | *(pendiente)* | Tauri: canvas, heatmap, diff, inbox de hallazgos |
+| UI | `rocketdebug-mcp --http` | bandeja de entrada en el navegador (`/`, `/api/review`, `/api/pack`); Tauri solo la envolveria |
 
 ## Decisiones y su motivo
 
@@ -124,3 +124,21 @@ fuera el reloj del escaneo, cada pasada del vigilante contaria la misma version 
 nuevo y `occurrences` dejaria de significar nada. Medido antes del arreglo: dos pasadas seguidas sobre
 la misma db dejaban 164 observaciones donde la primera habia dejado 82. Ahora `db::latest_created_at`
 da la hora del snapshot observado y dos pasadas son idempotentes (82 y 0 nuevas).
+### La UI se sirve desde el mismo servidor, no desde una app aparte
+
+`rocketdebug-mcp --http <puerto>` sirve tres cosas en `127.0.0.1`:
+
+| ruta | para quien | que es |
+|---|---|---|
+| `POST /mcp` | el agente | JSON-RPC (MCP) |
+| `GET /` | el humano | la pagina de bandeja de entrada, embebida en el binario |
+| `GET /api/review` | la pagina | la misma agregacion que `rocketdebug review`, en JSON |
+| `GET /api/pack?robot=…&db=…` | la pagina | el markdown de un robot |
+
+Decision: **una sola pagina HTML sin build**, embebida con `include_str!`. Ni framework, ni bundler, ni
+CDN: el binario es el producto y no puede depender de que alguien instale Node para ver la bandeja.
+Tauri queda como paso posterior y solo tendria que apuntar a esa misma pagina.
+
+La agregacion vive en `rocketdebug_core::review` y la usan **el CLI y la API**, asi que no pueden dar
+numeros distintos. Medido: `review --workspace` y `/api/review` coinciden en 32 robots, 67 accionables,
+76 higiene y 6 vivos.

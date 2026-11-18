@@ -278,6 +278,7 @@ fn una_tool_por_http_usa_el_entorno_del_servidor() {
         env_db: Some(db),
         logs: None,
         registry: None,
+        workspace: None,
     });
 
     let line = call_request(3, "list_robots", json!({}));
@@ -291,4 +292,78 @@ fn una_tool_por_http_usa_el_entorno_del_servidor() {
         .as_str()
         .expect("la tool devuelve texto");
     assert!(text.contains("demo"), "el listado dice el robot:\n{text}");
+}
+
+// ---------------------------------------------------------------- UI
+
+/// Servidor con una db temporal de un robot (`demo`).
+fn start_ui(nombre: &str) -> (TempDir, u16) {
+    let tmp = TempDir::new(nombre);
+    let db = make_db(
+        tmp.path(),
+        "demo",
+        &[(1, "2026-11-17 10:00:00", demo_project().as_str())],
+    );
+    let mut settings = Settings::hermetic();
+    settings.env_db = Some(db);
+    (tmp, start(settings))
+}
+
+const GET_RAIZ: &[u8] = b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+const GET_REVIEW: &[u8] = b"GET /api/review HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+const GET_PACK: &[u8] = b"GET /api/pack?robot=demo HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+const GET_PACK_SIN_ROBOT: &[u8] = b"GET /api/pack HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+const POST_REVIEW: &[u8] =
+    b"POST /api/review HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\n{}";
+
+#[test]
+fn la_raiz_sirve_la_pagina_de_la_ui() {
+    let (_tmp, port) = start_ui("uiraiz");
+    let response = exchange(port, &[GET_RAIZ]);
+    assert_eq!(response.status, 200);
+    let tipo = response.header("Content-Type").unwrap_or_default();
+    assert!(tipo.starts_with("text/html"), "content-type: {tipo}");
+    let cuerpo = &response.body;
+    assert!(
+        cuerpo.to_ascii_lowercase().contains("<!doctype html"),
+        "no parece una pagina HTML"
+    );
+    assert!(
+        cuerpo.contains("/api/review"),
+        "la pagina tiene que pedir /api/review"
+    );
+}
+
+#[test]
+fn api_review_devuelve_filas_y_totales() {
+    let (_tmp, port) = start_ui("uiapi");
+    let response = exchange(port, &[GET_REVIEW]);
+    assert_eq!(response.status, 200);
+    assert_eq!(response.header("Content-Type"), Some("application/json"));
+    let cuerpo: serde_json::Value = serde_json::from_str(&response.body).expect("json valido");
+    assert_eq!(cuerpo["totals"]["robots"], 1, "{cuerpo}");
+    let filas = cuerpo["rows"].as_array().expect("rows es un array");
+    assert_eq!(filas.len(), 1, "{cuerpo}");
+    assert_eq!(filas[0]["robot"], "demo", "{cuerpo}");
+}
+
+#[test]
+fn api_pack_devuelve_el_markdown_y_exige_robot() {
+    let (_tmp, port) = start_ui("uipack");
+    let response = exchange(port, &[GET_PACK]);
+    assert_eq!(response.status, 200);
+    let tipo = response.header("Content-Type").unwrap_or_default();
+    assert!(tipo.starts_with("text/plain"), "content-type: {tipo}");
+    assert!(response.body.contains("# demo"), "{}", response.body);
+
+    // Sin `robot` es culpa del cliente (400), no un 500.
+    let sin = exchange(port, &[GET_PACK_SIN_ROBOT]);
+    assert_eq!(sin.status, 400, "{}", sin.body);
+}
+
+#[test]
+fn api_review_solo_atiende_get() {
+    let (_tmp, port) = start_ui("uimetodo");
+    let response = exchange(port, &[POST_REVIEW]);
+    assert_eq!(response.status, 405);
 }
