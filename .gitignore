@@ -6,3 +6,5 @@ fixtures/out/
 __pycache__/
 *.pyc
 .env
+/logs/
+/logo_notify.ico

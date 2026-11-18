@@ -211,7 +211,10 @@ fn run_status_muestra_el_broker_libre_y_la_ultima_ejecucion() {
 /// Ejecucion real contra BBRE2. Requiere:
 ///
 /// - `ROCKETBOT_EXE` apuntando a `rocketbot.exe` (o la ruta estandar),
-/// - **Studio cerrado** (el broker se niega con Studio abierto),
+/// - **licencia de produccion**: con la licencia Studio Develop el CLI responde
+///   `Does not have a production license` y sale con 0 sin ejecutar; el broker lo
+///   reporta como `NoEvents` (ver `C:\rocketbot_bots\MEMORIA.md`),
+/// - **Studio cerrado**,
 /// - `C:\rocketbot_bots\BBRE2\robot_run.db` (o `ROCKETDEBUG_REAL_DB`).
 ///
 /// `ML_00_Preparacion` es el robot mas barato de BBRE2 (12 nodos, sin navegador)
@@ -219,7 +222,7 @@ fn run_status_muestra_el_broker_libre_y_la_ultima_ejecucion() {
 /// pack lee. No se afirma que el robot salga limpio: de hecho sus rutas
 /// migradas son el caso de #26.
 #[test]
-#[ignore = "requiere rocketbot.exe, Studio cerrado y BBRE2 real"]
+#[ignore = "requiere licencia de produccion, Studio cerrado y BBRE2 real"]
 fn ejecucion_real_contra_bbre2() {
     let exe = std::env::var("ROCKETBOT_EXE")
         .unwrap_or_else(|_| r"C:\Rocketbot\rocketbot.exe".to_string());
