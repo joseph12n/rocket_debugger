@@ -18,6 +18,15 @@ pub const PARAM_MAX: usize = 100;
 /// Se cortan los valores de variables por la misma razon.
 pub const VAR_MAX: usize = 60;
 
+/// Descripcion del perfil en la cabecera del render.
+///
+/// Pasa por el mismo [`field`] que el resto de campos: una descripcion real puede
+/// citar la carpeta de trabajo (`exporta a C:/Users/<x>/...`) y esa ruta
+/// identifica a la persona igual que un parametro; antes se pintaba con `one_line`
+/// y salia entera (issue #18). El tope evita que una descripcion larga se coma la
+/// cabecera, que es lo primero que lee el agente.
+const DESCRIPTION_MAX: usize = 200;
+
 /// Llamadas de contrato que se listan por seccion.
 ///
 /// Un orquestador con 8 hijos ya ocupa ~30 lineas de contrato; el resto del detalle
@@ -193,7 +202,7 @@ impl Pack {
             self.versions.len()
         );
         if let Some(d) = &self.description {
-            let _ = writeln!(o, "> {}", one_line(d));
+            let _ = writeln!(o, "> {}", field(d, DESCRIPTION_MAX));
         }
         let _ = writeln!(
             o,
