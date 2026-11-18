@@ -19,7 +19,7 @@ catalogo comandos ─┘          ├→ daemon local (HTTP/WS)  ← lo que pint
 |---|---|---|
 | Motor | `rocketdebug-core` | parseo, arbol, indice de versiones, grafo, reglas, atribucion, render |
 | CLI | `rocketdebug-cli` | inspeccion manual y debug del motor |
-| MCP | `rocketdebug-mcp` | fachada para el agente por stdio y HTTP (7 tools) |
+| MCP | `rocketdebug-mcp` | fachada para el agente por stdio y HTTP (8 tools) |
 | Registro | `registry` (core) | memoria de firmas y fixes; **el unico sitio donde se escribe** |
 | Vigilante | `rocketdebug-cli watch` | barrido periodico que alimenta el registro sin intervencion |
 | UI | `rocketdebug-mcp --http` | bandeja de entrada en el navegador (`/`, `/api/review`, `/api/pack`); Tauri solo la envolveria |
@@ -142,3 +142,18 @@ Tauri queda como paso posterior y solo tendria que apuntar a esa misma pagina.
 La agregacion vive en `rocketdebug_core::review` y la usan **el CLI y la API**, asi que no pueden dar
 numeros distintos. Medido: `review --workspace` y `/api/review` coinciden en 32 robots, 67 accionables,
 76 higiene y 6 vivos.
+### El agente ordena, el humano mira
+
+`ui_render` devuelve un enlace como
+`http://127.0.0.1:PUERTO/?robot=ML_06_Legacy&db=BBRE2%5Crobot_run.db`, y esa URL abre la bandeja con
+el robot seleccionado y su pack cargado. Es la alternativa a pegar 2k tokens de contexto en el chat:
+el agente apunta, la persona mira.
+
+El servidor HTTP necesita URL conocida (`ROCKETDEBUG_UI_URL`) porque no tiene puerto por defecto. La
+pagina toma `robot`/`db` de su propia URL, escribe la URL al pulsar una fila (enlaces compartibles) y
+respeta atras/adelante.
+
+Detalle de rendimiento: con el cache de logs parseados (`logs::parse_file_cached`, invalidado por
+`mtime` y tamano) el barrido de `review` sobre 32 robots bajo de ~2 s a ~0,8 s sin cambiar una coma de
+la salida (sha256 identico). Sin cache, la bandeja releia y reparaba los mismos ~20 ficheros una vez
+por robot.

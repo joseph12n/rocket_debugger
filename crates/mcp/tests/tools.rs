@@ -504,3 +504,26 @@ fn el_proceso_sobrevive_a_un_robot_inexistente_y_sigue_hablando() {
         "el proceso sigue atendiendo despues del fallo: {listado}"
     );
 }
+
+// ---------------------------------------------------------------- UI
+
+#[test]
+fn ui_render_devuelve_un_enlace_codificado() {
+    let respuesta = call(
+        &Settings::hermetic(),
+        1,
+        "ui_render",
+        json!({"robot": "Mi Robot", "db": "BBRE2\\robot_run.db", "line": "2.10"}),
+    );
+    assert!(!is_error(&respuesta), "{respuesta}");
+    let texto = tool_text(&respuesta);
+    assert!(
+        texto.contains("?robot=Mi%20Robot"),
+        "el espacio del nombre va codificado:\n{texto}"
+    );
+    assert!(
+        texto.contains("&db=BBRE2%5Crobot_run.db"),
+        "la barra invertida de la etiqueta va codificada:\n{texto}"
+    );
+    assert!(texto.contains("&line=2.10"), "{texto}");
+}
