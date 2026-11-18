@@ -427,6 +427,43 @@ fn robot_errors_sin_logs_avisa_de_que_falta_evidencia() {
     );
 }
 
+#[test]
+fn robot_errors_devuelve_la_seccion_del_pack_con_logs() {
+    let tmp = TempDir::new("errors-logs");
+    let proyecto = demo_project();
+    let db = make_db(
+        tmp.path(),
+        "demo",
+        &[(1, "2026-11-17 10:00:00", proyecto.as_str())],
+    );
+    let logs_dir = tmp.path().join("logs");
+    std::fs::create_dir_all(&logs_dir).expect("creo logs");
+    std::fs::write(
+        logs_dir.join("logfile.log"),
+        "2099-01-01 00:00:00.000000 - rocketbot - INFO - request: demo : line 1 - rpasystem : log_message  id: 11111111-1111-1111-1111-111111111111 - INFO - INICIO demo\n\
+         2099-01-01 00:00:01.000000 - rocketbot - ERROR - EXCEPTION IN (<string> system, L_253 \"\"): NameError: name 'contador' is not defined\n",
+    )
+    .expect("escribo log");
+
+    let mut settings = Settings::hermetic();
+    settings.logs = Some((logs_dir, 20));
+    let respuesta = call(
+        &settings,
+        1,
+        "robot_errors",
+        json!({"db": db, "robot": "demo"}),
+    );
+    assert!(!is_error(&respuesta), "{respuesta}");
+    let texto = tool_text(&respuesta);
+    assert!(texto.starts_with("## Errores"), "{texto}");
+    assert!(texto.contains("vivos 1"), "{texto}");
+    assert!(texto.contains("NameError"), "{texto}");
+    assert!(
+        !texto.contains("## Variables"),
+        "la seccion no arrastra el resto del pack:\n{texto}"
+    );
+}
+
 /// El binario de verdad: `main` lee lineas, despacha y escribe.
 ///
 /// Es el unico test que arranca un proceso, y comprueba justo lo que el

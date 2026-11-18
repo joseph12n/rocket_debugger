@@ -416,6 +416,18 @@ impl Pack {
         let _ = writeln!(o);
     }
 
+    /// Seccion de errores como documento independiente.
+    ///
+    /// La tool `robot_errors` la consume sin recortar el markdown del pack: el
+    /// formato de la seccion sigue viviendo en un solo sitio y cambiar el orden de
+    /// las secciones no puede romper la tool (deuda de #18).
+    pub fn render_errors_section(&self) -> Option<String> {
+        let mut out = String::new();
+        self.render_errors(&mut out);
+        let text = out.trim_end();
+        (!text.is_empty()).then(|| text.to_string())
+    }
+
     /// Resumen de una linea para el listado de robots.
     pub fn summary_line(&self) -> String {
         format!(
@@ -720,6 +732,35 @@ mod tests {
 
     /// Una llamada que el grafo no pudo resolver es un fallo latente: en runtime
     /// aparece como "robot no encontrado" en esa linea. No se puede callar.
+    #[test]
+    fn la_seccion_de_errores_se_renderiza_sola() {
+        let error = ErrorItem {
+            line: "1".to_string(),
+            command: "log_message".to_string(),
+            message: "NameError: name 'contador' is not defined".to_string(),
+            occurrences: 2,
+            signature: "NameError:name:{var}:not_defined".to_string(),
+            version: Some(1),
+        };
+        let mut pack = pack_con(Vec::new(), Vec::new(), vec![error]);
+
+        let section = pack
+            .render_errors_section()
+            .expect("con errores hay seccion");
+        assert!(section.starts_with("## Errores"), "{section}");
+        assert!(section.contains("NameError"), "{section}");
+        assert!(
+            !section.contains("## Variables") && !section.contains("## Flujo"),
+            "la seccion no arrastra el resto del pack:\n{section}"
+        );
+
+        pack.analysis.errors.live.clear();
+        assert!(
+            pack.render_errors_section().is_none(),
+            "sin errores no se inventa una seccion"
+        );
+    }
+
     #[test]
     fn las_llamadas_sin_resolver_no_se_callan() {
         let mut pack = pack_con(Vec::new(), Vec::new(), Vec::new());
