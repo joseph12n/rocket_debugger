@@ -103,7 +103,7 @@ Orden acordado: el broker primero; las rutas migradas habilitan el ciclo real so
 - [ ] #25 exec: broker de ejecucion con cola, mutex y verificacion de eventos
 - [x] #26 analysis: regla RUTA_MIGRADA para rutas de otro dispositivo
 - [ ] #27 ciclo: cierre end-to-end con un robot real no trivial (BBRE2)
-- [ ] #18 deuda conocida del motor y la fachada, cada punto cerrado con su test
+- [x] #18 deuda conocida del motor y la fachada, cada punto cerrado con su test
 
 ## Estado medido
 
