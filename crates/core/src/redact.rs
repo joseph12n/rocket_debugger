@@ -434,13 +434,17 @@ fn starts_with_ic(text: &str, at: usize, needle: &str) -> bool {
 }
 
 /// Fin del tramo del usuario: desde `start` hasta el separador que abre la cola
-/// de la ruta, una comilla o el final de la cadena.
+/// de la ruta, una comilla de cierre o el final de la cadena.
 ///
 /// El tramo **no** se corta en el primer espacio: la cuenta real de Windows y de
 /// macOS lleva espacios de verdad (`John Doe`, `juan perez`), y cortar ahi dejaba
 /// `%USERPROFILE% Doe\proyectos` con medio nombre a la vista (issue #18). Los
 /// espacios de dentro del tramo se comen con el nombre porque lo que lo delimita
 /// es el separador de la ruta, no el espacio.
+///
+/// El apostrofo es parte del nombre (`O'Brien`) y no un delimitador, salvo cuando
+/// lo sigue un espacio o el final: ahi si es la comilla que cierra un parametro
+/// entrecomillado. La comilla doble siempre cierra un JSON.
 ///
 /// Devolver `None` cuando el tramo no tiene ni un caracter visible evita
 /// inventarse un usuario en `C:/Users/`, en `C:/Users/ /x` o en `/home//x`, que
@@ -452,6 +456,20 @@ fn user_end(text: &str, start: usize) -> Option<usize> {
         if is_user_stop(c) {
             break;
         }
+        if c == '\'' {
+            let after = start + off + c.len_utf8();
+            match text.get(after..).and_then(|rest| rest.chars().next()) {
+                // Cierra una comilla de parametro, no el nombre.
+                None => break,
+                Some(next)
+                    if next.is_whitespace()
+                        || matches!(next, ',' | ';' | ')' | ']' | '}' | ':') =>
+                {
+                    break
+                }
+                Some(_) => {}
+            }
+        }
         end = start + off + c.len_utf8();
         visible |= !c.is_whitespace();
     }
@@ -461,11 +479,12 @@ fn user_end(text: &str, start: usize) -> Option<usize> {
 /// Caracter que cierra el tramo del usuario.
 ///
 /// El separador es el limite natural de un nombre de cuenta dentro de una ruta.
-/// La comilla cierra un parametro entrecomillado (los JSON llegan asi). El salto
-/// de linea cierra la linea: un nombre de usuario no cruza de linea, y comerselo
-/// arrastraria a la marca el texto de la linea siguiente.
+/// La comilla doble cierra un parametro JSON y el salto de linea cierra la linea:
+/// un nombre de usuario no cruza de linea, y comerselo arrastraria a la marca el
+/// texto de la linea siguiente. El apostrofo **no** esta aqui: se decide en
+/// [`user_end`] porque puede ser parte del nombre (`O'Brien`).
 fn is_user_stop(c: char) -> bool {
-    matches!(c, '/' | '\\' | '"' | '\'' | '\n' | '\r')
+    matches!(c, '/' | '\\' | '"' | '\n' | '\r')
 }
 
 /// Valor listo para el pack. `None` cuando no hay nada que mostrar: el render lo
@@ -755,6 +774,22 @@ mod tests {
         assert_eq!(
             mask_user_paths(r#""C:/Users/John Doe/x" + fecha"#),
             r#""%USERPROFILE%/x" + fecha"#
+        );
+        // El apostrofo forma parte del nombre: cortar en el dejaba `s/x` a la
+        // vista (issue #18).
+        assert_eq!(mask_user_paths("C:/Users/O'Brien/x"), "%USERPROFILE%/x");
+        assert_eq!(mask_user_paths("/home/O'Brien/x"), "~/x");
+        assert_eq!(mask_user_paths("C:/Users/John'/x"), "%USERPROFILE%/x");
+        // Con espacio detras si es la comilla de cierre de un parametro.
+        assert_eq!(
+            mask_user_paths("C:/Users/John' + fecha"),
+            "%USERPROFILE%' + fecha"
+        );
+        let con_apostrofo = mask_user_paths("C:/Users/O'Brien/x");
+        assert_eq!(
+            mask_user_paths(&con_apostrofo),
+            con_apostrofo,
+            "enmascarar dos veces no cambia el resultado"
         );
         // Un tramo sin nada visible sigue sin enmascararse: `C:/Users/ ` es texto
         // roto, no un usuario en blanco.
