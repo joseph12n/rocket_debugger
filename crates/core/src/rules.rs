@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer};
 
+use crate::pathscan;
 use crate::tree::{self, Branch, FlatNode};
 
 /// Hallazgos que devuelve [`evaluate`] como maximo. Es el presupuesto de
@@ -423,38 +424,18 @@ fn absolute_path(text: &str) -> Option<String> {
         let is_drive = bytes[i].is_ascii_alphabetic()
             && bytes[i + 1] == b':'
             && matches!(bytes[i + 2], b'\\' | b'/');
-        if !is_drive || continues_scheme(text, i) || inside_url(text, i) {
+        if !is_drive || pathscan::continues_scheme(text, i) || pathscan::inside_url_token(text, i) {
             return None;
         }
         Some(path_snippet(&text[i..]))
     })
 }
 
-/// `https:` -> la `s` no es una unidad porque la precede otra letra del esquema.
-fn continues_scheme(text: &str, at: usize) -> bool {
-    text[..at]
-        .chars()
-        .next_back()
-        .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-}
-
-/// ¿La posicion cae dentro de un token que ya lleva un esquema URL?
-fn inside_url(text: &str, at: usize) -> bool {
-    let start = text[..at]
-        .char_indices()
-        .rev()
-        .find(|(_, c)| {
-            c.is_whitespace()
-                || matches!(
-                    c,
-                    '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
-                )
-        })
-        .map_or(0, |(i, c)| i + c.len_utf8());
-    text[start..at].contains("://")
-}
-
 /// Recorta la ruta para el mensaje: un parametro puede ser un JSON entero.
+///
+/// El tope es aqui y no en `pathscan` porque es formato del hallazgo, no deteccion:
+/// el pack de 60 corta tambien en la coma (un parametro puede ser un CSV) y el del
+/// diagnostico aguanta 260 porque la ruta entera se va a comprobar en disco.
 fn path_snippet(rest: &str) -> String {
     rest.chars()
         .take(PATH_SNIPPET_MAX)

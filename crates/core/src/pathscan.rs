@@ -59,6 +59,25 @@ pub fn continues_scheme(text: &str, at: usize) -> bool {
     text[..at].chars().next_back().is_some_and(is_scheme_char)
 }
 
+/// `true` si la posicion cae dentro de un token que ya abrio un esquema (`://`).
+///
+/// Complementa a [`url_spans`]: alli el tramo se calcula de antemano; aqui se mira
+/// hacia atras desde la posicion, que es lo que necesita un escaneo byte a byte.
+pub fn inside_url_token(text: &str, at: usize) -> bool {
+    let start = text[..at]
+        .char_indices()
+        .rev()
+        .find(|(_, c)| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
+                )
+        })
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    text[start..at].contains(URL_SEP)
+}
+
 /// `true` si la posicion abre token: la anterior no es parte de una palabra.
 ///
 /// Lo usa la deteccion de raices POSIX: en `carpeta/home/x` el prefijo aparece,
@@ -129,6 +148,15 @@ mod tests {
         assert!(opens_token(":/home/x", 1));
         assert!(!opens_token("carpeta/home/x", 7));
         assert!(!opens_token("a_b/home/x", 3));
+    }
+
+    #[test]
+    fn un_token_dentro_de_una_url_lo_sabe_por_la_cola() {
+        let text = r#"x "https://ejemplo/C:/a" y"#;
+        let at = text.find("C:/").expect("esta");
+        assert!(inside_url_token(text, at));
+        assert!(!inside_url_token("C:/a", 0));
+        assert!(!inside_url_token("url: C:/a", 6));
     }
 
     #[test]

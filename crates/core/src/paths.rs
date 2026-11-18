@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::pathscan;
 use crate::rules::{self, Finding};
 use crate::tree::FlatNode;
 
@@ -434,9 +435,10 @@ pub fn paths_in_text(text: &str) -> Vec<String> {
             continue;
         }
         let start = if is_drive_at(bytes, i) {
-            (!continues_scheme(text, i) && !inside_url(text, i)).then_some(i)
+            (!pathscan::continues_scheme(text, i) && !pathscan::inside_url_token(text, i))
+                .then_some(i)
         } else if is_posix_at(text, i) {
-            (!inside_url(text, i)).then_some(i)
+            (!pathscan::inside_url_token(text, i)).then_some(i)
         } else {
             None
         };
@@ -471,30 +473,6 @@ fn is_posix_at(text: &str, i: usize) -> bool {
         prev,
         None | Some(' ' | '\t' | '\n' | '\r' | '"' | '\'' | '=' | '(' | '[' | '{' | ',')
     )
-}
-
-/// Cabecera de esquema URL (`https:`): la letra pegada al `:` no es una unidad.
-fn continues_scheme(text: &str, at: usize) -> bool {
-    text[..at]
-        .chars()
-        .next_back()
-        .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-}
-
-/// ¿La posicion cae dentro de un token que ya lleva `://`?
-fn inside_url(text: &str, at: usize) -> bool {
-    let start = text[..at]
-        .char_indices()
-        .rev()
-        .find(|(_, c)| {
-            c.is_whitespace()
-                || matches!(
-                    c,
-                    '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
-                )
-        })
-        .map_or(0, |(i, c)| i + c.len_utf8());
-    text[start..at].contains("://")
 }
 
 fn path_snippet(rest: &str) -> String {
