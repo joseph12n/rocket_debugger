@@ -64,6 +64,8 @@ Auditoria de arquitectura y plan de sanitizacion en [`docs/AUDIT.md`](docs/AUDIT
 ## Convenciones
 
 - Documentacion e issues en espanol. Codigo e identificadores en ingles.
+- Ramas `<tipo>/<slug-en-ingles>` y PRs de 400 lineas de codigo como maximo: ver
+  [`CONTRIBUTING.md`](CONTRIBUTING.md).
 - Decisiones de diseno que no son obvias se documentan en el codigo con el *por que*,
   no el *que*.
 - Nada de dependencia de `C:\Rocketbot` en tests: los fixtures son sinteticos.
