@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   El ciclo completo de un cambio, para que la calidad quede visible en GitHub:
-    1. exige arbol limpio y rama distinta de la base;
+    1. exige arbol limpio, rama `<tipo>/<slug-en-ingles>` y un diff dentro del tope;
     2. push con upstream (o --force-with-lease con -Force, tras un rebase);
     3. crea el PR si la rama aun no tiene uno (titulo = ultimo commit);
     4. espera las comprobaciones (`gh pr checks --watch`) e imprime el estado.
@@ -19,6 +19,11 @@
 
 .PARAMETER Base
   Rama destino. Por defecto, main.
+
+.PARAMETER MaxLines
+  Tope de lineas de codigo cambiadas (anadidas + borradas). Por defecto 400; no
+  cuentan `docs/`, `fixtures/`, `*.md` ni `Cargo.lock`. Si el cambio no cabe, se
+  parte en PRs mas pequenos.
 
 .PARAMETER Force
   Fuerza el push con --force-with-lease (solo tras rebase).
@@ -38,6 +43,7 @@ param(
     [string]$Title,
     [string]$BodyFile,
     [string]$Base = 'main',
+    [int]$MaxLines = 400,
     [switch]$Force,
     [switch]$NoWait,
     [switch]$Merge
@@ -54,7 +60,27 @@ if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { Fail 'gh no esta en P
 
 $branch = (git rev-parse --abbrev-ref HEAD).Trim()
 if ($branch -eq $Base) { Fail "estas en ${Base}: crea una rama para el cambio" }
+if ($branch -notmatch '^(feat|fix|refactor|perf|docs|test|build|ci|chore)/[a-z0-9]+(-[a-z0-9]+)*$') {
+    Fail "rama '$branch': usa <tipo>/<slug-en-ingles>, p.ej. feat/exec-broker, fix/redact-apostrophe"
+}
 if (git status --porcelain) { Fail 'hay cambios sin commitear' }
+
+git fetch -q origin $Base
+if ($LASTEXITCODE -ne 0) { Fail "no se pudo actualizar origin/${Base}" }
+
+# Tope de tamano: sin docs ni markdown ni Cargo.lock, sumando anadidas y borradas.
+$changed = 0
+foreach ($line in (git diff --numstat "origin/${Base}...HEAD")) {
+    if (-not $line.Trim()) { continue }
+    $parts = $line -split "`t"
+    $path = $parts[2]
+    if ($path -match '^(docs|fixtures)/' -or $path -match '\.md$' -or $path -eq 'Cargo.lock') { continue }
+    $changed += [int]$parts[0] + [int]$parts[1]
+}
+if ($changed -gt $MaxLines) {
+    Fail "el PR cambia $changed lineas de codigo (tope $MaxLines): parte el trabajo en PRs mas pequenos"
+}
+Write-Host "==> diff: $changed/$MaxLines lineas de codigo" -ForegroundColor Cyan
 
 Write-Host "==> push $branch" -ForegroundColor Cyan
 $pushArgs = @('push', '--set-upstream', 'origin', $branch)
