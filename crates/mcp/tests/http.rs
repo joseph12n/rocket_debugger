@@ -329,9 +329,29 @@ fn la_raiz_sirve_la_pagina_de_la_ui() {
         "no parece una pagina HTML"
     );
     assert!(
-        cuerpo.contains("/api/review"),
-        "la pagina tiene que pedir /api/review"
+        cuerpo.contains("/app.js") && cuerpo.contains("/app.css"),
+        "la pagina carga sus assets por separado (CSP sin unsafe-inline)"
     );
+    assert!(
+        !cuerpo.contains("unsafe-inline"),
+        "la CSP no puede permitir scripts inline"
+    );
+
+    // Y los assets se sirven con su tipo: sin esto el navegador no ejecuta el JS.
+    let js = exchange(port, &[b"GET /app.js HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"]);
+    assert_eq!(js.status, 200);
+    assert_eq!(
+        js.header("Content-Type"),
+        Some("text/javascript; charset=utf-8")
+    );
+    assert!(
+        js.body.contains("/api/review"),
+        "el JS es el que pide la API"
+    );
+
+    let css = exchange(port, &[b"GET /app.css HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"]);
+    assert_eq!(css.status, 200);
+    assert_eq!(css.header("Content-Type"), Some("text/css; charset=utf-8"));
 }
 
 #[test]

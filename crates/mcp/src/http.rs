@@ -414,6 +414,16 @@ impl Response {
         }
     }
 
+    /// Asset embebido con su tipo. Sirve CSS y JS de la UI.
+    fn asset(content_type: &'static str, body: &'static str) -> Self {
+        Self {
+            status: 200,
+            content_type: Some(content_type),
+            body: body.as_bytes().to_vec(),
+            allow: None,
+        }
+    }
+
     fn error(status: u16, message: &str) -> Self {
         Self::json(status, json!({ "error": message }).to_string())
     }
@@ -466,6 +476,22 @@ fn respond(request: &Request, settings: &Settings) -> Response {
             }
             Response::html(200, PAGE)
         }
+        // CSS y JS van en ficheros aparte, y no embebidos en el HTML, para que la CSP
+        // pueda prohibir `'unsafe-inline'` de verdad. Un `unsafe-inline` en
+        // `script-src` deja la defensa anti-XSS en nada: el CSP tiene que poder
+        // bloquear un script inyectado.
+        "/app.css" => {
+            if request.method != "GET" {
+                return Response::method_not_allowed("GET");
+            }
+            Response::asset("text/css; charset=utf-8", APP_CSS)
+        }
+        "/app.js" => {
+            if request.method != "GET" {
+                return Response::method_not_allowed("GET");
+            }
+            Response::asset("text/javascript; charset=utf-8", APP_JS)
+        }
         "/api/review" => {
             if request.method != "GET" {
                 return Response::method_not_allowed("GET");
@@ -494,6 +520,8 @@ fn respond(request: &Request, settings: &Settings) -> Response {
 
 /// La pagina de la UI, embebida: el binario es un unico fichero, sin assets sueltos.
 const PAGE: &str = include_str!("../assets/index.html");
+const APP_CSS: &str = include_str!("../assets/app.css");
+const APP_JS: &str = include_str!("../assets/app.js");
 
 /// Query string a pares clave/valor, con `%xx` y `+` decodificados.
 fn parse_query(query: &str) -> std::collections::BTreeMap<String, String> {
