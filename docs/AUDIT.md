@@ -169,15 +169,26 @@ Criterio (respeta la convencion del README: el comentario documenta el POR QUE, 
 `redact.rs` (23%) -> `watch.rs` (21%) -> `graph.rs` (22%) -> `registry.rs` (22%) -> `attribution.rs`
 (32%, pero casi todo es por que legitimo) -> resto por debajo del 20%.
 
-**Piloto (esta ronda):** `logs.rs` (modulo preexistente mas comentado y no tocado por los PRs
-abiertos) y la cabecera de `exec.rs` (la mas verbosa del codigo nuevo, mia). Medido: `logs.rs`
-256 -> 199 comentarios, `exec.rs` 209 -> 188. Comportamiento intacto: 352 tests verdes (0 fallos),
-fmt y clippy limpios.
+**Medido hasta ahora** (diff solo de comentarios; la suite no cambia):
+
+| Modulo | Antes | Despues | Nota |
+|---|---|---|---|
+| `logs.rs` | 256 | 199 | piloto |
+| `exec.rs` | 209 | 188 | cabecera del broker |
+| `analysis.rs` | 402 (29%) | 322 (24,6%) | + doc de `Workspace` que estaba pegado a `analyse_with_workspace_at` |
+
+`analysis.rs` es el caso especial: lo que queda es casi todo invariantes del cableado (dedupe por
+contenido, pin de snapshot, cubos de error) y bajarlo mas seria borrar el por que, no la prosa.
+
+**Automatizacion del ciclo** (lo que hace que un PR llegue verde): `scripts/gate.ps1` replica el
+job de Linux (fmt, clippy `-D warnings`, tests) y opcionalmente el build release de Windows;
+`scripts/pr.ps1` sube la rama, crea el PR si no existe y espera las comprobaciones. Detalle en el
+README.
 
 ## 5. Roadmap sugerido
 
-1. Merge de la cadena (#29 -> #31), del tope hacia la base.
-2. Sanitizacion por modulo en el orden del inventario (logs y exec ya en el piloto).
+1. Landing de la cadena (#29 -> #32), del tope hacia la base. Hecho.
+2. Sanitizacion por modulo en el orden del inventario: `logs`, `exec` y `analysis` hechos.
 3. H3 (trivial) y H2 (extractor unico) con sus tests.
 4. H1 partir `analysis.rs`; luego H7 testkit, H6 job de tests en Windows, H4 variantes.
 5. H5 solo si la bandeja crece.
