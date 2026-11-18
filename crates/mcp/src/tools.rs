@@ -684,7 +684,7 @@ fn robots_text(db_path: &Path) -> Result<String, Error> {
 
 /// Render del pack. La seccion de errores se llena solo si hay logs: es la
 /// misma politica que el CLI, y el motor no decide leer disco por su cuenta.
-fn pack_markdown(
+pub(crate) fn pack_markdown(
     db_path: &Path,
     robot: &str,
     snapshot: Option<i64>,
@@ -763,7 +763,7 @@ fn errors_section(markdown: &str) -> Option<String> {
 /// El pack se comparte (agente, incidencia, UI): no lleva el arbol de
 /// directorios del desarrollador. Se normalizan los dos separadores a proposito:
 /// `Path` solo reconoce `\` en Windows y la etiqueta no puede depender del host.
-fn db_label(path: &Path) -> String {
+pub(crate) fn db_label(path: &Path) -> String {
     let normalizado = path.to_string_lossy().replace('\\', "/");
     let mut partes: Vec<&str> = normalizado.split('/').filter(|p| !p.is_empty()).collect();
 
@@ -780,7 +780,7 @@ fn db_label(path: &Path) -> String {
 ///
 /// Sin la db, "robot no encontrado" no dice donde se busco, y con una db por
 /// defecto el agente no sabe que estaba mirando `C:\Rocketbot\robot.db`.
-fn describe_failure(source: &Error, db_path: &Path) -> String {
+pub(crate) fn describe_failure(source: &Error, db_path: &Path) -> String {
     format!("{source}\ndb: {} (solo lectura)", db_path.display())
 }
 
@@ -808,6 +808,7 @@ mod tests {
             env_db: Some(PathBuf::from(r"D:\proyecto\robot.db")),
             logs: None,
             registry: None,
+            workspace: None,
         };
         assert_eq!(
             resolve_db(Some(r"C:\otra\robot.db".to_string()), &settings),

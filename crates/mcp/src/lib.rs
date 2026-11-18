@@ -74,6 +74,12 @@ pub struct Settings {
     /// su propio fichero: nunca `robot.db`. `None` desactiva las tools `problems_*`
     /// con un mensaje claro en vez de fallar por la espalda.
     pub registry: Option<PathBuf>,
+    /// Raiz donde descubrir varias dbs para la vista de bandeja de la UI.
+    ///
+    /// `None` = la UI mira solo `default_db()`. Se resuelve una vez al arrancar,
+    /// como el resto del entorno, para que dos peticiones seguidas no hablen de
+    /// workspaces distintos.
+    pub workspace: Option<PathBuf>,
 }
 
 /// Ruta del registro de problemas.
@@ -81,6 +87,12 @@ pub struct Settings {
 /// `ROCKETDEBUG_REGISTRY` manda (util para tests y para separar registros por
 /// proyecto); si no esta, se usa el camino por defecto del motor, que respeta
 /// `ROCKETDEBUG_HOME`.
+fn workspace_from_env() -> Option<PathBuf> {
+    std::env::var_os("ROCKETDEBUG_WORKSPACE")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty() && p.is_dir())
+}
+
 fn registry_from_env() -> Option<PathBuf> {
     std::env::var_os("ROCKETDEBUG_REGISTRY")
         .map(PathBuf::from)
@@ -98,6 +110,7 @@ impl Settings {
             env_db: None,
             logs: None,
             registry: None,
+            workspace: None,
         }
     }
 
@@ -122,6 +135,7 @@ impl Settings {
             env_db,
             logs,
             registry: registry_from_env(),
+            workspace: workspace_from_env(),
         }
     }
 
@@ -161,6 +175,7 @@ mod tests {
             env_db: Some(PathBuf::from(r"D:\proyecto\robot.db")),
             logs: None,
             registry: None,
+            workspace: None,
         };
         assert_eq!(
             settings.default_db(),

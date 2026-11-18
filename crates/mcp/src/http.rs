@@ -27,6 +27,8 @@ use std::time::Duration;
 
 use serde_json::json;
 
+use rocketdebug_core::db;
+
 use crate::Settings;
 
 /// Cuerpo maximo de `POST /mcp`.
@@ -137,6 +139,9 @@ struct Request {
     method: String,
     /// Ruta sin query string (`/health?x=1` es `/health`).
     path: String,
+    /// Query string sin el `?` inicial. La UI la necesita para `/api/pack?robot=…`,
+    /// y descartarla en el parser (como se hacia antes) la hacia irrecuperable.
+    query: String,
     /// `None` = la peticion no traia `Content-Length`, o sea que no declaro cuerpo.
     content_length: Option<usize>,
     body: Vec<u8>,
@@ -204,8 +209,13 @@ fn read_request(reader: &mut impl Read) -> Result<Option<Request>, HttpError> {
     }
 
     // El target puede venir en forma absoluta (`http://host/mcp`) detras de un
-    // proxy; aqui solo interesa la ruta, y la query no cambia el recurso.
+    // proxy; aqui solo interesa la ruta. La query se guarda aparte porque las rutas
+    // de la UI la usan (`/api/pack?robot=…`).
     let path = target.split(['?', '#']).next().unwrap_or(target);
+    let query = target
+        .split_once('?')
+        .map(|(_, resto)| resto.split('#').next().unwrap_or(""))
+        .unwrap_or("");
 
     // Las cabeceras son todas las lineas menos la de peticion; el CR final de
     // cada una se tolera porque un cliente de Windows lo manda y aqui no anade
@@ -250,6 +260,7 @@ fn read_request(reader: &mut impl Read) -> Result<Option<Request>, HttpError> {
     Ok(Some(Request {
         method: method.to_string(),
         path: path.to_string(),
+        query: query.to_string(),
         content_length,
         body,
     }))
@@ -383,6 +394,36 @@ impl Response {
         }
     }
 
+    /// HTML de la UI. `text/html; charset=utf-8` porque la pagina lleva acentos.
+    fn html(status: u16, body: impl Into<String>) -> Self {
+        Self {
+            status,
+            content_type: Some("text/html; charset=utf-8"),
+            body: body.into().into_bytes(),
+            allow: None,
+        }
+    }
+
+    /// Texto plano: el markdown del pack, tal cual, sin escapar.
+    fn text(status: u16, body: impl Into<String>) -> Self {
+        Self {
+            status,
+            content_type: Some("text/plain; charset=utf-8"),
+            body: body.into().into_bytes(),
+            allow: None,
+        }
+    }
+
+    /// Asset embebido con su tipo. Sirve CSS y JS de la UI.
+    fn asset(content_type: &'static str, body: &'static str) -> Self {
+        Self {
+            status: 200,
+            content_type: Some(content_type),
+            body: body.as_bytes().to_vec(),
+            allow: None,
+        }
+    }
+
     fn error(status: u16, message: &str) -> Self {
         Self::json(status, json!({ "error": message }).to_string())
     }
@@ -427,8 +468,188 @@ fn respond(request: &Request, settings: &Settings) -> Response {
             }
             Response::json(200, health_body())
         }
+        // La UI. `/` sirve la pagina autocontenida; `/api/*` son sus datos.
+        // `/mcp` sigue siendo el protocolo del agente: la pagina nunca habla JSON-RPC.
+        "/" | "/index.html" => {
+            if request.method != "GET" {
+                return Response::method_not_allowed("GET");
+            }
+            Response::html(200, PAGE)
+        }
+        // CSS y JS van en ficheros aparte, y no embebidos en el HTML, para que la CSP
+        // pueda prohibir `'unsafe-inline'` de verdad. Un `unsafe-inline` en
+        // `script-src` deja la defensa anti-XSS en nada: el CSP tiene que poder
+        // bloquear un script inyectado.
+        "/app.css" => {
+            if request.method != "GET" {
+                return Response::method_not_allowed("GET");
+            }
+            Response::asset("text/css; charset=utf-8", APP_CSS)
+        }
+        "/app.js" => {
+            if request.method != "GET" {
+                return Response::method_not_allowed("GET");
+            }
+            Response::asset("text/javascript; charset=utf-8", APP_JS)
+        }
+        "/api/review" => {
+            if request.method != "GET" {
+                return Response::method_not_allowed("GET");
+            }
+            match review_json(settings) {
+                Ok(body) => Response::json(200, body),
+                Err(texto) => Response::error(500, &texto),
+            }
+        }
+        "/api/pack" => {
+            if request.method != "GET" {
+                return Response::method_not_allowed("GET");
+            }
+            let params = parse_query(&request.query);
+            let Some(robot) = params.get("robot") else {
+                return Response::error(400, "falta `robot` en la query");
+            };
+            match pack_for(settings, robot, params.get("db").map(String::as_str)) {
+                Ok(texto) => Response::text(200, texto),
+                Err(texto) => Response::error(404, &texto),
+            }
+        }
         unknown => Response::error(404, &format!("ruta desconocida: {unknown}")),
     }
+}
+
+/// La pagina de la UI, embebida: el binario es un unico fichero, sin assets sueltos.
+const PAGE: &str = include_str!("../assets/index.html");
+const APP_CSS: &str = include_str!("../assets/app.css");
+const APP_JS: &str = include_str!("../assets/app.js");
+
+/// Query string a pares clave/valor, con `%xx` y `+` decodificados.
+fn parse_query(query: &str) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for par in query.split('&').filter(|p| !p.is_empty()) {
+        let (clave, valor) = par.split_once('=').unwrap_or((par, ""));
+        out.insert(percent_decode(clave), percent_decode(valor));
+    }
+    out
+}
+
+/// Decodifica `%xx` y `+`.
+///
+/// Se hace a mano para no meter una dependencia por dos rutas: la UI manda los
+/// nombres de robot con `encodeURIComponent`, y sin esto un robot con espacios o
+/// acentos no se encontraria.
+fn percent_decode(texto: &str) -> String {
+    let bytes = texto.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+                match u8::from_str_radix(hex, 16) {
+                    Ok(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    // Un `%` que no es escape se deja tal cual: preferible a perder
+                    // el caracter entero.
+                    Err(_) => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// JSON de `GET /api/review`: la misma agregacion que el CLI, una sola verdad.
+fn review_json(settings: &Settings) -> Result<String, String> {
+    let logs = settings
+        .logs
+        .as_ref()
+        .map(|(dir, max_files)| (dir.as_path(), *max_files));
+    let review = match settings.workspace.as_deref() {
+        Some(root) => {
+            let paths = db::discover_databases(root)
+                .map_err(|e| format!("no pude descubrir bases en {}: {e}", root.display()))?;
+            let mut abiertas = Vec::new();
+            for path in &paths {
+                if let Ok(conn) = db::open_readonly(path) {
+                    abiertas.push((conn, crate::tools::db_label(path)));
+                }
+            }
+            let referencias: Vec<_> = abiertas
+                .iter()
+                .map(|(conn, label)| (conn, label.as_str()))
+                .collect();
+            rocketdebug_core::review::review_workspace(&referencias, logs)
+                .map_err(|e| format!("no pude analizar el workspace: {e}"))?
+        }
+        None => {
+            let path = settings.default_db();
+            let conn = db::open_readonly(&path)
+                .map_err(|e| format!("no pude abrir {}: {e}", path.display()))?;
+            rocketdebug_core::review::review_conn(&conn, &crate::tools::db_label(&path), logs)
+                .map_err(|e| format!("no pude analizar la db: {e}"))?
+        }
+    };
+
+    let rows: Vec<serde_json::Value> = review
+        .rows
+        .iter()
+        .map(|r| {
+            json!({
+                "robot": r.robot,
+                "db": r.db,
+                "nodes": r.nodes,
+                "accionables": r.accionables,
+                "higiene": r.higiene,
+                "vivos": r.vivos,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "source": review.source,
+        "dbs": review.dbs,
+        "rows": rows,
+        "totals": {
+            "robots": review.total_robots(),
+            "accionables": review.total_accionables(),
+            "higiene": review.total_higiene(),
+            "vivos": review.total_vivos(),
+        },
+    })
+    .to_string())
+}
+
+/// Markdown del pack para la UI.
+fn pack_for(settings: &Settings, robot: &str, label: Option<&str>) -> Result<String, String> {
+    let path = match label {
+        Some(label) => {
+            let root = settings
+                .workspace
+                .as_deref()
+                .ok_or("la peticion pide una db concreta y el servidor no tiene workspace")?;
+            db::discover_databases(root)
+                .map_err(|e| format!("no pude descubrir bases: {e}"))?
+                .into_iter()
+                .find(|p| crate::tools::db_label(p) == label)
+                .ok_or_else(|| format!("no encuentro la db `{label}` en el workspace"))?
+        }
+        None => settings.default_db(),
+    };
+    crate::tools::pack_markdown(&path, robot, None, settings)
+        .map_err(|e| crate::tools::describe_failure(&e, &path))
 }
 
 /// Cuerpo de `GET /health`.
@@ -548,6 +769,7 @@ mod tests {
         Request {
             method: method.to_string(),
             path: path.to_string(),
+            query: String::new(),
             content_length: Some(body.len()),
             body: body.as_bytes().to_vec(),
         }
@@ -731,6 +953,7 @@ mod tests {
         let sin_cuerpo = Request {
             method: "POST".to_string(),
             path: "/mcp".to_string(),
+            query: String::new(),
             content_length: None,
             body: Vec::new(),
         };
