@@ -63,7 +63,7 @@ pub struct Analysis {
     ///
     /// Son la mejor conjetura y no una certeza: el runner busca el nombre en su
     /// propia db ([`Edge::ambiguous`]). Con una sola db la lista queda vacia;
-    /// [`analyse_with_workspace`] es quien la puede llenar.
+    /// [`analyse_with_workspace_at_and_paths`] es quien la puede llenar.
     pub ambiguous_calls: Vec<String>,
     /// Llamadas cuyo destino no existe en **ninguna** db, como
     /// `"padre L2.3 -> hijo"`.
@@ -185,7 +185,14 @@ pub fn analyse_with_logs_at(
     snapshot: Option<i64>,
     logs: Option<(&Path, usize)>,
 ) -> Result<Analysis> {
-    analyse_with_workspace_at(&[(conn, db_label)], db_label, robot, snapshot, logs)
+    analyse_with_workspace_at_and_paths(
+        &[(conn, db_label)],
+        db_label,
+        robot,
+        snapshot,
+        logs,
+        &paths::NoPaths,
+    )
 }
 
 /// Como [`analyse_with_logs_at`], comprobando ademas las rutas contra el
@@ -211,29 +218,12 @@ pub fn analyse_with_logs_at_paths(
     )
 }
 
-/// Analiza un robot con los hechos de **todas** las dbs del workspace.
-///
-/// `conns` son las conexiones de solo lectura con su etiqueta; la db pedida va
-/// primera para que el hecho del robot conserve su etiqueta y sus copias queden
-/// en [`RobotFacts::also_in`] (asi se resuelven las aristas que el runner
-/// resolveria en la db del padre).
-///
-/// [`Error::RobotNotFound`] si el robot no esta en `db_label`, aunque exista en
-/// otra db. Delega con `None` (ultimo snapshot) en [`analyse_with_workspace_at`].
-pub fn analyse_with_workspace(
-    conns: &[(&rusqlite::Connection, &str)],
-    db_label: &str,
-    robot: &str,
-    logs: Option<(&Path, usize)>,
-) -> Result<Analysis> {
-    analyse_with_workspace_at(conns, db_label, robot, None, logs)
-}
-
 /// Hechos del workspace ya cargados, con los derivados comunes calculados una
 /// sola vez.
 ///
 /// La bandeja recorre N robots de la misma db; antes cada uno llamaba a
-/// [`analyse_with_workspace`] y volvia a decodificar todo: O(N^2) (issue #18).
+/// [`analyse_with_workspace_at_and_paths`] y volvia a decodificar todo: O(N^2)
+/// (issue #18).
 ///
 /// `facts` es publico porque la bandeja cuenta nodos sin volver a decodificar.
 pub struct Workspace {
@@ -360,30 +350,21 @@ fn analyse_loaded(
         errors,
     })
 }
-/// Como [`analyse_with_workspace`], pero con los hechos del robot pedido tomados
-/// del snapshot `snapshot` cuando se indica.
-///
-/// Es la variante que necesita el pack (`--snapshot`): el flujo y el analisis
-/// tienen que describir la misma version, y el pin solo cambia de que fila de
-/// `bots` salen los hechos de **ese** robot.
-///
-/// Mismos errores que [`analyse_with_workspace`], mas [`Error::SnapshotNotFound`]
-/// si el robot pedido no tiene esa version.
-pub fn analyse_with_workspace_at(
-    conns: &[(&rusqlite::Connection, &str)],
-    db_label: &str,
-    robot: &str,
-    snapshot: Option<i64>,
-    logs: Option<(&Path, usize)>,
-) -> Result<Analysis> {
-    analyse_with_workspace_at_and_paths(conns, db_label, robot, snapshot, logs, &paths::NoPaths)
-}
 
-/// Como [`analyse_with_workspace_at`], con un [`PathProbe`] que decide si una
-/// ruta declarada existe en este dispositivo.
+/// Analiza un robot con los hechos de **todas** las dbs del workspace.
 ///
-/// Con [`paths::NoPaths`] la regla `RUTA_MIGRADA` no se evalua y el resultado es
-/// identico al historico. El pack real pasa [`paths::LocalPaths`].
+/// `conns` son las conexiones de solo lectura con su etiqueta; la db pedida va
+/// primera para que el hecho del robot conserve su etiqueta y sus copias queden
+/// en [`RobotFacts::also_in`] (asi se resuelven las aristas que el runner
+/// resolveria en la db del padre).
+///
+/// `snapshot` fija la version del robot pedido (lo necesita el pack con
+/// `--snapshot`); el pin no toca a los demas. Con [`paths::NoPaths`] la regla
+/// `RUTA_MIGRADA` no se evalua y el resultado es el historico; el pack real pasa
+/// [`paths::LocalPaths`].
+///
+/// [`Error::RobotNotFound`] si el robot no esta en `db_label`, aunque exista en
+/// otra db, y [`Error::SnapshotNotFound`] si la version pedida no existe.
 pub fn analyse_with_workspace_at_and_paths(
     conns: &[(&rusqlite::Connection, &str)],
     db_label: &str,
