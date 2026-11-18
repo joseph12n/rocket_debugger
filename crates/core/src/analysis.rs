@@ -40,15 +40,24 @@
 //! duplicados. La db analizada va primera para que el hecho del robot pedido
 //! conserve su etiqueta.
 //!
-//! # Limite conocido
+//! # Snapshot concreto (issue #18)
 //!
-//! El analisis describe el **ultimo** snapshot de cada robot, mientras que el pack
-//! puede construirse sobre uno anterior (`--snapshot`). En ese caso el flujo
-//! listado y los hallazgos hablan de versiones distintas del mismo robot; se
-//! acepta porque el caso normal es diagnosticar el estado actual y el historico
-//! se usa para atribuir errores, no para listar hallazgos. La excepcion son los
-//! errores: para ellos se usa el historial entero, que es justo lo que los
-//! distingue de un vistazo al log.
+//! Por defecto el analisis describe el **ultimo** snapshot de cada robot, pero el
+//! pack puede construirse sobre uno anterior (`--snapshot`) y entonces el flujo y
+//! los hallazgos hablaban de versiones distintas del mismo robot. Con
+//! [`analyse_with_logs_at`] el consumidor fija el snapshot: los nodos, los
+//! hallazgos, los contratos y las llamadas del robot pedido salen de esa version.
+//!
+//! Los **demas** robots del workspace siguen aportando su ultimo snapshot, y es a
+//! proposito: el grafo responde "que le pasa a este flujo si se ejecuta hoy", y
+//! hoy los subrobots que corren son los actuales, no los de la fecha del snapshot
+//! pedido. Fijarlos tambien a esa fecha contestaria otra pregunta (un historico) y
+//! ni siquiera siempre se podria: un hijo puede no tener snapshot de ese dia.
+//!
+//! Los errores no cambian con el pin: [`errors_for`] los atribuye al snapshot que
+//! estaba vivo en su timestamp, asi que el informe ya era coherente con el
+//! historial y sigue siendolo. Es justo lo que distingue este motor de un vistazo
+//! al log.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -199,13 +208,42 @@ pub fn analyse(conn: &rusqlite::Connection, db_label: &str, robot: &str) -> Resu
 /// pack del que no se pueden leer los nodos no es un pack degradado, es una
 /// mentira. Un robot distinto e ilegible solo se omite, porque como mucho hara
 /// que su contrato no aparezca.
+///
+/// Delega en [`analyse_with_logs_at`] con `None`: describe el **ultimo** snapshot,
+/// que es lo que necesita un consumidor que no elige version (un barrido de toda
+/// la db).
 pub fn analyse_with_logs(
     conn: &rusqlite::Connection,
     db_label: &str,
     robot: &str,
     logs: Option<(&Path, usize)>,
 ) -> Result<Analysis> {
-    analyse_with_workspace(&[(conn, db_label)], db_label, robot, logs)
+    analyse_with_logs_at(conn, db_label, robot, None, logs)
+}
+
+/// Como [`analyse_with_logs`], pero fija el snapshot del que salen los hechos del
+/// robot analizado.
+///
+/// `snapshot` es el `bots.id` que el consumidor va a describir (el del render del
+/// pack). Con `Some(id)` los nodos, los hallazgos, los contratos y las llamadas
+/// son los de esa version, que es lo que hace que un pack de la v26 hable de la
+/// v26 (issue #18). Con `None` se usa el ultimo snapshot y el resultado es
+/// identico al de siempre: por eso [`analyse_with_logs`] y [`analyse`] conservan
+/// su firma.
+///
+/// El pin es solo para este robot: los demas del workspace siguen aportando su
+/// ultimo snapshot (ver doc del modulo). Si el robot existe pero esa version no,
+/// devuelve [`Error::SnapshotNotFound`] en vez de caer al ultimo: describir otra
+/// version en silencio es justo el defecto que el pin corrige. Si el robot no
+/// esta en la db, [`Error::RobotNotFound`] como siempre.
+pub fn analyse_with_logs_at(
+    conn: &rusqlite::Connection,
+    db_label: &str,
+    robot: &str,
+    snapshot: Option<i64>,
+    logs: Option<(&Path, usize)>,
+) -> Result<Analysis> {
+    analyse_with_workspace_at(&[(conn, db_label)], db_label, robot, snapshot, logs)
 }
 
 /// Analiza un robot con los hechos de **todas** las dbs del workspace.
@@ -222,10 +260,33 @@ pub fn analyse_with_logs(
 /// Devuelve [`Error::RobotNotFound`] si el robot no esta en `db_label` —aunque
 /// exista en otra db del workspace— o si no se puede leer de ella: el pack de un
 /// robot que no se puede decodificar es una mentira, no un pack degradado.
+///
+/// Delega en [`analyse_with_workspace_at`] con `None` (ultimo snapshot).
 pub fn analyse_with_workspace(
     conns: &[(&rusqlite::Connection, &str)],
     db_label: &str,
     robot: &str,
+    logs: Option<(&Path, usize)>,
+) -> Result<Analysis> {
+    analyse_with_workspace_at(conns, db_label, robot, None, logs)
+}
+
+/// Como [`analyse_with_workspace`], pero con los hechos del robot pedido tomados
+/// del snapshot `snapshot` cuando se indica.
+///
+/// Es la variante que necesita el pack (`--snapshot`): el flujo y el analisis
+/// tienen que describir la misma version. La implementacion esta aqui y no en
+/// [`analyse_with_workspace`] porque casi todo el trabajo (grafo, contratos,
+/// hallazgos) es comun; el pin solo cambia de que fila de `bots` salen los hechos
+/// de **ese** robot.
+///
+/// Mismos errores que [`analyse_with_workspace`], mas [`Error::SnapshotNotFound`]
+/// si el robot pedido no tiene esa version.
+pub fn analyse_with_workspace_at(
+    conns: &[(&rusqlite::Connection, &str)],
+    db_label: &str,
+    robot: &str,
+    snapshot: Option<i64>,
     logs: Option<(&Path, usize)>,
 ) -> Result<Analysis> {
     // La db pedida primero: el dedupe conserva la primera aparicion, asi que el
@@ -244,7 +305,14 @@ pub fn analyse_with_workspace(
             .filter(|(_, label)| *label != db_label),
     );
 
-    let facts = load_workspace_of(&ordered, Some((db_label, robot)))?;
+    let facts = load_workspace_of(
+        &ordered,
+        Some(Target {
+            db_label,
+            robot,
+            snapshot,
+        }),
+    )?;
     let edges = graph::build_edges(&facts);
     let all_contracts = graph::contracts(&facts, &edges);
 
@@ -559,22 +627,23 @@ pub fn load_workspace(dbs: &[(&rusqlite::Connection, &str)]) -> Result<Vec<Robot
 
 /// [`load_workspace`] con una db y un robot que el consumidor **exige**.
 ///
-/// `required` es `(etiqueta_db, robot)`. De esa db el robot no puede faltar
-/// ([`Error::RobotNotFound`]) ni fallar al decodificar (el error se propaga): es la
-/// diferencia entre un pack degradado y un pack que miente. En las demas dbs un
-/// robot ilegible solo se omite, porque como mucho hara que falte su contrato.
+/// `target` es el robot pedido y, opcionalmente, el snapshot del que deben salir
+/// sus hechos. De esa db el robot no puede faltar ([`Error::RobotNotFound`]) ni
+/// fallar al decodificar (el error se propaga): es la diferencia entre un pack
+/// degradado y un pack que miente. En las demas dbs un robot ilegible solo se
+/// omite, porque como mucho hara que falte su contrato.
 fn load_workspace_of(
     dbs: &[(&rusqlite::Connection, &str)],
-    required: Option<(&str, &str)>,
+    target: Option<Target>,
 ) -> Result<Vec<RobotFacts>> {
     let mut facts: Vec<RobotFacts> = Vec::new();
     let mut seen: BTreeMap<(String, String), usize> = BTreeMap::new();
 
     for (conn, label) in dbs {
-        let strict = required
-            .filter(|(db_label, _)| db_label == label)
-            .map(|(_, robot)| robot);
-        for (fact, hash) in load_db_facts(conn, label, strict)? {
+        // El pin viaja solo a la db del robot pedido. En las demas se sigue
+        // tomando el ultimo snapshot: es el que el runner resuelve hoy.
+        let pinned = target.filter(|t| t.db_label == *label);
+        for (fact, hash) in load_db_facts(conn, label, pinned)? {
             let key = (fact.name.clone(), hash);
             match seen.get(&key).copied() {
                 Some(idx) => {
@@ -594,42 +663,71 @@ fn load_workspace_of(
     }
 
     // Sin conexion con la etiqueta pedida no se puede haber encontrado el robot.
-    if let Some((db_label, robot)) = required {
+    if let Some(t) = target {
         if !facts
             .iter()
-            .any(|fact| fact.name == robot && fact.lives_in(db_label))
+            .any(|fact| fact.name == t.robot && fact.lives_in(t.db_label))
         {
-            return Err(Error::RobotNotFound(robot.to_string()));
+            return Err(Error::RobotNotFound(t.robot.to_string()));
         }
     }
 
     Ok(facts)
 }
 
-/// Hechos del **ultimo** snapshot de cada robot de una db, con el hash del
-/// contenido que usa el dedupe.
+/// Robot del workspace cuyos hechos el consumidor **exige** y, si se indica, el
+/// snapshot exacto del que deben salir.
 ///
-/// `load_snapshots` decodifica todas las versiones porque no hay consulta que pida
-/// solo la ultima; con las dbs reales (decenas de versiones, cientos de KB) es
-/// barato y evita una segunda forma de leer `bots` que se desincronice cuando
-/// cambie el formato. Cuando llegue el daemon, esto se cachea por (db, robot).
+/// Existe en vez de un `Option<(&str, &str, Option<i64>)>` para que el pin no se
+/// pueda pasar sin nombrar al robot: el snapshot es una propiedad del robot
+/// analizado, no de la db ni del workspace.
+#[derive(Debug, Clone, Copy)]
+struct Target<'a> {
+    db_label: &'a str,
+    robot: &'a str,
+    /// `Some(id)` fija el snapshot; `None` acepta el ultimo.
+    snapshot: Option<i64>,
+}
+
+/// Hechos de una db, con el hash del contenido que usa el dedupe.
+///
+/// El snapshot es el **ultimo** de cada robot, salvo para el robot exigido: si
+/// [`Target::snapshot`] trae un id, sus hechos salen de esa fila. `load_snapshots`
+/// decodifica todas las versiones porque no hay consulta que pida solo una; con
+/// las dbs reales (decenas de versiones, cientos de KB) es barato y evita una
+/// segunda forma de leer `bots` que se desincronice cuando cambie el formato.
+/// Cuando llegue el daemon, esto se cachea por (db, robot, snapshot).
 fn load_db_facts(
     conn: &rusqlite::Connection,
     db_label: &str,
-    required: Option<&str>,
+    target: Option<Target>,
 ) -> Result<Vec<(RobotFacts, String)>> {
     let mut out = Vec::new();
 
     for summary in db::list_robots(conn)? {
+        // El robot exigido es el unico que puede venir fijado a un snapshot; en
+        // los demas `pinned` queda en `None` y se toma el ultimo, como siempre.
+        let required = target.is_some_and(|t| t.robot == summary.name.as_str());
+        let pinned = target.filter(|_| required).and_then(|t| t.snapshot);
         let snaps = match db::load_snapshots(conn, &summary.name) {
             Ok(snaps) => snaps,
             // Ver doc de `analyse_with_workspace`: omite el resto, propaga el del
             // robot exigido.
-            Err(_) if Some(summary.name.as_str()) != required => continue,
+            Err(_) if !required => continue,
             Err(e) => return Err(e),
         };
-        let Some(snap) = snaps.last() else {
-            continue;
+        let snap = match pinned {
+            // Un snapshot pedido que no existe es un error y no una caida al
+            // ultimo: devolver otra version seria exactamente el pack que miente
+            // que este pin corrige.
+            Some(id) => snaps
+                .iter()
+                .find(|s| s.id == id)
+                .ok_or(Error::SnapshotNotFound(id))?,
+            None => match snaps.last() {
+                Some(snap) => snap,
+                None => continue,
+            },
         };
         let root = db::project_root(&snap.project);
         out.push((
@@ -644,9 +742,9 @@ fn load_db_facts(
         ));
     }
 
-    if let Some(robot) = required {
-        if !out.iter().any(|(fact, _)| fact.name == robot) {
-            return Err(Error::RobotNotFound(robot.to_string()));
+    if let Some(t) = target {
+        if !out.iter().any(|(fact, _)| fact.name == t.robot) {
+            return Err(Error::RobotNotFound(t.robot.to_string()));
         }
     }
     Ok(out)
