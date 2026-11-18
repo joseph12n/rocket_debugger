@@ -9,6 +9,14 @@
     const API_PACK = "/api/pack";
 
     /*
+     * Enlace profundo: `?robot=<nombre>&db=<etiqueta>` abre el panel de ese
+     * robot. Es el mismo par que viaja a `/api/pack`, asi que la URL se puede
+     * copiar y mandar a otro sin decirle que busque la fila y pulse.
+     */
+    const LINK_ROBOT = "robot";
+    const LINK_DB = "db";
+
+    /*
      * Umbral de "rojo" para hallazgos accionables. El barrido real del proyecto
      * mide ~2,7 accionables por robot afectado, asi que 5 es el doble de la media:
      * a partir de ahi el robot no es "uno mas" y merece rojo en vez de ambar.
@@ -458,6 +466,109 @@
           setRefreshBusy(false);
         }
       }
+
+      // El enlace profundo espera a tener filas pintadas, asi que va aqui y no
+      // dentro del `try`: abrir el panel no es parte de cargar la bandeja, y su
+      // fallo no deberia pintarse como un fallo de la bandeja.
+      applyUrlLink();
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Enlace profundo                                                     */
+    /* ------------------------------------------------------------------ */
+
+    /*
+     * La URL es el estado del panel: si trae `robot`, ese robot esta abierto.
+     * Se lee con `URLSearchParams` porque decodifica `%5C` y `%20` por nosotros:
+     * la etiqueta de la db es una ruta relativa (`BBRE2\robot_run.db`) y el
+     * nombre del robot puede llevar espacios, acentos o un `&`.
+     */
+    function readLink() {
+      const params = new URLSearchParams(location.search);
+      return {
+        robot: params.get(LINK_ROBOT) ?? "",
+        db: params.get(LINK_DB) ?? "",
+      };
+    }
+
+    /*
+     * Escribe el enlace sin recargar y sin apilar historial: cerrar el panel no
+     * puede costar un "atras". Un robot sin nombre no da un enlace util, asi que
+     * su caso es el de "ningun panel": se quitan los parametros en vez de dejar
+     * los del robot anterior mintiendo en la barra de direcciones.
+     */
+    function writeLink(link) {
+      const url = new URL(location.href);
+      if (link && link.robot) {
+        url.searchParams.set(LINK_ROBOT, link.robot);
+        if (link.db) url.searchParams.set(LINK_DB, link.db);
+        else url.searchParams.delete(LINK_DB);
+      } else {
+        url.searchParams.delete(LINK_ROBOT);
+        url.searchParams.delete(LINK_DB);
+      }
+
+      const before = `${location.pathname}${location.search}${location.hash}`;
+      if (`${url.pathname}${url.search}${url.hash}` === before) return;
+
+      try {
+        history.replaceState(history.state, "", url.href);
+      } catch (error) {
+        // Safari limita `replaceState` a unas pocas llamadas seguidas: quedarse
+        // sin enlace molesta, pero romper el clic no es una opcion.
+      }
+    }
+
+    /*
+     * Fila a la que apunta un enlace. El nombre tiene que coincidir entero; la
+     * db solo desempata entre homonimos (el mismo robot en dos bandejas). Si el
+     * robot esta pero en otra db se abre igual: el panel ensena la db real y esa
+     * pasa a ser la del enlace, que es lo util cuando la db se ha movido.
+     */
+    function rowForLink(link) {
+      if (!link.robot) return null;
+      const sameName = state.rows.filter((row) => row.robot === link.robot);
+      if (sameName.length === 0) return null;
+      if (link.db) {
+        const sameDb = sameName.find((row) => row.db === link.db);
+        if (sameDb) return sameDb;
+      }
+      return sameName[0];
+    }
+
+    /*
+     * Pone el panel donde dice la URL. Se llama al terminar de cargar la bandeja
+     * (hacen falta las filas) y en `popstate` (no hace falta volver a pedirlas).
+     * Si ya esta abierto ese robot no se toca nada: un "atras" que vuelve al
+     * mismo sitio no debe recargar el context pack.
+     */
+    function applyUrlLink() {
+      if (!state.loaded) return;
+
+      const link = readLink();
+      if (!link.robot) {
+        closePanel({ restoreFocus: false, updateUrl: false });
+        return;
+      }
+
+      const isOpen = state.panel.robot === link.robot && (!link.db || state.panel.db === link.db);
+      if (!panel.hidden && isOpen) return;
+
+      const row = rowForLink(link);
+      if (!row) {
+        openMissing(link);
+        return;
+      }
+      openPanel(row, rowLinkElement(row));
+    }
+
+    /*
+     * El foco vuelve a la fila al cerrar, pero con un filtro puesto puede no
+     * estar pintada: en ese caso el panel se abre igual y al cerrar no se mueve
+     * el foco a ningun sitio raro.
+     */
+    function rowLinkElement(row) {
+      return rowsBody.querySelector(`tr[data-index="${row.index}"] .robot-link`);
     }
 
     /* ------------------------------------------------------------------ */
@@ -481,24 +592,69 @@
       panelBody.setAttribute("aria-busy", name === "loading" ? "true" : "false");
     }
 
-    function openPanel(row, opener) {
-      state.panel.robot = row.robot;
-      state.panel.db = row.db || "";
+    /*
+     * Ensenar el panel con la cabecera ya puesta; el estado del cuerpo (cargando,
+     * error o contenido) lo decide quien llama. Aqui se limpia el pack anterior:
+     * al saltar de un robot a otro por la URL no puede quedar ni un instante el
+     * contenido del robot equivocado en el DOM.
+     */
+    function mountPanel({ robot, db, title, meta, opener }) {
+      state.panel.robot = robot;
+      state.panel.db = db;
       state.panel.opener = opener instanceof HTMLElement ? opener : document.activeElement;
-      panelTitle.textContent = row.robot || "(robot sin nombre)";
-      panelMeta.textContent = panelMetaFor(row);
-      setPanelView("loading");
+      panelTitle.textContent = title;
+      panelMeta.textContent = meta;
+      panelContent.textContent = "";
+      panelSize.textContent = "";
+      panelErrorMessage.textContent = "";
       panel.hidden = false;
       scrim.hidden = false;
       document.body.classList.add("panel-open");
       panelCloseButton.focus();
+    }
+
+    function openPanel(row, opener) {
+      mountPanel({
+        robot: row.robot,
+        db: row.db || "",
+        title: row.robot || "(robot sin nombre)",
+        meta: panelMetaFor(row),
+        opener,
+      });
+      setPanelView("loading");
+      // El enlace se escribe antes de pedir el pack: si la peticion tarda o
+      // falla, copiar la barra de direcciones sigue llevando a este robot.
+      writeLink({ robot: row.robot, db: row.db || "" });
       void loadPack();
     }
 
-    function closePanel({ restoreFocus = true } = {}) {
+    /*
+     * Un enlace puede apuntar a un robot que ya no esta en la bandeja: se
+     * renombro, se borro o el servidor esta mirando otras dbs. Se abre el panel
+     * con el motivo; dejar la pagina como si no se hubiera pedido nada hace
+     * pensar que el enlace se ignoro.
+     */
+    function openMissing(link) {
+      mountPanel({
+        robot: link.robot,
+        db: link.db,
+        title: link.robot,
+        meta: [link.db || "db desconocida", "no está en la bandeja"].join(" · "),
+        opener: null,
+      });
+      panelErrorMessage.textContent = `No encontré "${link.robot}" en esta bandeja.`;
+      setPanelView("error");
+      writeLink(link);
+      announce(`No encontré "${link.robot}" en esta bandeja.`);
+    }
+
+    function closePanel({ restoreFocus = true, updateUrl = true } = {}) {
       if (panel.hidden) return;
       state.packController?.abort();
       state.packController = null;
+      // Cerrar deja la URL sin enlace: el enlace describe lo que se ve, y lo que
+      // se ve es la bandeja entera.
+      if (updateUrl) writeLink(null);
       panel.hidden = true;
       scrim.hidden = true;
       document.body.classList.remove("panel-open");
@@ -664,7 +820,12 @@
       }
     });
 
+    // Atras/adelante mueven la URL sin recargar la pagina: hay que poner el
+    // panel donde diga esa URL (y cerrarlo si ya no trae robot).
+    window.addEventListener("popstate", () => applyUrlLink());
+
     // Primera carga. El HTML ya nace en estado "cargando"; esto solo lo hace
-    // explicito y arranca la peticion.
+    // explicito y arranca la peticion. Si la URL trae `?robot=…`, el panel se
+    // abre en cuanto `loadReview` termina de pintar la tabla.
     showView("loading");
     void loadReview();
