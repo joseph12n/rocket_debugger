@@ -481,11 +481,21 @@ impl Fuente {
 /// estado. La ruta absoluta tampoco: ni la salida ni el registro llevan el arbol de
 /// directorios del usuario.
 fn etiqueta_relativa(root: &Path, path: &Path) -> String {
-    match path.strip_prefix(root) {
-        Ok(relativa) => relativa.to_string_lossy().replace(['/', '\\'], "\\"),
+    // Se comparan las dos rutas como texto con `/` normalizado: `Path` solo trata
+    // `\` como separador en Windows, asi que con `strip_prefix` la etiqueta salia
+    // absoluta al compilar en Linux (lo detecto CI). Despues se devuelve con `\`,
+    // que es la convencion de las etiquetas del proyecto.
+    let normal = |p: &Path| p.to_string_lossy().replace('\\', "/");
+    let (root_n, path_n) = (normal(root), normal(path));
+    let raiz = root_n.trim_end_matches('/');
+    match path_n
+        .strip_prefix(raiz)
+        .map(|resto| resto.trim_start_matches('/'))
+    {
+        Some(relativa) if !relativa.is_empty() && relativa != path_n => relativa.replace('/', "\\"),
         // Fuera de la raiz no deberia pasar (el descubrimiento empieza en ella), pero
         // una etiqueta corta es mejor que una absoluta.
-        Err(_) => crate::db_label(path),
+        _ => crate::db_label(path),
     }
 }
 
@@ -920,5 +930,14 @@ mod tests {
         );
         // Y la etiqueta no lleva la ruta absoluta de la raiz.
         assert!(!una.contains("C:"), "{una}");
+
+        // La misma funcion en forma posix: el separador del host no puede cambiar
+        // el resultado (CI compila en Linux y esto lo detecto alli).
+        let posix = etiqueta_relativa(
+            Path::new("/home/u/proyectos"),
+            Path::new("/home/u/proyectos/a/entrega/robot.db"),
+        );
+        assert_eq!(posix, "a\\entrega\\robot.db");
+        assert!(!posix.contains("/home"), "{posix}");
     }
 }
