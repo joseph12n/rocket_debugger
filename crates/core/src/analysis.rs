@@ -150,7 +150,10 @@ pub struct ErrorItem {
 /// permanente que hace que se deje de mirar. `live` es lo accionable hoy;
 /// `historical` es evidencia de un defecto ya corregido (o de codigo retirado);
 /// `platform` y `noise` no se arreglan desde el robot.
-#[derive(Debug, Clone, Default)]
+///
+/// `PartialEq` no es decorativo: es lo que permite fijar en un test que reutilizar
+/// los logs ya parseados no cambia ni un cubo del informe.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ErrorReport {
     /// Viven en la version actual y el nodo conserva sus parametros.
     pub live: Vec<ErrorItem>,
@@ -387,8 +390,8 @@ pub fn analyse_with_workspace_at(
 /// Lee los logs del directorio y devuelve los errores del robot ya clasificados.
 ///
 /// El recorrido es: ficheros mas recientes primero ([`logs::recent_files`]) ->
-/// parseo -> solo lo del robot -> solo los `ERROR`/`EXCEPTION`/`FATAL` -> atribucion
-/// temporal contra los snapshots -> cubo.
+/// parseo cacheado ([`logs::parse_file_cached`]) -> solo lo del robot -> solo los
+/// `ERROR`/`EXCEPTION`/`FATAL` -> atribucion temporal contra los snapshots -> cubo.
 ///
 /// Un directorio sin logs devuelve un informe vacio, no un error: el pack sin
 /// seccion de errores es valido y "no hay logs" no es un defecto del robot.
@@ -521,17 +524,23 @@ fn bucket_of(message: &str) -> Option<Bucket> {
 }
 
 /// Entradas de error del robot, en orden cronologico.
+///
+/// Reutiliza el cache de ficheros parseados: la bandeja y el vigilante piden los
+/// mismos logs una vez por robot, y sin cache el coste crece con robots x ficheros
+/// aunque el resultado sea identico. Se filtra **por referencia** sobre la lista
+/// compartida y solo se clona lo que sobrevive al filtro (los errores del robot),
+/// que de un log entero es una fraccion: no se copia el fichero para descartarlo.
 fn robot_errors(robot: &str, logs_dir: &Path, max_files: usize) -> Vec<logs::LogEntry> {
     let mut out = Vec::new();
     for path in logs::recent_files(logs_dir, max_files) {
         // Un log ilegible se omite: es evidencia que falta, no un fallo del pack.
-        let Some(texto) = logs::read_text(&path) else {
+        let Some(entries) = logs::parse_file_cached(&path) else {
             continue;
         };
         out.extend(
-            logs::for_robot(&logs::parse_text(&texto), robot)
-                .into_iter()
-                .filter(logs::LogEntry::is_error),
+            logs::of_robot(entries.as_ref(), robot)
+                .filter(|entry| entry.is_error())
+                .cloned(),
         );
     }
     // `recent_files` devuelve del mas nuevo al mas viejo y "la primera ocurrencia"
@@ -1009,5 +1018,127 @@ mod tests {
         assert_eq!(max_version(None, Some(29)), Some(29));
         assert_eq!(max_version(Some(25), Some(29)), Some(29));
         assert_eq!(max_version(Some(29), Some(25)), Some(29));
+    }
+
+    /// Db minima con un snapshot por robot: `errors_for` atribuye cada error al
+    /// snapshot vivo, y sin snapshots no habria a que atribuirlo.
+    fn db_con_robots(dir: &Path, robots: &[&str]) -> rusqlite::Connection {
+        use base64::Engine as _;
+
+        let conn = rusqlite::Connection::open(dir.join("robot.db")).expect("creo la db");
+        conn.execute_batch(
+            "CREATE TABLE bots (
+                id INTEGER PRIMARY KEY,
+                name TEXT,
+                created_at TEXT,
+                data TEXT
+            );",
+        )
+        .expect("creo la tabla bots");
+        for (index, robot) in robots.iter().enumerate() {
+            // El `id` del nodo tiene que coincidir con el `cmd_id` del log: es la
+            // unica union fiable entre ejecucion y codigo.
+            let project = serde_json::json!({
+                "project": {
+                    "commands": [{
+                        "father": "log_message",
+                        "line": "1",
+                        "id": format!("{robot}-1"),
+                        "command": "hola",
+                        "children": [],
+                        "else": [],
+                    }],
+                    "vars": [],
+                }
+            });
+            let b64 =
+                base64::engine::general_purpose::STANDARD.encode(project.to_string().as_bytes());
+            conn.execute(
+                "INSERT INTO bots (id, name, created_at, data) \
+                 VALUES (?1, ?2, '2026-11-17 10:00:00', ?3)",
+                rusqlite::params![index as i64 + 1, robot, b64],
+            )
+            .expect("inserto el snapshot");
+        }
+        conn
+    }
+
+    /// Log con una peticion del robot y un error que la hereda, como los escribe el
+    /// runner: la linea de error no dice de que nodo es.
+    fn log_de(robot: &str) -> String {
+        format!(
+            "2026-11-17 12:43:47.586814 - rocketbot - INFO - request: {robot} : line 1 - rpasystem \
+             : log_message  id: {robot}-1 - INFO - hola\n\
+             2026-11-17 12:43:48.000000 - rocketbot - ERROR - EXCEPTION IN (<string> Rocketbot, \
+             L_91 \"\"): NameError: name 'x' is not defined\n"
+        )
+    }
+
+    /// El cache no puede cambiar el informe: dos robots sobre el mismo directorio
+    /// dan lo mismo que daban sin cache, y el segundo reaprovecha el parseo del
+    /// primero.
+    #[test]
+    fn dos_robots_sobre_los_mismos_logs_conservan_el_informe_y_aprovechan_el_cache() {
+        let _turno = logs::cache_test_guard();
+        logs::clear_cache();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let conn = db_con_robots(tmp.path(), &["alfa", "beta"]);
+        let logs_dir = tmp.path().join("logs");
+        std::fs::create_dir_all(&logs_dir).expect("creo el directorio de logs");
+        for robot in ["alfa", "beta"] {
+            std::fs::write(logs_dir.join(format!("logfile_{robot}.log")), log_de(robot))
+                .expect("escribo el log");
+        }
+
+        // Primera pasada: dos ficheros parseados, ningun acierto.
+        let alfa = errors_for(&conn, "alfa", &logs_dir, 20).expect("informe de alfa");
+        assert_eq!(
+            alfa.live.len(),
+            1,
+            "el error hereda la peticion viva de alfa: {alfa:?}"
+        );
+        assert_eq!(
+            logs::cache_stats(),
+            (2, 0),
+            "un fichero cacheado por fichero leido"
+        );
+
+        // Segundo robot, mismos ficheros: ni una lectura nueva.
+        let beta = errors_for(&conn, "beta", &logs_dir, 20).expect("informe de beta");
+        assert_eq!(
+            logs::cache_stats(),
+            (2, 2),
+            "el segundo robot acierta en los dos ficheros, sin parsearlos otra vez"
+        );
+        assert_eq!(beta.live.len(), 1, "beta tiene su propio error: {beta:?}");
+        assert_eq!(
+            beta.live[0].occurrences, 1,
+            "el error de alfa no puede contarse en el informe de beta"
+        );
+
+        // Y alfa, otra vez, da exactamente el mismo informe que la primera vez.
+        let otra_vez = errors_for(&conn, "alfa", &logs_dir, 20).expect("informe de alfa otra vez");
+        assert_eq!(otra_vez, alfa, "el cache no cambia ni un cubo del informe");
+        assert_eq!(
+            logs::cache_stats(),
+            (2, 4),
+            "dos aciertos mas, ningun parseo"
+        );
+    }
+
+    /// Un directorio sin ficheros de log no entra al cache ni inventa un informe.
+    #[test]
+    fn sin_logs_el_informe_sale_vacio_y_el_cache_intacto() {
+        let _turno = logs::cache_test_guard();
+        logs::clear_cache();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let conn = db_con_robots(tmp.path(), &["alfa"]);
+        let vacio = tmp.path().join("sin_logs");
+
+        let informe = errors_for(&conn, "alfa", &vacio, 20).expect("informe vacio");
+        assert!(informe.is_empty(), "sin logs no hay errores: {informe:?}");
+        assert_eq!(logs::cache_stats(), (0, 0), "no hay ficheros que cachear");
     }
 }
