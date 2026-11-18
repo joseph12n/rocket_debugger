@@ -4,6 +4,7 @@
 //! nueva en vez de actualizar. Por eso `ORDER BY id` da la evolucion del robot y
 //! `created_at` da los intervalos temporales que usa la atribucion de errores.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use chrono::NaiveDateTime;
@@ -264,6 +265,113 @@ pub fn label(path: &Path) -> String {
     }
 }
 
+/// Etiquetas **unicas** y relativas para un conjunto de dbs de un workspace.
+///
+/// [`label`] conserva solo las dos ultimas componentes: dos arboles distintos con
+/// `sandbox\robot.db` producen la misma etiqueta y el workspace los confunde como
+/// una sola identidad (issue #18). Aqui se empieza por esa etiqueta historica y se
+/// alarga la cola **solo para las dbs que colisionan**; si dos rutas agotan sus
+/// componentes con la misma cola, se anade un sufijo hash determinista. Nunca se
+/// incluye la unidad ni la raiz, asi que la etiqueta sigue sin filtrar el arbol del
+/// usuario.
+///
+/// El resultado es estable y determinista: depende de las rutas, no del orden de
+/// entrada.
+pub fn labels_for(paths: &[PathBuf]) -> Vec<String> {
+    let normalized: Vec<String> = paths
+        .iter()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect();
+
+    // Rutas identicas son la misma db y comparten etiqueta.
+    let mut unique: Vec<&str> = Vec::new();
+    for path in &normalized {
+        if !unique.contains(&path.as_str()) {
+            unique.push(path);
+        }
+    }
+
+    let components: Vec<Vec<&str>> = unique
+        .iter()
+        .map(|path| {
+            let mut parts: Vec<&str> = path
+                .split('/')
+                .filter(|part| !part.is_empty() && *part != ".")
+                .collect();
+            // La unidad no es un tramo de la ruta: no aporta identidad y no debe
+            // viajar en la etiqueta.
+            if parts.first().is_some_and(|part| is_windows_drive(part)) {
+                parts.remove(0);
+            }
+            parts
+        })
+        .collect();
+
+    let max_depth = components.iter().map(Vec::len).max().unwrap_or(2).max(2);
+    let mut assigned: Vec<Option<String>> = vec![None; unique.len()];
+
+    // Se prueban colas de 2, 3... componentes; en cada pasada solo se asignan las
+    // que ya son unicas. Las que siguen empatadas pasan a la siguiente.
+    for depth in 2..=max_depth {
+        let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (index, parts) in components.iter().enumerate() {
+            if assigned[index].is_some() {
+                continue;
+            }
+            let start = parts.len().saturating_sub(depth);
+            let label = parts[start..].join("\\");
+            let label = if label.is_empty() {
+                "robot.db".to_string()
+            } else {
+                label
+            };
+            groups.entry(label).or_default().push(index);
+        }
+        for (label, indexes) in groups {
+            if indexes.len() == 1 {
+                assigned[indexes[0]] = Some(label);
+            }
+        }
+        if assigned.iter().all(Option::is_some) {
+            break;
+        }
+    }
+
+    // Dos rutas con la misma cola completa (mismo arbol repetido en otra unidad o
+    // en otra raiz): el hash de la ruta completa las separa sin revelarla.
+    for (index, slot) in assigned.iter_mut().enumerate() {
+        if slot.is_some() {
+            continue;
+        }
+        let base = if components[index].is_empty() {
+            "robot.db".to_string()
+        } else {
+            components[index].join("\\")
+        };
+        let hash = blake3::hash(unique[index].as_bytes()).to_hex();
+        let suffix: String = hash.chars().take(6).collect();
+        *slot = Some(format!("{base}~{suffix}"));
+    }
+
+    normalized
+        .iter()
+        .map(|path| {
+            let index = unique
+                .iter()
+                .position(|candidate| *candidate == path.as_str())
+                .expect("toda ruta normalizada esta en `unique`");
+            assigned[index]
+                .clone()
+                .expect("todas las etiquetas se asignan")
+        })
+        .collect()
+}
+
+fn is_windows_drive(component: &str) -> bool {
+    let bytes = component.as_bytes();
+    bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
 fn has_bots_table(path: &Path) -> bool {
     let Ok(conn) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
         return false;
@@ -327,6 +435,56 @@ mod tests {
         )
         .expect("version valida");
         conn
+    }
+
+    #[test]
+    fn las_etiquetas_de_un_workspace_no_colisionan() {
+        let paths = vec![
+            PathBuf::from(r"C:\proyectos\a\sandbox\robot.db"),
+            PathBuf::from(r"C:\proyectos\b\sandbox\robot.db"),
+            PathBuf::from(r"C:\proyectos\c\entrega\robot.db"),
+        ];
+        let labels = labels_for(&paths);
+        assert_eq!(labels[0], r"a\sandbox\robot.db");
+        assert_eq!(labels[1], r"b\sandbox\robot.db");
+        assert_eq!(labels[2], r"entrega\robot.db");
+        assert_ne!(labels[0], labels[1]);
+        assert!(
+            labels.iter().all(|label| !label.contains("C:")),
+            "la unidad no viaja en la etiqueta: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn si_toda_la_cola_coincide_se_anade_un_hash() {
+        let paths = vec![
+            PathBuf::from(r"C:\x\a\sandbox\robot.db"),
+            PathBuf::from(r"D:\x\a\sandbox\robot.db"),
+        ];
+        let labels = labels_for(&paths);
+        assert_ne!(labels[0], labels[1]);
+        assert!(
+            labels[0].starts_with(r"x\a\sandbox\robot.db~"),
+            "el hash conserva la cola comun: {labels:?}"
+        );
+        assert!(
+            !labels[0].contains(':') && !labels[1].contains(':'),
+            "la unidad no se filtra: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn una_sola_db_conserva_la_etiqueta_historica() {
+        let path = PathBuf::from(r"C:\proyectos\BBRE2\robot_run.db");
+        assert_eq!(labels_for(std::slice::from_ref(&path)), vec![label(&path)]);
+    }
+
+    #[test]
+    fn una_ruta_repetida_comparte_etiqueta() {
+        let path = PathBuf::from(r"C:\proyectos\BBRE2\robot.db");
+        let labels = labels_for(&[path.clone(), path.clone()]);
+        assert_eq!(labels[0], labels[1]);
+        assert_eq!(labels[0], r"BBRE2\robot.db");
     }
 
     #[test]

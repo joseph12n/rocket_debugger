@@ -175,6 +175,19 @@ variables y esa carpeta no existe aqui.
   contadores del barrido siguen siendo de reglas de codigo: `review` no comprueba
   el disco una vez por fila.
 
+### Etiquetas de db unicas en un workspace
+
+`db::label` conserva las dos ultimas componentes (`BBRE2\robot_run.db`): es la etiqueta que viaja en
+el pack y no filtra el arbol del usuario. Pero dos arboles distintos con `sandbox\robot.db` producen
+la misma etiqueta y el workspace los confundiria como una sola identidad (issue #18). Para un
+**conjunto** de dbs, `db::labels_for` empieza por esa etiqueta historica y alarga la cola solo para
+las que colisionan (`a\sandbox\robot.db` / `b\sandbox\robot.db`); si dos rutas agotan sus componentes
+con la misma cola, anade un sufijo hash de 6 caracteres de la ruta completa. Nunca incluye la unidad
+ni la raiz, es determinista y no depende del orden de entrada.
+
+Lo usan `list`/`pack --workspace`/`review` del CLI y `/api/review`/`/api/pack` de la bandeja, para que
+las tres vistas den la misma identidad.
+
 ### El registro es el unico sitio donde se escribe
 
 `robot.db` se abre siempre en solo lectura. Lo unico que la herramienta persiste es su propio

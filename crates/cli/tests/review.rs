@@ -108,6 +108,46 @@ fn review(args: &[&std::ffi::OsStr]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// Lanza el binario del paquete con los argumentos dados y devuelve stdout.
+fn run(args: &[&std::ffi::OsStr]) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_rocketdebug"))
+        .args(args)
+        .output()
+        .expect("lanzo rocketdebug");
+    assert!(
+        out.status.success(),
+        "el comando fallo:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn el_workspace_distingue_dbs_con_la_misma_cola_de_ruta() {
+    let dir = TempDir::new("etiquetas");
+    make_db(&dir.path().join("a").join("sandbox"), &["alpha"]);
+    make_db(&dir.path().join("b").join("sandbox"), &["beta"]);
+
+    let stdout = run(&[
+        std::ffi::OsStr::new("list"),
+        std::ffi::OsStr::new("--workspace"),
+        dir.path().as_os_str(),
+    ]);
+
+    assert!(
+        stdout.contains(r"a\sandbox\robot.db"),
+        "falta la etiqueta alargada de la primera entrega:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(r"b\sandbox\robot.db"),
+        "falta la etiqueta alargada de la segunda entrega:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains(&dir.path().display().to_string()),
+        "la salida filtra la ruta absoluta:\n{stdout}"
+    );
+}
+
 #[test]
 fn el_panorama_muestra_los_dos_robots_de_la_db_y_el_total() {
     let dir = TempDir::new("dos-robots");

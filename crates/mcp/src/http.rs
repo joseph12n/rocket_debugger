@@ -582,10 +582,13 @@ fn review_json(settings: &Settings) -> Result<String, String> {
         Some(root) => {
             let paths = db::discover_databases(root)
                 .map_err(|e| format!("no pude descubrir bases en {}: {e}", root.display()))?;
+            // Mismas etiquetas unicas que el CLI: si dos entregas comparten
+            // `sandbox\robot.db`, la bandeja no puede fusionarlas.
+            let labels = db::labels_for(&paths);
             let mut abiertas = Vec::new();
-            for path in &paths {
+            for (path, label) in paths.iter().zip(labels) {
                 if let Ok(conn) = db::open_readonly(path) {
-                    abiertas.push((conn, crate::tools::db_label(path)));
+                    abiertas.push((conn, label));
                 }
             }
             let referencias: Vec<_> = abiertas
@@ -640,10 +643,14 @@ fn pack_for(settings: &Settings, robot: &str, label: Option<&str>) -> Result<Str
                 .workspace
                 .as_deref()
                 .ok_or("la peticion pide una db concreta y el servidor no tiene workspace")?;
-            db::discover_databases(root)
-                .map_err(|e| format!("no pude descubrir bases: {e}"))?
+            let paths = db::discover_databases(root)
+                .map_err(|e| format!("no pude descubrir bases: {e}"))?;
+            let labels = db::labels_for(&paths);
+            paths
                 .into_iter()
-                .find(|p| crate::tools::db_label(p) == label)
+                .zip(labels)
+                .find(|(_, candidate)| candidate.as_str() == label)
+                .map(|(path, _)| path)
                 .ok_or_else(|| format!("no encuentro la db `{label}` en el workspace"))?
         }
         None => settings.default_db(),
