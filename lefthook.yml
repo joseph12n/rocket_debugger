@@ -4,8 +4,7 @@ pre-commit:
     secrets-scan:
       run: gitleaks protect --staged --verbose
     no-env-files:
-      glob: "*.env*"
-      run: 'echo "Error: Archivo .env detectado en staging. Remuevelo antes de hacer commit." && exit 1'
+      run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/check-env-staged.ps1
 
 commit-msg:
   commands:
