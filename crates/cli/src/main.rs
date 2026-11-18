@@ -140,8 +140,9 @@ fn main() -> anyhow::Result<()> {
             let found = db::discover_databases(&root)
                 .with_context(|| format!("descubriendo bases en {}", root.display()))?;
             println!("{} bases con tabla bots:", found.len());
-            for p in found {
-                println!("  {}  ({})", db_label(&p), p.display());
+            let labels = db::labels_for(&found);
+            for (p, label) in found.into_iter().zip(labels) {
+                println!("  {label}  ({})", p.display());
             }
             Ok(())
         }
@@ -162,7 +163,6 @@ fn main() -> anyhow::Result<()> {
         } => {
             let conn = db::open_readonly(&db_path)
                 .with_context(|| format!("abriendo {}", db_path.display()))?;
-            let label = db_label(&db_path);
             // Los logs son responsabilidad del CLI, no del motor: asi la suite de
             // tests del crate core queda hermética y este binario sigue leyendo el
             // entorno real cuando existe.
@@ -175,27 +175,38 @@ fn main() -> anyhow::Result<()> {
             let path_probe = LocalPaths::from_env(&db_path);
 
             let pack = match &workspace {
-                None => build_from_conn_with_logs_and_paths(
-                    &conn,
-                    &robot,
-                    snapshot,
-                    &label,
-                    log_source,
-                    &path_probe,
-                )?,
+                None => {
+                    let label = db::label(&db_path);
+                    build_from_conn_with_logs_and_paths(
+                        &conn,
+                        &robot,
+                        snapshot,
+                        &label,
+                        log_source,
+                        &path_probe,
+                    )?
+                }
                 Some(dir) => {
+                    let discovered = db::discover_databases(dir)
+                        .with_context(|| format!("descubriendo bases en {}", dir.display()))?;
                     // La db pedida va primera y no se repite: es la etiqueta con la
-                    // que viaja el hecho del robot analizado (ver
-                    // `analyse_with_workspace`).
+                    // que viaja el hecho del robot analizado.
+                    let mut paths = vec![db_path.clone()];
+                    paths.extend(
+                        discovered
+                            .into_iter()
+                            .filter(|path| !same_file(path, &db_path)),
+                    );
+                    // Etiquetas unicas para **todo** el conjunto: dos entregas con
+                    // el mismo `sandbox\robot.db` no pueden colisionar como
+                    // identidad en el grafo.
+                    let labels = db::labels_for(&paths);
+                    let label = labels[0].clone();
+
                     let mut opened = Vec::new();
-                    for path in db::discover_databases(dir)
-                        .with_context(|| format!("descubriendo bases en {}", dir.display()))?
-                    {
-                        if same_file(&path, &db_path) {
-                            continue;
-                        }
-                        match db::open_readonly(&path) {
-                            Ok(ws_conn) => opened.push((ws_conn, db_label(&path))),
+                    for (path, ws_label) in paths.iter().zip(labels.iter()).skip(1) {
+                        match db::open_readonly(path) {
+                            Ok(ws_conn) => opened.push((ws_conn, ws_label.clone())),
                             // Una db ilegible no puede tumbar el pack: se avisa y el
                             // analisis sigue con las demas.
                             Err(e) => eprintln!("aviso: {e}"),
@@ -333,7 +344,10 @@ fn list_workspace(dir: &Path) -> anyhow::Result<()> {
 
     let mut opened = Vec::new();
     let mut rows = 0usize;
-    for path in found {
+    // Etiquetas unicas para todo el conjunto: dos entregas anidadas con el mismo
+    // `sandbox\robot.db` no pueden confundirse como una sola identidad.
+    let labels = db::labels_for(&found);
+    for (path, label) in found.into_iter().zip(labels) {
         let conn = match db::open_readonly(&path) {
             Ok(conn) => conn,
             // Una db ilegible no puede tumbar el listado del resto.
@@ -344,8 +358,8 @@ fn list_workspace(dir: &Path) -> anyhow::Result<()> {
         };
         let robots = db::list_robots(&conn)?;
         rows += robots.len();
-        print_robots(&db_label(&path), &robots);
-        opened.push((conn, db_label(&path)));
+        print_robots(&label, &robots);
+        opened.push((conn, label));
     }
 
     let mut refs = Vec::new();
@@ -383,15 +397,7 @@ fn print_robots(label: &str, robots: &[db::RobotSummary]) {
 /// La comparte `review`: la cabecera del panorama lleva la misma etiqueta que el
 /// pack para no filtrar el arbol de directorios del usuario.
 pub(crate) fn db_label(path: &Path) -> String {
-    let normalizado = path.to_string_lossy().replace('\\', "/");
-    let mut partes: Vec<&str> = normalizado.split('/').filter(|p| !p.is_empty()).collect();
-    let Some(file) = partes.pop() else {
-        return "robot.db".to_string();
-    };
-    match partes.pop() {
-        Some(dir) => format!("{dir}\\{file}"),
-        None => file.to_string(),
-    }
+    db::label(path)
 }
 
 /// `true` si las dos rutas son el mismo fichero.

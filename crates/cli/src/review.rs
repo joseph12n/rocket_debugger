@@ -81,10 +81,12 @@ fn collect(
         Some(dir) => {
             let paths = db::discover_databases(dir)
                 .with_context(|| format!("descubriendo bases en {}", dir.display()))?;
+            // Etiquetas unicas para el conjunto: dos arboles distintos con
+            // `sandbox\robot.db` no pueden ser la misma identidad.
+            let labels = db::labels_for(&paths);
             let mut opened = Vec::with_capacity(paths.len());
-            for path in paths {
-                let label = crate::db_label(&path);
-                match db::open_readonly(&path) {
+            for (path, label) in paths.iter().zip(labels) {
+                match db::open_readonly(path) {
                     Ok(conn) => opened.push((conn, label)),
                     // Una db ilegible no puede tumbar el panorama de las demas: se
                     // avisa y se sigue.
