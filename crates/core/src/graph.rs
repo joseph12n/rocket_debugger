@@ -80,6 +80,9 @@ pub struct RobotFacts {
     /// flujo. El contrato que hereda un hijo es el panel del padre: una variable
     /// declarada a `null` tambien existe en el namespace del hijo.
     pub declared: BTreeSet<String>,
+    /// Valor declarado de cada variable, para las comprobaciones que miran el
+    /// contenido (rutas migradas). El contrato sigue usando solo `declared`.
+    pub vars: Vec<crate::paths::VarValue>,
 }
 
 impl RobotFacts {
@@ -581,6 +584,7 @@ mod tests {
             name: name.to_string(),
             nodes,
             declared: declared.iter().map(|s| s.to_string()).collect(),
+            vars: Vec::new(),
         }
     }
 

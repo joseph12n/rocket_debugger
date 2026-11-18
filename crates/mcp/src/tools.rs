@@ -19,8 +19,9 @@ use rocketdebug_core::attribution::Verdict;
 use rocketdebug_core::db;
 use rocketdebug_core::exec::{self, BrokerStatus, RunFailure, RunReport, RunRequest};
 use rocketdebug_core::logs;
+use rocketdebug_core::paths::LocalPaths;
 use rocketdebug_core::redact;
-use rocketdebug_core::{build_from_conn_with_logs, Error};
+use rocketdebug_core::{build_from_conn_with_logs_and_paths, Error};
 use serde_json::{json, Map, Value};
 
 use crate::Settings;
@@ -1066,7 +1067,14 @@ pub(crate) fn pack_markdown(
         .as_ref()
         .map(|(dir, max_files)| (dir.as_path(), *max_files));
 
-    let pack = build_from_conn_with_logs(&conn, robot, snapshot, &label, log_source)?;
+    let pack = build_from_conn_with_logs_and_paths(
+        &conn,
+        robot,
+        snapshot,
+        &label,
+        log_source,
+        &LocalPaths::from_env(db_path),
+    )?;
     Ok(pack.render_markdown())
 }
 

@@ -40,6 +40,14 @@
     "fix": "usa %base_path% para que el robot sea portable entre maquinas"
   },
   {
+    "id": "RUTA_MIGRADA",
+    "severity": "alta",
+    "kind": "accionable",
+    "scope": "variable o nodo",
+    "when": "una ruta declarada (parametro o valor de variable) no existe en este dispositivo",
+    "fix": "remapea la ruta a la carpeta local equivalente y aplica el cambio con el agente (rb_plan_patch/rb_apply_patch); la herramienta nunca escribe robot.db"
+  },
+  {
     "id": "ANIDAMIENTO",
     "severity": "media",
     "kind": "higiene",

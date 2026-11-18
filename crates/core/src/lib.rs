@@ -11,6 +11,7 @@
 //! - [`tree`]    arbol de comandos -> lista plana con linea, rama y profundidad
 //! - [`versions`] historial de snapshots + indice temporal
 //! - [`logs`]    parser de los logs de ejecucion del runner
+//! - [`paths`]   rutas horneadas de otro dispositivo y propuesta de remapeo
 //! - [`exec`]    broker de ejecucion: cola, deteccion de Studio y verificacion de eventos
 //! - [`signature`] normalizacion de firmas de error y clasificacion del ruido
 //! - [`attribution`] atribucion de cada error al snapshot vivo (veredicto y linea)
@@ -43,6 +44,7 @@ pub mod exec;
 pub mod graph;
 pub mod logs;
 pub mod pack;
+pub mod paths;
 pub mod redact;
 pub mod registry;
 pub mod render;
@@ -54,7 +56,9 @@ pub mod versions;
 
 pub use analysis::{analyse, Analysis};
 pub use error::{Error, Result};
-pub use pack::{build_from_conn, build_from_conn_with_logs, Pack, VarInfo};
+pub use pack::{
+    build_from_conn, build_from_conn_with_logs, build_from_conn_with_logs_and_paths, Pack, VarInfo,
+};
 pub use render::{estimate_tokens, render_changes, Sizing};
 pub use review::{review_conn, review_workspace, Review, ReviewRow};
 pub use versions::{VersionIndex, VersionInfo};

@@ -67,14 +67,16 @@ metricas mienten.
 
 ### Dos cubos de hallazgos
 
-Un defecto con linea concreta (`LINEA_COLISION`, `RUTA_ABSOLUTA`) se puede atender hoy; una carencia
-del robot entero (`SIN_TRY`, `IF_SIN_ELSE`, `ANIDAMIENTO`, `VAR_NO_USADA`) es cierta pero no urgente.
-Mezcladas competian por el mismo tope y la segunda diluia a la primera: medido, las genericas eran el
-36% de lo mostrado. Ahora el render las separa (`## Hallazgos` / `## Higiene`) y cada cubo tiene su
-tope. En el barrido real: 70 accionables, 66 de higiene, 0 ocultos.
+Un defecto concreto (`LINEA_COLISION`, `RUTA_ABSOLUTA`, `RUTA_MIGRADA`) se puede atender hoy; una
+carencia del robot entero (`SIN_TRY`, `IF_SIN_ELSE`, `ANIDAMIENTO`, `VAR_NO_USADA`) es cierta pero no
+urgente. Mezcladas competian por el mismo tope y la segunda diluia a la primera: medido, las genericas
+eran el 36% de lo mostrado. Ahora el render las separa (`## Hallazgos` / `## Higiene`) y cada cubo
+tiene su tope. En el barrido real: 70 accionables, 66 de higiene, 0 ocultos.
 
-Regla de clasificacion: **accionable = senala una linea con un defecto concreto**. Se declara por
-regla en `rules/builtin.json`, no se infiere de `Finding::line` (`IF_SIN_ELSE` trae linea y es higiene).
+Regla de clasificacion: **accionable = senala un defecto concreto y su sitio**. El sitio es una linea
+cuando el defecto vive en un nodo (`LINEA_COLISION`, `RUTA_ABSOLUTA`); `RUTA_MIGRADA` puede apuntar a
+una variable y usar como linea la llamada al subrobot que la consume. Se declara por regla en
+`rules/builtin.json`, no se infiere de `Finding::line` (`IF_SIN_ELSE` trae linea y es higiene).
 
 ### El motor no lee logs por su cuenta
 
@@ -144,6 +146,34 @@ Medido sobre 28 robots reales:
 
 Objetivo de diseno: **un robot en <= 2,5k tokens**, para que un agente pueda tener el workspace
 entero en contexto y diagnosticar sin pedir el flujo crudo.
+
+### `RUTA_MIGRADA` comprueba el dispositivo, no solo el formato
+
+`RUTA_ABSOLUTA` avisa de una ruta absoluta; `RUTA_MIGRADA` responde una pregunta
+distinta y verificable: **¿esa ruta existe en este equipo?**. Es el caso de BBRE2:
+`reporteMercadolibre` trae `C:/Users/josep/Downloads/ENTREGA_BBRE2/...` en sus
+variables y esa carpeta no existe aqui.
+
+- Se evalua **solo cuando el pack recibe un `PathProbe`**. El CLI y la fachada MCP
+  pasan `LocalPaths`; el motor hermetico (tests, `review`, registro) usa `NoPaths`
+  y el resultado es identico al historico. Asi el golden no depende del disco de
+  la maquina que corre la suite.
+- Mira **variables y parametros**. En los robots reales las rutas viven en
+  variables; en un parametro literal la linea es la del nodo. Si la variable solo
+  la usa un subrobot, la linea es la de la llamada `execRocketBotDB` en el padre:
+  es donde se decide ejecutar ese contrato.
+- No marca rutas que existen, rutas de sistema (`C:/Windows`, `C:/Program Files`,
+  `C:/Rocketbot`, `/usr`...), URLs ni plantillas (`{base_path}`, `%USERPROFILE%`).
+- Agrupa por **la primera carpeta que falta**: las diez variables de BBRE2 bajo
+  `ENTREGA_BBRE2` producen un hallazgo, no diez. El remapeo busca una carpeta
+  local con la misma hoja y puntua los componentes padre que coinciden; "sin
+  equivalente local" tambien es un resultado valido.
+- El `fix` del hallazgo propone la carpeta y recuerda que el cambio lo aplica el
+  agente con `rb_plan_patch`/`rb_apply_patch`: la herramienta **nunca** escribe
+  `robot.db`.
+- La bandeja muestra la propuesta en el pack del robot seleccionado. Los
+  contadores del barrido siguen siendo de reglas de codigo: `review` no comprueba
+  el disco una vez por fila.
 
 ### El registro es el unico sitio donde se escribe
 
