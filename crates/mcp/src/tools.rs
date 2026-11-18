@@ -928,17 +928,20 @@ fn ui_render(arguments: &Value) -> Result<ToolOutput, CallError> {
 
 /// `robot_errors`: solo la seccion de errores del pack.
 ///
-/// Se extrae del render en vez de reimplementarla: el formato de la seccion es
-/// el del pack (topes y avisos incluidos) y duplicarlo aqui acabaria en dos
-/// formatos que se desincronizan.
+/// La seccion se pide al render estructurado ([`Pack::render_errors_section`]),
+/// no recortando el markdown por `## Errores`: el formato vive en un solo sitio y
+/// cambiar el orden de las secciones no puede romper la tool (deuda de #18).
 fn robot_errors(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
     let args = Args::new(arguments)?;
     let robot = args.required_str("robot")?;
     let db_path = resolve_db(args.opt_str("db")?, settings);
 
-    match pack_markdown(&db_path, &robot, None, settings) {
-        Ok(markdown) => Ok(ToolOutput::ok(errors_text(
-            &markdown, &robot, settings, &db_path,
+    match build_pack(&db_path, &robot, None, settings) {
+        Ok(pack) => Ok(ToolOutput::ok(errors_text(
+            pack.render_errors_section(),
+            &robot,
+            settings,
+            &db_path,
         ))),
         Err(source) => Ok(ToolOutput::business_error(describe_failure(
             &source, &db_path,
@@ -1060,6 +1063,17 @@ pub(crate) fn pack_markdown(
     snapshot: Option<i64>,
     settings: &Settings,
 ) -> Result<String, Error> {
+    Ok(build_pack(db_path, robot, snapshot, settings)?.render_markdown())
+}
+
+/// Pack ya ensamblado, para las tools que necesitan una seccion y no el markdown
+/// entero (`robot_errors`).
+fn build_pack(
+    db_path: &Path,
+    robot: &str,
+    snapshot: Option<i64>,
+    settings: &Settings,
+) -> Result<rocketdebug_core::Pack, Error> {
     let conn = db::open_readonly(db_path)?;
     let label = db_label(db_path);
     let log_source = settings
@@ -1067,15 +1081,14 @@ pub(crate) fn pack_markdown(
         .as_ref()
         .map(|(dir, max_files)| (dir.as_path(), *max_files));
 
-    let pack = build_from_conn_with_logs_and_paths(
+    build_from_conn_with_logs_and_paths(
         &conn,
         robot,
         snapshot,
         &label,
         log_source,
         &LocalPaths::from_env(db_path),
-    )?;
-    Ok(pack.render_markdown())
+    )
 }
 
 /// Texto de `robot_errors`: la seccion del pack, o la explicacion de por que no
@@ -1085,8 +1098,13 @@ pub(crate) fn pack_markdown(
 /// tool: un pack sin seccion de errores no dice que el robot este limpio, dice
 /// que no hay evidencia. Confundirlas es justo el falso verde que el motor evita
 /// en el resto del producto.
-fn errors_text(markdown: &str, robot: &str, settings: &Settings, db_path: &Path) -> String {
-    if let Some(section) = errors_section(markdown) {
+fn errors_text(
+    section: Option<String>,
+    robot: &str,
+    settings: &Settings,
+    db_path: &Path,
+) -> String {
+    if let Some(section) = section {
         return section;
     }
     match &settings.logs {
@@ -1104,34 +1122,6 @@ fn errors_text(markdown: &str, robot: &str, settings: &Settings, db_path: &Path)
             logs::DEFAULT_LOGS_DIR,
             db_path.display()
         ),
-    }
-}
-
-/// Extrae la seccion de errores del render.
-///
-/// La seccion es plana (una cabecera de nivel 2 y vinetas), asi que termina en
-/// la siguiente cabecera de nivel 2. Se corta por ahi y no por "## Variables"
-/// porque el orden de secciones es decision del render: si manana la ultima
-/// seccion cambia, esta funcion sigue sirviendo.
-fn errors_section(markdown: &str) -> Option<String> {
-    let start = markdown
-        .lines()
-        .position(|line| line.starts_with("## Errores"))?;
-
-    let mut out = String::new();
-    for line in markdown.lines().skip(start) {
-        if !out.is_empty() && line.starts_with("## ") {
-            break;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-
-    let section = out.trim_end();
-    if section.is_empty() {
-        None
-    } else {
-        Some(section.to_string())
     }
 }
 
@@ -1199,37 +1189,9 @@ mod tests {
     }
 
     #[test]
-    fn la_seccion_de_errores_se_extrae_sola() {
-        let markdown = concat!(
-            "# demo  (snapshot 1, 1 versiones)\n",
-            "db: prueba\\robot.db | nodos 2 | vars 1 | prof 0\n",
-            "\n",
-            "## Errores (vivos 1 · payload cambiado 0 · historicos 0 · modulo 0 · ruido 0)\n",
-            "- x2 L1 log_message: NameError: name 'contador' is not defined\n",
-            "\n",
-            "## Variables (1)\n",
-            "- saludo = (sin valor inicial)\n",
-        );
-
-        let section = errors_section(markdown).expect("hay seccion de errores");
-        assert!(section.starts_with("## Errores"), "{section}");
-        assert!(section.contains("NameError"), "{section}");
-        assert!(
-            !section.contains("## Variables") && !section.contains("saludo"),
-            "la seccion termina en la siguiente cabecera:\n{section}"
-        );
-    }
-
-    #[test]
-    fn sin_errores_no_se_inventa_una_seccion() {
-        let markdown = "# demo  (snapshot 1, 1 versiones)\n## Flujo\n1 log_message\n";
-        assert!(errors_section(markdown).is_none());
-    }
-
-    #[test]
     fn sin_logs_el_texto_avisa_de_que_falta_evidencia() {
         let texto = errors_text(
-            "# demo\n## Flujo\n1 log_message\n",
+            None,
             "demo",
             &Settings::hermetic(),
             Path::new(r"C:\tmp\robot.db"),
