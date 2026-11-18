@@ -41,6 +41,7 @@ pub mod graph;
 pub mod logs;
 pub mod pack;
 pub mod redact;
+pub mod registry;
 pub mod render;
 pub mod rules;
 pub mod signature;
