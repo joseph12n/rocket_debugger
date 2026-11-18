@@ -116,6 +116,9 @@ pwsh scripts/pr.ps1 -Merge     # y lo aterriza con merge rebase
 5. El cuerpo del PR dice que cambia y como se verifico: gate local en verde, CI y SonarCloud. Si
    cierra un issue, se referencia (`cierra #26`).
 6. Cadena apilada: GitHub no cierra el issue solo, se cierra a mano al aterrizar.
+7. El merge se hace con `pr.ps1 -Merge` (fast-forward y push), no con el boton de GitHub:
+   rebase/squash reescriben los commits y **pierden la firma SSH**; por fast-forward llegan a la
+   base tal como se firmaron.
 
 ## Que no se hace
 

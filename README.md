@@ -101,7 +101,7 @@ automatiza con:
 
 ```powershell
 pwsh scripts/pr.ps1 -BodyFile C:\tmp\pr.md   # deja el PR en verde
-pwsh scripts/pr.ps1 -Merge                   # y lo aterriza con merge rebase
+pwsh scripts/pr.ps1 -Merge                   # fast-forward a la base, conserva la firma
 ```
 
 ## Roadmap

@@ -32,7 +32,8 @@
   No espera a las comprobaciones: solo sube y asegura el PR.
 
 .PARAMETER Merge
-  Si todo esta en verde, hace merge rebase en la base.
+  Si todo esta en verde, hace fast-forward de la rama a la base. No usa el boton
+  de GitHub a proposito: rebase/squash reescriben los commits y pierden la firma.
 
 .EXAMPLE
   pwsh scripts/pr.ps1
@@ -120,9 +121,16 @@ if (-not $NoWait) {
 }
 
 if ($Merge) {
-    Write-Host "==> merge rebase de ##$number en $Base" -ForegroundColor Cyan
-    gh pr merge $number --rebase
-    if ($LASTEXITCODE -ne 0) { Fail 'el merge fallo (base desactualizada: rebase y reintenta)' }
+    # Fast-forward local y push: el merge de GitHub (rebase o squash) reescribe los
+    # commits y se pierde la firma SSH; asi llegan a la base tal como se firmaron.
+    Write-Host "==> fast-forward de ##$number en $Base" -ForegroundColor Cyan
+    git merge-base --is-ancestor "origin/${Base}" HEAD
+    if ($LASTEXITCODE -ne 0) {
+        Fail "la rama no esta al dia con ${Base}: rebase y vuelve a subirla"
+    }
+    git push origin "HEAD:refs/heads/${Base}"
+    if ($LASTEXITCODE -ne 0) { Fail 'el push a la base fallo' }
+    gh pr view $number --json state --jq .state | Out-Null
 }
 
 Write-Host "OK: PR ##$number ($branch -> $Base)" -ForegroundColor Green
