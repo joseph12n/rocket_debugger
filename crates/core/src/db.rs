@@ -206,6 +206,17 @@ pub fn project_root(json: &Value) -> &Value {
     json.get("project").unwrap_or(json)
 }
 
+/// Comandos de un proyecto ya decodificado (`project.commands`).
+///
+/// Vive aqui y no en cada consumidor porque el grafo y el pack tienen que ver la
+/// misma lista: un nodo que falta en uno y sobra en el otro es otro contrato.
+pub fn commands_of(root: &Value) -> &[Value] {
+    match root.get("commands").and_then(Value::as_array) {
+        Some(commands) => commands.as_slice(),
+        None => &[],
+    }
+}
+
 /// Descubre bases de datos validas bajo una raiz.
 ///
 /// Se excluyen `backups/` (copias de trabajo que duplicarian cada robot) y las
@@ -405,6 +416,13 @@ mod tests {
         assert!(project_root(&con).get("commands").is_some());
         let sin = serde_json::json!({"commands": []});
         assert!(project_root(&sin).get("commands").is_some());
+    }
+
+    #[test]
+    fn sin_commands_no_hay_nodos() {
+        assert!(commands_of(&serde_json::json!({"vars": []})).is_empty());
+        let uno = serde_json::json!({"commands": [{"id": "x"}]});
+        assert_eq!(commands_of(&uno).len(), 1);
     }
 
     fn db_con_una_version_corrupta() -> Connection {
