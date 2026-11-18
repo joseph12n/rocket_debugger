@@ -19,7 +19,7 @@ catalogo comandos ─┘          ├→ daemon local (HTTP/WS)  ← lo que pint
 |---|---|---|
 | Motor | `rocketdebug-core` | parseo, arbol, indice de versiones, grafo, reglas, atribucion, render |
 | CLI | `rocketdebug-cli` | inspeccion manual y debug del motor |
-| MCP | `rocketdebug-mcp` | fachada de lectura por stdio para el agente (3 tools) |
+| MCP | `rocketdebug-mcp` | fachada de lectura por stdio y HTTP para el agente (4 tools) |
 | Daemon | *(pendiente)* | vigilancia de logs y `robot.db`, servidor local |
 | UI | *(pendiente)* | Tauri: canvas, heatmap, diff, inbox de hallazgos |
 

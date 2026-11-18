@@ -7,6 +7,7 @@
 use std::fmt::Write as _;
 
 use crate::analysis::ErrorItem;
+use crate::diff::{self, ChangeKind, NodeChange};
 use crate::graph::Contract;
 use crate::pack::Pack;
 use crate::redact;
@@ -435,6 +436,43 @@ fn missing_line(o: &mut String, contract: &Contract) {
 ///
 /// La linea vacia se rotula `L-`: es un error que no se pudo ubicar en el
 /// snapshot, y dejarla en blanco se leeria como un fallo de formato.
+/// Diff entre dos snapshots, listo para que lo lea un agente.
+///
+/// Los params pasan por el mismo [`field`] que el resto del render, asi que el
+/// enmascarado de rutas y el recorte valen tambien aqui. Eso importa porque
+/// [`crate::diff`] devuelve los params **crudos** a proposito: la politica de
+/// redaccion vive en un solo sitio y este es.
+pub fn render_changes(changes: &[NodeChange]) -> String {
+    let mut o = String::with_capacity(1024);
+    let _ = writeln!(o, "{}", diff::summarize(changes));
+    if changes.is_empty() {
+        return o;
+    }
+    let _ = writeln!(o);
+    for c in changes {
+        let signo = match c.kind {
+            ChangeKind::Added => "+",
+            ChangeKind::Removed => "-",
+            ChangeKind::Changed => "~",
+        };
+        let mut linea = format!("{signo} L{} {}", c.line, c.command);
+        match c.kind {
+            // En un `Added` el contenido esta en `after`; en un `Removed`, en `before`.
+            ChangeKind::Added | ChangeKind::Removed => {
+                let texto = c.after.as_deref().or(c.before.as_deref()).unwrap_or("");
+                let _ = write!(linea, "  {}", field(texto, PARAM_MAX));
+            }
+            ChangeKind::Changed => {
+                let antes = field(c.before.as_deref().unwrap_or(""), PARAM_MAX / 2);
+                let despues = field(c.after.as_deref().unwrap_or(""), PARAM_MAX / 2);
+                let _ = write!(linea, "  {antes} → {despues}");
+            }
+        }
+        let _ = writeln!(o, "{}", linea.trim_end());
+    }
+    o
+}
+
 fn error_line(item: &ErrorItem) -> String {
     let line = if item.line.is_empty() {
         "L-".to_string()
@@ -577,6 +615,43 @@ mod tests {
         let mut o3 = String::new();
         render_bucket(&mut o3, "Higiene", &[]);
         assert!(o3.is_empty(), "{o3}");
+    }
+
+    /// El diff pasa por el mismo enmascarado que el resto del render: `diff`
+    /// devuelve los params crudos a proposito, y la politica de redaccion vive en
+    /// `field`. Sin esto, comparar dos versiones publicaria el nombre de usuario.
+    #[test]
+    fn el_diff_enmascara_la_ruta_y_resume() {
+        let cambios = vec![
+            crate::diff::NodeChange {
+                kind: crate::diff::ChangeKind::Changed,
+                id: "n1".to_string(),
+                line: "2".to_string(),
+                command: "setVar".to_string(),
+                before: Some("C:/Users/josep/a.txt".to_string()),
+                after: Some("C:/Users/josep/b.txt".to_string()),
+            },
+            crate::diff::NodeChange {
+                kind: crate::diff::ChangeKind::Added,
+                id: "n2".to_string(),
+                line: "3".to_string(),
+                command: "log_message".to_string(),
+                before: None,
+                after: Some("nuevo".to_string()),
+            },
+        ];
+        let texto = render_changes(&cambios);
+        assert!(texto.contains("1 anadido"), "resumen:\n{texto}");
+        assert!(texto.contains("1 cambiado"), "resumen:\n{texto}");
+        assert!(texto.contains("~ L2 setVar"), "{texto}");
+        assert!(texto.contains("+ L3 log_message"), "{texto}");
+        assert!(
+            !texto.contains("josep"),
+            "el diff no puede publicar el usuario:\n{texto}"
+        );
+        assert!(texto.contains("%USERPROFILE%"), "{texto}");
+
+        assert!(render_changes(&[]).contains("sin cambios"));
     }
 
     #[test]
