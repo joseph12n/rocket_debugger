@@ -1,45 +1,26 @@
 //! Redaccion de secretos antes de entregar un context pack.
 //!
-//! Un pack esta pensado para compartirse: lo lee un agente, viaja dentro de una
-//! incidencia y lo pinta la UI. Pero `project.vars` de un robot real guarda
-//! credenciales: Rocketbot las cifra en formato Fernet (prefijo `gAAAAA`) y el
-//! usuario las bautiza con nombres que ya dicen lo que son (`db_password`,
-//! `api_key`). Sin filtrarlas, el render publica el secreto tal cual.
+//! El pack se comparte (lo lee un agente, viaja en una incidencia, lo pinta la UI)
+//! y `project.vars` de un robot real guarda credenciales: Rocketbot las cifra en
+//! formato Fernet (`gAAAAA`) y el usuario las bautiza con nombres que ya dicen lo
+//! que son (`db_password`, `api_key`). Sin filtrarlas, el render publica el
+//! secreto tal cual.
 //!
-//! La redaccion se aplica **al construir el pack**, no en el render: todos los
-//! consumidores (markdown, JSON, MCP) salen del mismo dato ya limpio y no queda
-//! una segunda ruta por la que el secreto pueda escaparse.
+//! # Decisiones
 //!
-//! # Por que por nombre y no por valor
-//!
-//! El valor de un secreto es indistinguible de un texto normal; el nombre es la
-//! unica senal disponible. Tiene un coste: un falso positivo borra informacion
-//! que hace falta para entender el flujo, asi que solo entran los terminos que de
-//! verdad nombran credenciales. `usuario`, `user`, `contador` o `url` se quedan
-//! fuera a proposito: saber a quien apunta una peticion es parte del diagnostico.
-//!
-//! # Por que tambien las rutas
-//!
-//! `docs/CONTEXT_PACK.md` promete que el pack no lleva rutas absolutas del
-//! usuario. En las variables una ruta local no ayuda a diagnosticar —el agente
-//! razona sobre el flujo, no sobre el disco de quien lo ejecuto— y ademas
-//! identifica a la persona, asi que se sustituye entera por `(ruta)`: un
-//! `chrome_profile = C:/Users/<usuario>/Downloads/perfil_chrome` se publica como
-//! `(ruta)`. La deteccion es estrecha a proposito: una URL o una ruta relativa se
-//! conservan porque ahi si hay informacion util.
-//!
-//! # Enmascarar el usuario y no la ruta entera
-//!
-//! En los parametros de los comandos y en los mensajes de los hallazgos la ruta
-//! **si** es informacion de diagnostico: saber que el robot escribe en
-//! `OneDrive\Documentos` o que abre un perfil de Chrome concreto explica el flujo,
-//! y borrarla entera lo dejaria mas pobre que el JSON crudo. Lo que identifica a
-//! la persona es el tramo del usuario, asi que [`mask_user_paths`] substituye solo
-//! ese tramo por un marcador estable (`%USERPROFILE%` o `~`) y conserva la cola.
-//!
-//! El enmascarado se aplica en el render y no al construir el pack: el pack
-//! conserva el parametro fiel para el resto de consumidores y la garantia queda
-//! concentrada en un solo punto de salida; ver [`crate::render`].
+//! - Se redacta **al construir el pack**, no en el render: todos los consumidores
+//!   (markdown, JSON, MCP) salen del mismo dato limpio y no queda una segunda ruta
+//!   por la que el secreto escape.
+//! - Se decide por **nombre**, no por valor: el valor es indistinguible de un texto
+//!   normal. Un falso positivo borra informacion util, asi que solo entran terminos
+//!   que de verdad nombran credenciales (`usuario`, `contador` o `url` se quedan
+//!   fuera: saber a quien apunta una peticion es parte del diagnostico).
+//! - En variables, una ruta local se sustituye entera por `(ruta)`: no ayuda a
+//!   diagnosticar y el pack promete no llevar rutas absolutas del usuario. En
+//!   parametros y hallazgos la ruta **si** es diagnostico, asi que [`mask_user_paths`]
+//!   tapa solo el tramo del usuario (`%USERPROFILE%`, `~`) y conserva la cola.
+//! - Ese enmascarado va en el render: el pack conserva el parametro fiel y la
+//!   garantia queda concentrada en un punto de salida (ver [`crate::render`]).
 
 /// Firma de Fernet: Rocketbot cifra asi lo que guarda en `project.vars`.
 const FERNET_PREFIX: &str = "gAAAAA";
@@ -267,31 +248,13 @@ struct MaskedPrefix {
 
 /// Sustituye el tramo del usuario de las rutas absolutas por un marcador estable.
 ///
-/// No se borra la ruta entera a proposito: en un parametro, `OneDrive\Documentos`
-/// es justo lo que explica donde escribe el robot. Solo se tapa el nombre del
-/// usuario, que es el dato que identifica a la persona:
+/// `C:\Users\<x>\...` -> `%USERPROFILE%\...` (conservando el separador original) y
+/// las formas `\home\<x>`, `/home/<x>`, `/Users/<x>` -> `~/...`. `<x>` llega hasta
+/// el siguiente separador o la comilla que cierra el parametro, asi que un nombre
+/// con espacios entra entero; solo se enmascara **el primer tramo**.
 ///
-/// - `C:\Users\<x>\...` y `C:/Users/<x>/...` -> `%USERPROFILE%\...` /
-///   `%USERPROFILE%/...`, conservando el separador original.
-/// - `\home\<x>\...`, `/home/<x>/...`, `\Users\<x>\...` y `/Users/<x>/...` ->
-///   `~/...`, la forma en que un shell nombra el home.
-///
-/// `<x>` es todo el tramo hasta el siguiente separador, la comilla que cierra el
-/// parametro o el final de la cadena, asi que un nombre con espacios entra
-/// entero: `C:/Users/John Doe/proyectos/x.txt` -> `%USERPROFILE%/proyectos/x.txt`.
-///
-/// Se enmascara **solo el primer tramo**: en `.../<usuario>/resto` el resto de la
-/// ruta se conserva (en POSIX se normaliza a `/` el separador de la marca). La
-/// funcion es idempotente: aplicar dos veces da el mismo resultado, porque los
-/// marcadores ya no casan con ningun patron.
-///
-/// # Lo que no se toca
-///
-/// Las URLs, porque `https://ejemplo.com/Users/algo` es una direccion, no el
-/// disco de nadie, y el texto normal, porque sin un patron de usuario completo se
-/// devuelve la cadena intacta. La deteccion es tan estrecha como la de
-/// [`is_absolute_path`]: un falso positivo aqui cambiaria el parametro que el
-/// agente usa para entender el flujo.
+/// Es idempotente. No toca URLs ni texto normal: un falso positivo aqui cambiaria
+/// el parametro con el que el agente entiende el flujo.
 pub fn mask_user_paths(text: &str) -> String {
     let urls = url_spans(text);
     // `None` hasta el primer reemplazo: cuando no hay nada que enmascarar se
