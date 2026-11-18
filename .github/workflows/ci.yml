@@ -29,7 +29,8 @@ jobs:
       - name: tests
         run: cargo test --all
 
-  # El motor se compila tambien en Windows: es la plataforma objetivo real.
+  # El motor se compila y se prueba tambien en Windows: es la plataforma objetivo
+  # real y hay codigo que solo existe aqui (`tasklist`, `GetLocalTime`).
   build-windows:
     runs-on: windows-latest
     steps:
@@ -37,3 +38,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --all
+      - run: cargo test --all
