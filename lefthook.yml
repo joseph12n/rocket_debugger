@@ -1,0 +1,13 @@
+pre-commit:
+  parallel: true
+  commands:
+    secrets-scan:
+      run: gitleaks protect --staged --verbose
+    no-env-files:
+      glob: "*.env*"
+      run: 'echo "Error: Archivo .env detectado en staging. Remuevelo antes de hacer commit." && exit 1'
+
+commit-msg:
+  commands:
+    conventional-check:
+      run: cog verify --file {1}
