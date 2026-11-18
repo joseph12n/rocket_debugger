@@ -59,8 +59,12 @@ pub struct VarValue {
     pub value: Option<String>,
 }
 
-/// Variables de un proyecto ya decodificado.
-pub fn vars_of(root: &Value) -> Vec<VarValue> {
+/// Variables del panel (`project.vars`): nombre y valor crudo, sin nombres vacios.
+///
+/// Es la fuente unica de la lista: [`vars_of`] aqui y `pack::vars_of` la consumen y
+/// cada uno decide que hacer con el crudo (aqui, solo escalares; el pack, redactar).
+/// Si duplicaran el filtro, un cambio en las reglas del panel solo valdria en uno.
+pub fn declared_vars(root: &Value) -> Vec<(&str, Option<&Value>)> {
     let Some(array) = root.get("vars").and_then(Value::as_array) else {
         return Vec::new();
     };
@@ -71,15 +75,22 @@ pub fn vars_of(root: &Value) -> Vec<VarValue> {
             if name.is_empty() {
                 return None;
             }
-            let value = match var.get("data") {
+            Some((name, var.get("data")))
+        })
+        .collect()
+}
+
+/// Variables de un proyecto ya decodificado, con el valor solo si es escalar.
+pub fn vars_of(root: &Value) -> Vec<VarValue> {
+    declared_vars(root)
+        .into_iter()
+        .map(|(name, data)| VarValue {
+            name: name.to_string(),
+            value: match data {
                 Some(Value::String(text)) => Some(text.clone()),
                 Some(Value::Number(number)) => Some(number.to_string()),
                 _ => None,
-            };
-            Some(VarValue {
-                name: name.to_string(),
-                value,
-            })
+            },
         })
         .collect()
 }

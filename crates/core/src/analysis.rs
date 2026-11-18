@@ -608,7 +608,7 @@ pub(crate) fn snapshot_views(
         let root = db::project_root(&snap.project);
         // El aplanado es el de `tree`: reimplementarlo aqui acabaria en dos
         // definiciones de "linea" y "parametros" que se desincronizan.
-        let nodes = tree::flatten(commands_of(root))
+        let nodes = tree::flatten(db::commands_of(root))
             .into_iter()
             // Sin `id` el nodo no es direccionable y no puede cruzar con el log.
             .filter(|n| !n.id.is_empty())
@@ -786,7 +786,7 @@ fn load_db_facts(
                 db: db_label.to_string(),
                 also_in: Vec::new(),
                 name: summary.name.clone(),
-                nodes: tree::flatten(commands_of(root)),
+                nodes: tree::flatten(db::commands_of(root)),
                 declared: declared_of(root),
                 vars: crate::paths::vars_of(root),
             },
@@ -902,13 +902,6 @@ fn missing_call_labels(calls: &[graph::MissingCall], this: &RobotFacts) -> Vec<S
         }
     }
     out
-}
-
-fn commands_of(root: &Value) -> &[Value] {
-    match root.get("commands").and_then(Value::as_array) {
-        Some(v) => v.as_slice(),
-        None => &[],
-    }
 }
 
 /// Variables del panel del robot (`project.vars`).
@@ -1107,11 +1100,6 @@ mod tests {
 
         let sin_panel = serde_json::json!({"commands": []});
         assert!(declared_of(&sin_panel).is_empty());
-    }
-
-    #[test]
-    fn un_root_sin_commands_no_rompe_el_aplanado() {
-        assert!(commands_of(&serde_json::json!({"vars": []})).is_empty());
     }
 
     #[test]

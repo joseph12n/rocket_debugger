@@ -182,13 +182,13 @@ fn build(
             id: s.id,
             created_at: s.created_at,
             bytes: s.raw_b64.len() as i64,
-            nodes: tree::flatten(commands_of(root)).len(),
+            nodes: tree::flatten(db::commands_of(root)).len(),
             hash: hash_of(&s.raw_b64),
         });
     }
 
     let root = db::project_root(&target.project);
-    let flow = tree::flatten(commands_of(root));
+    let flow = tree::flatten(db::commands_of(root));
     let collisions = tree::collisions(&flow);
     let depth = tree::max_depth(&flow);
     let vars = vars_of(root);
@@ -211,31 +211,18 @@ fn build(
     }
 }
 
-fn commands_of(root: &Value) -> &[Value] {
-    match root.get("commands").and_then(Value::as_array) {
-        Some(v) => v.as_slice(),
-        None => &[],
-    }
-}
-
 /// Las variables salen ya redactadas: el pack se comparte (agente, incidencia,
 /// UI) y `project.vars` puede llevar credenciales cifradas por Rocketbot.
 fn vars_of(root: &Value) -> Vec<VarInfo> {
-    let Some(arr) = root.get("vars").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    arr.iter()
-        .filter_map(|v| {
-            let name = v.get("name")?.as_str()?.trim().to_string();
-            if name.is_empty() {
-                return None;
-            }
-            let value = match v.get("data") {
+    paths::declared_vars(root)
+        .into_iter()
+        .map(|(name, data)| VarInfo {
+            value: match data {
                 Some(Value::Null) | None => None,
-                Some(Value::String(s)) => redact::redacted_value(&name, s),
-                Some(other) => redact::redacted_value(&name, &other.to_string()),
-            };
-            Some(VarInfo { name, value })
+                Some(Value::String(s)) => redact::redacted_value(name, s),
+                Some(other) => redact::redacted_value(name, &other.to_string()),
+            },
+            name: name.to_string(),
         })
         .collect()
 }
