@@ -30,7 +30,7 @@
 //! # Una db o un workspace
 //!
 //! [`review_workspace`] no conoce la raiz de descubrimiento: recibe las conexiones
-//! ya abiertas con su etiqueta, igual que [`analysis::analyse_with_workspace`]. El
+//! ya abiertas con su etiqueta, igual que [`analysis::analyse_with_workspace_at_and_paths`]. El
 //! mismo robot copiado en dos entregas aparece dos veces porque son dos despliegues
 //! y el total suma instancias, no nombres distintos (es la cifra que se viene
 //! midiendo en los barridos del proyecto).
@@ -138,7 +138,7 @@ pub fn review_conn(conn: &Connection, label: &str, logs: Option<(&Path, usize)>)
 
 /// Panorama de un workspace: las dbs ya abiertas y etiquetadas por quien llama.
 ///
-/// Misma forma que [`analysis::analyse_with_workspace`]: el descubrimiento (y el
+/// Misma forma que [`analysis::analyse_with_workspace_at_and_paths`]: el descubrimiento (y el
 /// filtro de `backups/`) es del consumidor. Una db que falle al listarse se omite
 /// para no tumbar el panorama de las demas, igual que un robot ilegible.
 pub fn review_workspace(

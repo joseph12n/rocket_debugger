@@ -122,6 +122,12 @@ tests: `pack.rs:158`, `review.rs:174/183` (Workspace), `mcp/tools.rs:737`, `cli/
 `(logs, paths, snapshot)`; migrar 4 call sites y borrar el resto. Menos superficie publica =
 menos formas de desincronizarse.
 
+**Hecho (parcial):** se borran `analyse_with_workspace` y `analyse_with_workspace_at`; quedan
+`analyse` (sin logs), `analyse_with_logs`, `analyse_with_logs_at` (snapshot de db unica),
+`analyse_with_logs_at_paths` y `analyse_with_workspace_at_and_paths`, todas con `PathProbe` en la
+firma que lo necesita. `Workspace` sigue siendo la via de la bandeja. Queda pendiente decidir si
+`analyse` y `analyse_with_logs` se pueden expresar como una sola.
+
 ### H5 · `mcp/http.rs` mezcla transporte y aplicacion — MEDIA
 
 999 lineas: parse HTTP, limits, ruteo, `review_json`, `pack_for` y assets embebidos en el mismo

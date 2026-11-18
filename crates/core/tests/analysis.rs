@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use rocketdebug_core::analysis::{
-    analyse_with_logs, analyse_with_logs_at, analyse_with_workspace, load_workspace,
+    analyse_with_logs, analyse_with_logs_at, analyse_with_workspace_at_and_paths, load_workspace,
 };
 use rocketdebug_core::graph::build_edges;
 use rocketdebug_core::{analyse, build_from_conn, db, Error};
@@ -468,8 +468,15 @@ fn un_hijo_que_solo_esta_en_otra_db_sale_como_ambiguo() {
     assert_eq!(web.child_db, lb);
 
     // Y el analisis la reporta, en vez de perder la llamada.
-    let ws = analyse_with_workspace(&[(&conn_a, la), (&conn_b, lb)], la, "orq", None)
-        .expect("analisis del workspace");
+    let ws = analyse_with_workspace_at_and_paths(
+        &[(&conn_a, la), (&conn_b, lb)],
+        la,
+        "orq",
+        None,
+        None,
+        &rocketdebug_core::paths::NoPaths,
+    )
+    .expect("analisis del workspace");
     assert_eq!(ws.ambiguous_calls, vec!["orq -> hijo_web".to_string()]);
     assert_eq!(
         ws.contracts_out.len(),
