@@ -30,6 +30,7 @@ fn hechos(db: &str, name: &str, declared: &BTreeSet<String>, nodes: Vec<FlatNode
         name: name.to_string(),
         nodes,
         declared: declared.clone(),
+        vars: Vec::new(),
     }
 }
 

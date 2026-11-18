@@ -44,6 +44,10 @@ antes de dar la ejecucion por buena. `run_status` muestra quien corre y quien es
 Develop el CLI sale con 0 sin ejecutar y el broker lo reporta como fallo, no como exito. El timeout
 es 180 s por defecto (maximo 900).
 
+`rocketdebug pack` comprueba ademas si las rutas declaradas en variables y parametros existen en
+este equipo (`RUTA_MIGRADA`). Las raices donde busca una carpeta equivalente son la carpeta de la db
+y su padre; se pueden fijar con `ROCKETDEBUG_LOCAL_ROOTS` (varias, separadas por `;`).
+
 ## Arquitectura
 
 ```
@@ -97,7 +101,7 @@ En CI (Linux) se usa el toolchain por defecto.
 Orden acordado: el broker primero; las rutas migradas habilitan el ciclo real sobre BBRE2.
 
 - [ ] #25 exec: broker de ejecucion con cola, mutex y verificacion de eventos
-- [ ] #26 analysis: regla RUTA_MIGRADA para rutas de otro dispositivo
+- [x] #26 analysis: regla RUTA_MIGRADA para rutas de otro dispositivo
 - [ ] #27 ciclo: cierre end-to-end con un robot real no trivial (BBRE2)
 - [ ] #18 deuda conocida del motor y la fachada, cada punto cerrado con su test
 

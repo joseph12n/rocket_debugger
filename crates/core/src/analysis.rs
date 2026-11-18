@@ -69,6 +69,7 @@ use crate::db;
 use crate::error::{Error, Result};
 use crate::graph::{self, Contract, Edge, RobotFacts};
 use crate::logs;
+use crate::paths::{self, PathProbe};
 use crate::rules::{self, Finding};
 use crate::signature::{self, ErrorKind};
 use crate::tree;
@@ -249,6 +250,29 @@ pub fn analyse_with_logs_at(
     analyse_with_workspace_at(&[(conn, db_label)], db_label, robot, snapshot, logs)
 }
 
+/// Como [`analyse_with_logs_at`], comprobando ademas las rutas contra el
+/// dispositivo mediante `path_probe`.
+///
+/// Es la variante que usa el pack real: `RUTA_MIGRADA` necesita saber si una ruta
+/// existe aqui, y el motor no lo decide por su cuenta.
+pub fn analyse_with_logs_at_paths(
+    conn: &rusqlite::Connection,
+    db_label: &str,
+    robot: &str,
+    snapshot: Option<i64>,
+    logs: Option<(&Path, usize)>,
+    path_probe: &dyn PathProbe,
+) -> Result<Analysis> {
+    analyse_with_workspace_at_and_paths(
+        &[(conn, db_label)],
+        db_label,
+        robot,
+        snapshot,
+        logs,
+        path_probe,
+    )
+}
+
 /// Analiza un robot con los hechos de **todas** las dbs del workspace.
 ///
 /// `conns` son las bases abiertas en solo lectura y su etiqueta (sin ruta
@@ -285,12 +309,30 @@ pub fn analyse_with_workspace(
 ///
 /// Mismos errores que [`analyse_with_workspace`], mas [`Error::SnapshotNotFound`]
 /// si el robot pedido no tiene esa version.
+/// Analisis sin comprobacion de rutas en disco: el que usan los consumidores
+/// hermeticos (tests, `review`, registro de problemas).
 pub fn analyse_with_workspace_at(
     conns: &[(&rusqlite::Connection, &str)],
     db_label: &str,
     robot: &str,
     snapshot: Option<i64>,
     logs: Option<(&Path, usize)>,
+) -> Result<Analysis> {
+    analyse_with_workspace_at_and_paths(conns, db_label, robot, snapshot, logs, &paths::NoPaths)
+}
+
+/// Como [`analyse_with_workspace_at`], con un [`PathProbe`] que decide si una
+/// ruta declarada existe en este dispositivo.
+///
+/// Con [`paths::NoPaths`] la regla `RUTA_MIGRADA` no se evalua y el resultado es
+/// identico al historico. El pack real pasa [`paths::LocalPaths`].
+pub fn analyse_with_workspace_at_and_paths(
+    conns: &[(&rusqlite::Connection, &str)],
+    db_label: &str,
+    robot: &str,
+    snapshot: Option<i64>,
+    logs: Option<(&Path, usize)>,
+    path_probe: &dyn PathProbe,
 ) -> Result<Analysis> {
     // La db pedida primero: el dedupe conserva la primera aparicion, asi que el
     // hecho del robot analizado lleva la etiqueta de la db que el consumidor pidio.
@@ -333,13 +375,27 @@ pub fn analyse_with_workspace_at(
     let collisions = tree::collisions(&this.nodes);
     // `usize::MAX`: no se recorta aqui. El render decide el tope por seccion y dice
     // cuantos hallazgos quedaron fuera.
-    let (findings, higiene) = rules::evaluate_split(
+    let (mut findings, higiene) = rules::evaluate_split(
         &this.nodes,
         &collisions,
         &unused_declared,
         this.declared.len(),
         usize::MAX,
     );
+
+    // `RUTA_MIGRADA` no vive en `evaluate_split`: necesita comprobar el disco y
+    // solo se evalua cuando el consumidor pasa un probe. El orden por severidad
+    // se restablece despues de anadirla para que una alta no quede al final.
+    if path_probe.enabled() {
+        let line_hints = variable_lines(this, &facts, &edges);
+        findings.extend(paths::findings(
+            &this.nodes,
+            &this.vars,
+            path_probe,
+            &line_hints,
+        ));
+        findings.sort_by_key(|finding| std::cmp::Reverse(finding.severity));
+    }
 
     // Los contratos se recalculan sobre las aristas de **este** hecho: las de un
     // homologo con contenido distinto no son suyas y presentarlas juntas haria que
@@ -753,6 +809,7 @@ fn load_db_facts(
                 name: summary.name.clone(),
                 nodes: tree::flatten(commands_of(root)),
                 declared: declared_of(root),
+                vars: crate::paths::vars_of(root),
             },
             content_hash(&snap.raw_b64),
         ));
@@ -773,6 +830,62 @@ fn load_db_facts(
 /// y no depende de como se re-serialice el JSON.
 fn content_hash(raw_b64: &str) -> String {
     blake3::hash(raw_b64.as_bytes()).to_hex().to_string()
+}
+
+/// Primera linea donde se usa cada variable, mirando tambien los subrobots.
+///
+/// Una variable del padre puede no aparecer en ningun nodo suyo y ser consumida
+/// por un hijo. En ese caso la linea util para el agente es la de la llamada
+/// `execRocketBotDB` que lleva al hijo, no `L-`: es donde se decide que ese
+/// contrato se ejecuta.
+///
+/// La resolucion del hijo usa la misma regla que el grafo (`lives_in`), asi que
+/// un homologo de otra db no aporta una linea que no es de esta llamada.
+fn variable_lines(
+    this: &RobotFacts,
+    facts: &[RobotFacts],
+    edges: &[Edge],
+) -> BTreeMap<String, String> {
+    let names: Vec<&str> = this.vars.iter().map(|var| var.name.as_str()).collect();
+    let mut out = BTreeMap::new();
+
+    for node in &this.nodes {
+        for name in &names {
+            if out.contains_key(*name) {
+                continue;
+            }
+            if node.params.contains(&format!("{{{name}}}")) {
+                out.insert((*name).to_string(), node.line.clone());
+            }
+        }
+    }
+
+    // Las aristas vienen en el orden en que `build_edges` recorre los nodos: la
+    // primera llamada que use la variable es la que se queda.
+    for edge in edges
+        .iter()
+        .filter(|edge| edge.parent == this.name && this.lives_in(&edge.parent_db))
+    {
+        let Some(child) = facts
+            .iter()
+            .find(|fact| fact.name == edge.child && fact.lives_in(&edge.child_db))
+        else {
+            continue;
+        };
+        for name in &names {
+            if out.contains_key(*name) {
+                continue;
+            }
+            if child
+                .nodes
+                .iter()
+                .any(|node| node.params.contains(&format!("{{{name}}}")))
+            {
+                out.insert((*name).to_string(), edge.line.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Aristas ambiguas del robot, ya formateadas para el consumidor.
@@ -859,7 +972,71 @@ mod tests {
             name: name.to_string(),
             nodes: Vec::new(),
             declared: BTreeSet::new(),
+            vars: Vec::new(),
         }
+    }
+
+    fn nodo(line: &str, params: &str) -> tree::FlatNode {
+        tree::FlatNode {
+            line: line.to_string(),
+            id: format!("id-{line}"),
+            cmd: "setVar".to_string(),
+            group: None,
+            option: None,
+            desc: None,
+            params: params.to_string(),
+            write_var: None,
+            branch: tree::Branch::Main,
+            depth: 0,
+        }
+    }
+
+    #[test]
+    fn la_linea_de_una_var_que_usa_un_hijo_es_la_de_la_llamada() {
+        let mut padre = hecho("A", "orq");
+        padre.nodes = vec![nodo("2.2", "\"hijo\"")];
+        padre.vars = vec![crate::paths::VarValue {
+            name: "carpeta_salida".to_string(),
+            value: Some("C:/Users/x/ENTREGA_BBRE2".to_string()),
+        }];
+        let mut hijo = hecho("A", "hijo");
+        hijo.nodes = vec![nodo("1", "{carpeta_salida}")];
+        let llamada = Edge {
+            parent: "orq".to_string(),
+            child: "hijo".to_string(),
+            line: "2.2".to_string(),
+            parent_db: "A".to_string(),
+            child_db: "A".to_string(),
+            same_db: true,
+            ambiguous: false,
+        };
+
+        let hints = variable_lines(&padre, &[padre.clone(), hijo], &[llamada]);
+        assert_eq!(hints.get("carpeta_salida"), Some(&"2.2".to_string()));
+    }
+
+    #[test]
+    fn sin_uso_en_el_hijo_no_se_inventa_una_linea() {
+        let mut padre = hecho("A", "orq");
+        padre.nodes = vec![nodo("2.2", "\"hijo\"")];
+        padre.vars = vec![crate::paths::VarValue {
+            name: "carpeta_salida".to_string(),
+            value: None,
+        }];
+        let mut hijo = hecho("A", "hijo");
+        hijo.nodes = vec![nodo("1", "otra_cosa")];
+        let llamada = Edge {
+            parent: "orq".to_string(),
+            child: "hijo".to_string(),
+            line: "2.2".to_string(),
+            parent_db: "A".to_string(),
+            child_db: "A".to_string(),
+            same_db: true,
+            ambiguous: false,
+        };
+
+        let hints = variable_lines(&padre, &[padre.clone(), hijo], &[llamada]);
+        assert!(hints.is_empty());
     }
 
     #[test]

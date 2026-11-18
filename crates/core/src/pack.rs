@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::analysis::{self, Analysis};
 use crate::db::{self, Snapshot};
 use crate::error::Result;
+use crate::paths::{self, PathProbe};
 use crate::redact;
 use crate::render::{estimate_tokens, Sizing};
 use crate::tree::{self, FlatNode};
@@ -113,6 +114,31 @@ pub fn build_from_conn_with_logs(
     db_label: &str,
     log_source: Option<(&Path, usize)>,
 ) -> Result<Pack> {
+    build_from_conn_with_logs_and_paths(
+        conn,
+        robot,
+        snapshot,
+        db_label,
+        log_source,
+        &paths::NoPaths,
+    )
+}
+
+/// Igual que [`build_from_conn_with_logs`], comprobando las rutas declaradas
+/// contra el dispositivo con `path_probe`.
+///
+/// Es la variante que usan el CLI y la fachada MCP: `RUTA_MIGRADA` necesita
+/// saber si una ruta existe **aqui**, y ese acceso al disco no puede estar
+/// escondido en el motor hermetico. Con [`paths::NoPaths`] el resultado es
+/// exactamente el historico.
+pub fn build_from_conn_with_logs_and_paths(
+    conn: &rusqlite::Connection,
+    robot: &str,
+    snapshot: Option<i64>,
+    db_label: &str,
+    log_source: Option<(&Path, usize)>,
+    path_probe: &dyn PathProbe,
+) -> Result<Pack> {
     let snaps = db::load_snapshots(conn, robot)?;
     let target = match snapshot {
         Some(id) => snaps
@@ -129,8 +155,14 @@ pub fn build_from_conn_with_logs(
     // el objetivo es el ultimo y el analisis tiene que describir ese mismo, no
     // quedarse en "el ultimo" por su cuenta. Antes de esto, pedir la v26 daba un
     // flujo de la v26 y hallazgos de la ultima version (issue #18).
-    let analysis =
-        analysis::analyse_with_logs_at(conn, db_label, robot, Some(target.id), log_source)?;
+    let analysis = analysis::analyse_with_logs_at_paths(
+        conn,
+        db_label,
+        robot,
+        Some(target.id),
+        log_source,
+        path_probe,
+    )?;
     Ok(build(robot, db_label, &snaps, target, analysis))
 }
 

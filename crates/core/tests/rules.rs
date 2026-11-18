@@ -305,13 +305,13 @@ fn claves_ordenadas(findings: &[Finding]) -> Vec<(String, String)> {
 }
 
 #[test]
-fn builtin_rules_declara_las_siete_con_su_cubo() {
+fn builtin_rules_declara_las_ocho_con_su_cubo() {
     let rules = rules::builtin_rules();
-    assert_eq!(rules.len(), 7, "siete reglas declaradas");
+    assert_eq!(rules.len(), 8, "ocho reglas declaradas");
     assert_eq!(
         rules.iter().filter(|r| r.kind == Kind::Accionable).count(),
-        3,
-        "accionables: LINEA_COLISION, CATCH_VACIO y RUTA_ABSOLUTA"
+        4,
+        "accionables: LINEA_COLISION, CATCH_VACIO, RUTA_ABSOLUTA y RUTA_MIGRADA"
     );
     assert_eq!(
         rules.iter().filter(|r| r.kind == Kind::Higiene).count(),

@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use rocketdebug_core::analysis::{analyse_with_workspace_at, load_workspace};
-use rocketdebug_core::{build_from_conn_with_logs, db, logs};
+use rocketdebug_core::analysis::{analyse_with_workspace_at_and_paths, load_workspace};
+use rocketdebug_core::paths::LocalPaths;
+use rocketdebug_core::{build_from_conn_with_logs_and_paths, db, logs};
 
 mod review;
 mod watch;
@@ -169,9 +170,19 @@ fn main() -> anyhow::Result<()> {
             let log_source = logs_dir
                 .is_dir()
                 .then_some((logs_dir, rocketdebug_core::pack::DEFAULT_LOG_FILES));
+            // El CLI si comprueba el dispositivo: `RUTA_MIGRADA` necesita saber
+            // si la ruta existe aqui. El motor puro no lo hace por su cuenta.
+            let path_probe = LocalPaths::from_env(&db_path);
 
             let pack = match &workspace {
-                None => build_from_conn_with_logs(&conn, &robot, snapshot, &label, log_source)?,
+                None => build_from_conn_with_logs_and_paths(
+                    &conn,
+                    &robot,
+                    snapshot,
+                    &label,
+                    log_source,
+                    &path_probe,
+                )?,
                 Some(dir) => {
                     // La db pedida va primera y no se repite: es la etiqueta con la
                     // que viaja el hecho del robot analizado (ver
@@ -197,8 +208,14 @@ fn main() -> anyhow::Result<()> {
                         refs.push((ws_conn, ws_label.as_str()));
                     }
 
-                    let analysis =
-                        analyse_with_workspace_at(&refs, &label, &robot, snapshot, log_source)?;
+                    let analysis = analyse_with_workspace_at_and_paths(
+                        &refs,
+                        &label,
+                        &robot,
+                        snapshot,
+                        log_source,
+                        &path_probe,
+                    )?;
                     eprintln!(
                         "workspace: {} dbs | {} llamadas ambiguas | {} llamadas sin destino",
                         refs.len(),
@@ -216,8 +233,14 @@ fn main() -> anyhow::Result<()> {
                     // externo sin cambiar su firma, que no es de este issue: se
                     // construye sin logs y se sustituye por el del workspace, que si
                     // los trae. Asi los logs se leen una sola vez.
-                    let mut pack =
-                        build_from_conn_with_logs(&conn, &robot, snapshot, &label, None)?;
+                    let mut pack = build_from_conn_with_logs_and_paths(
+                        &conn,
+                        &robot,
+                        snapshot,
+                        &label,
+                        None,
+                        &path_probe,
+                    )?;
                     pack.analysis = analysis;
                     pack
                 }

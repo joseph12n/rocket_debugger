@@ -184,6 +184,14 @@ pub fn builtin_rules() -> Vec<RuleSpec> {
         .expect("rules/builtin.json embebido no parsea: revisa ids y severidades")
 }
 
+/// Una regla concreta por id.
+///
+/// Lo usan las evaluaciones que no viven en este modulo (por ejemplo
+/// `paths::RUTA_MIGRADA`, que necesita comprobar el disco y no puede ser pura).
+pub fn builtin_rule(id: &str) -> Option<RuleSpec> {
+    builtin_rules().into_iter().find(|rule| rule.id == id)
+}
+
 /// Evalua todas las reglas y devuelve hasta [`MAX_FINDINGS`] hallazgos,
 /// ordenados de severidad mayor a menor.
 ///
@@ -493,6 +501,7 @@ mod tests {
             "IF_SIN_ELSE",
             "LINEA_COLISION",
             "RUTA_ABSOLUTA",
+            "RUTA_MIGRADA",
             "SIN_TRY",
             "VAR_NO_USADA",
         ];
@@ -509,14 +518,14 @@ mod tests {
                 .iter()
                 .filter(|r| r.severity == Severity::Alta)
                 .count(),
-            2
+            3
         );
     }
 
     #[test]
-    fn las_reglas_embebidas_reparten_las_siete_en_dos_cubos() {
+    fn las_reglas_embebidas_reparten_las_ocho_en_dos_cubos() {
         let rules = builtin_rules();
-        assert_eq!(rules.len(), 7, "siete reglas declaradas");
+        assert_eq!(rules.len(), 8, "ocho reglas declaradas");
 
         let mut accionables: Vec<&str> = rules
             .iter()
@@ -526,7 +535,12 @@ mod tests {
         accionables.sort_unstable();
         assert_eq!(
             accionables,
-            vec!["CATCH_VACIO", "LINEA_COLISION", "RUTA_ABSOLUTA"],
+            vec![
+                "CATCH_VACIO",
+                "LINEA_COLISION",
+                "RUTA_ABSOLUTA",
+                "RUTA_MIGRADA"
+            ],
             "las accionables son las que senalan un defecto en una linea concreta"
         );
         assert_eq!(
