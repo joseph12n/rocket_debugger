@@ -14,6 +14,10 @@ path = "src/main.rs"
 rocketdebug-core = { path = "../core" }
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
+# Solo para sellar la hora de una observacion del vigilante: `registry` no lee el
+# reloj, se lo inyecta quien llama (chrono va sin la feature `clock` en todo el
+# workspace). Es la misma dependencia que usa el crate MCP para lo mismo.
+chrono = { workspace = true }
 
 [dev-dependencies]
 # Solo para crear la `robot.db` sintetica del test de integracion de `review`: el
