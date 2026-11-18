@@ -1,51 +1,29 @@
 //! Vigilante del registro: lo alimenta sin que nadie se acuerde de hacerlo.
 //!
 //! Los errores del motor solo llegan al registro cuando alguien llama a
-//! `problems_record` (MCP). En la practica nadie se acuerda, asi que el registro no
-//! acumula historia sola y cada sesion empieza de cero: el eslabon que faltaba es un
-//! bucle que mire la db y registre lo que ve. Eso es este comando.
+//! `problems_record` (MCP), y en la practica nadie se acuerda: un bucle que mire la
+//! db y registre lo que ve es el eslabon que faltaba.
 //!
-//! # Que hace y que no
+//! # Decisiones
 //!
-//! * Solo lee `robot.db` ([`db::open_readonly`]): el unico fichero que escribe es el
-//!   registro.
-//! * La primera pasada analiza todos los robots; las siguientes, solo los que tienen
-//!   un `latest_id` distinto del de la pasada anterior. Ese id es `MAX(bots.id)` del
-//!   robot, asi que compararlo detecta "se ha guardado una version nueva" sin
-//!   decodificar nada: es lo que hace barato el bucle.
-//! * Un robot ilegible, o una db que no se puede abrir, no matan el bucle: se avisa
-//!   por stderr y se sigue con el siguiente. Un vigilante que se cae al primer
-//!   fichero raro no vigila nada.
-//! * Silencio = todo igual: si no hay cambios no se escribe nada en stdout, y la
-//!   salida de una tarea programada queda solo con las novedades.
-//! * Duerme el intervalo **entero** en cada vuelta, tambien cuando hubo cambios: no
-//!   hay espera activa ni sondeo dentro de la pasada.
-//!
-//! # Una sola instancia
-//!
-//! Con la db en produccion debe correr **una** instancia. Dos vigilantes sobre el
-//! mismo registro no lo corrompen (cada avistamiento va en una transaccion
-//! `IMMEDIATE` con `busy_timeout`, ver [`Registry`]), pero duplican trabajo y pueden
-//! contar dos veces el mismo defecto: la identidad de una observacion incluye el
-//! instante en que se vio, y dos procesos no lo comparten. El registro esta pensado
-//! para que lo alimente una instancia y lo lean todas.
-//!
-//! # Coste
-//!
-//! Con logs, [`analysis::analyse_with_logs`] decodifica la db entera y relee los
-//! ficheros de log **por robot** (el O(N^2) que documenta el modulo `review`). Aqui
-//! se paga solo cuando algo cambia, que es justo cuando hace falta; sin logs
-//! (`--no-logs`) el barrido no toca el disco de logs, pero entonces no hay errores
-//! de ejecucion que registrar.
-//!
-//! # El reloj
-//!
-//! `registry` no lee el reloj: se lo inyecta quien llama, y aqui se toma del sistema
-//! una vez por pasada (`chrono` va sin la feature `clock` en todo el workspace, igual
-//! que en el crate MCP). Consecuencia conocida: reiniciar el vigilante vuelve a
-//! registrar lo que el motor ve en su primera pasada, con un instante nuevo, y el
-//! registro lo cuenta como otro avistamiento. Es el precio de no inventarse la hora;
-//! entre pasadas sin cambios no se registra nada.
+//! - Solo se lee `robot.db` ([`db::open_readonly`]); el unico fichero que se escribe
+//!   es el registro.
+//! - La primera pasada analiza todos los robots; las siguientes, solo los que tienen
+//!   un `latest_id` distinto (`MAX(bots.id)`), que detecta "hay version nueva" sin
+//!   decodificar nada.
+//! - Un robot ilegible o una db que no abre no matan el bucle: aviso por stderr y
+//!   siguiente.
+//! - Silencio = todo igual: duerme el intervalo entero en cada vuelta, tambien
+//!   cuando hubo cambios, y stdout queda solo con las novedades.
+//! - Una sola instancia: dos vigilantes no corrompen el registro (cada avistamiento
+//!   va en transaccion `IMMEDIATE`, ver [`Registry`]) pero duplican trabajo y pueden
+//!   contar dos veces el mismo defecto.
+//! - Con logs se paga el coste de decodificar la db entera y releer logs por robot
+//!   (ver el modulo `review`), y solo cuando algo cambia; con `--no-logs` no se toca
+//!   el disco de logs, pero no hay errores de ejecucion que registrar.
+//! - El reloj lo inyecta quien llama, una vez por pasada (`chrono` sin `clock` en
+//!   todo el workspace). Reiniciar el vigilante vuelve a registrar lo que ve en su
+//!   primera pasada con un instante nuevo: es el precio de no inventarse la hora.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
