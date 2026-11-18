@@ -59,6 +59,7 @@ catalogo comandos â”€â”˜          â”œâ†’ daemon local (HTTP/WS
 
 Detalle en [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 Esquema del context pack en [`docs/CONTEXT_PACK.md`](docs/CONTEXT_PACK.md).
+Auditoria de arquitectura y plan de sanitizacion en [`docs/AUDIT.md`](docs/AUDIT.md).
 
 ## Convenciones
 
