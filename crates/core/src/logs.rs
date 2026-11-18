@@ -7,44 +7,22 @@
 //! 2026-11-17 12:43:47.586814 - rocketbot - INFO - request: ML_06_Legacy : line 1 - rpasystem : log_message  id: 24c9916d-469e-4bbc-85ee-392feee643a7 - INFO - INICIO subrobot
 //! ```
 //!
-//! # Por que se hereda la ultima peticion
+//! # Decisiones
 //!
-//! La linea de error no dice que comando del robot fallo: `EXCEPTION IN (<string>
-//! Rocketbot, L_91 "")` nombra el modulo interno del runner, no el nodo del
-//! robot. La unica pista de atribucion del log es la ultima `request:` emitida.
-//! [`parse_text`] la hereda en los errores para no perder esa pista, pero es una
-//! **pista, no una certeza**: si entre la peticion y el error corre otra cosa, la
-//! atribucion se equivoca. El motor la cruza despues con el snapshot que estaba
-//! vivo en ese instante ([`crate::versions::VersionIndex::live_at`]).
-//!
-//! # Tolerancia al encoding
-//!
-//! Los logs reales tienen bytes sueltos que no son UTF-8 (mensajes de usuario
-//! escritos en Windows-1252). El parseo trabaja sobre `&str` ya decodificado
-//! (`from_utf8_lossy` en el borde de lectura) y nunca corta por indice de byte a
-//! ciegas: todo corte sale de [`str::find`], que cae siempre en frontera de
-//! caracter. Un byte invalido se degrada a `U+FFFD` y la linea sigue siendo
-//! parseable.
-//!
-//! # Cache de ficheros parseados
-//!
-//! Un barrido pide los **mismos** ficheros una vez por robot: la bandeja recorre
-//! 32 instancias sobre los mismos 13 logs y lee 416 veces el mismo contenido, con
-//! el mismo resultado. [`parse_file_cached`] guarda las entradas ya parseadas por
-//! `(ruta, mtime, tamano)` y devuelve la lista **compartida** (`Arc`, sin copiarla)
-//! mientras el fichero no cambie.
-//!
-//! La invalidacion mira fecha **y** tamano porque las dos cambian por motivos
-//! distintos: un log que crece durante la ejecucion cambia de tamano (y el `mtime`
-//! puede tardar en refrescarse), y un log que se reescribe -incluso mas pequeno-
-//! cambia de fecha. Un fichero ilegible devuelve `None` y **no se cachea**: el
-//! fallo puede ser transitorio (un log a medio escribir) y memorizarlo lo volveria
-//! permanente.
-//!
-//! El cache es **de proceso** y tiene tope (`CACHE_MAX_ENTRIES`): lo usan la UI y
-//! el servidor MCP, que viven horas, y un cache sin limite seria una fuga de
-//! memoria lenta. Se desaloja el fichero usado menos recientemente, que en un
-//! barrido es el de una pasada anterior y no el que se acaba de leer.
+//! - **La linea de error no dice que nodo fallo**: `EXCEPTION IN (<string>
+//!   Rocketbot, L_91 "")` nombra el modulo interno del runner. La unica pista de
+//!   atribucion es la ultima `request:` emitida, y [`parse_text`] la hereda en los
+//!   errores: es una pista, no una certeza; el cruce con el snapshot vivo lo hace
+//!   [`crate::versions::VersionIndex::live_at`].
+//! - **Encoding**: los logs reales traen bytes que no son UTF-8 (Windows-1252).
+//!   Se decodifica con perdida en el borde de lectura y los cortes salen de
+//!   [`str::find`], que cae siempre en frontera de caracter.
+//! - **Cache de parseo** ([`parse_file_cached`]): un barrido pide los mismos
+//!   ficheros una vez por robot (32 instancias sobre 13 logs: sin cache serian
+//!   416 lecturas iguales). Clave `(ruta, mtime, tamano)` —cada componente cambia
+//!   por un motivo distinto—, lista compartida sin copiar, tope de proceso con
+//!   desalojo LRU. Un fichero ilegible no se cachea: el fallo puede ser
+//!   transitorio (un log a medio escribir).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -216,15 +194,14 @@ pub fn parse_text(text: &str) -> Vec<LogEntry> {
 
 /// Entradas de un robot **por referencia**, comparando sin distinguir mayusculas.
 ///
-/// Solo se atribuyen las lineas con `request` (propia o heredada). El ruido de
-/// motor (`zdev`, `getbot`) y los contadores de bucle no pertenecen a ningun
-/// robot: reclamarlos por cercania es exactamente el tipo de falso positivo que
-/// hace que el panel se deje de mirar.
+/// Solo se atribuyen las lineas con `request` (propia o heredada): el ruido de
+/// motor (`zdev`, `getbot`) y los contadores de bucle no son de ningun robot, y
+/// reclamarlos por cercania es el falso positivo que hace que el panel se deje
+/// de mirar.
 ///
-/// Es la variante que no clona, y la que conviene cuando la lista viene del cache:
-/// de un log entero, a un robot le toca una fraccion, y clonar todo para descartar
-/// el resto era el gasto que el cache evita. Quien necesite las entradas, que
-/// clone lo que sobreviva a su filtro (asi lo hace `analysis::robot_errors`).
+/// Variante sin clonar, pensada para listas que vienen del cache: de un log
+/// entero a un robot le toca una fraccion; quien necesite las entradas clona lo
+/// que sobreviva a su filtro (asi hace `analysis::robot_errors`).
 pub fn of_robot<'a>(entries: &'a [LogEntry], robot: &str) -> impl Iterator<Item = &'a LogEntry> {
     let buscado = robot.trim().to_lowercase();
     entries.iter().filter(move |e| {
@@ -239,18 +216,12 @@ pub fn for_robot(entries: &[LogEntry], robot: &str) -> Vec<LogEntry> {
     of_robot(entries, robot).cloned().collect()
 }
 
-/// Ficheros `*.log` bajo `dir`, recursivo, del mas nuevo al mas viejo, como mucho
-/// `max`.
+/// Ficheros `*.log` bajo `dir`, recursivo, del mas nuevo al mas viejo, maximo `max`.
 ///
-/// Un directorio inexistente o ilegible devuelve vacio en vez de fallar: un pack
-/// sin logs sigue siendo un pack valido, y "no hay logs" no es un error del
-/// robot. El recorte a `max` se hace **despues** de ordenar: quedarse con los
-/// primeros encontrados daria un fichero arbitrario -el que devuelva el sistema
-/// de ficheros-, no el mas reciente.
-///
-/// Se ordena por fecha de modificacion porque el nombre no la garantiza: el
-/// runner nombra `logfile_YYMMDD_HHMMSS.log` con la hora de **arranque**, asi que
-/// un fichero abierto toda la tarde es el mas nuevo por contenido y no por nombre.
+/// Un directorio inexistente o ilegible devuelve vacio: "no hay logs" no es un
+/// error del robot. El orden es por fecha de modificacion y el recorte va despues
+/// de ordenar, porque el nombre no garantiza la fecha: el runner nombra
+/// `logfile_YYMMDD_HHMMSS.log` con la hora de arranque, no la de ultima escritura.
 pub fn recent_files(dir: &Path, max: usize) -> Vec<PathBuf> {
     if max == 0 {
         return Vec::new();
@@ -304,37 +275,25 @@ pub fn recent_files(dir: &Path, max: usize) -> Vec<PathBuf> {
 
 /// Contenido de un log ya decodificado, o `None` si no se puede leer.
 ///
-/// La decodificacion ocurre en el borde de lectura y no en [`parse_text`]: asi el
-/// parser trabaja siempre sobre `&str` y un log con bytes sueltos de Windows-1252
-/// (mensajes de usuario, rutas) se degrada a `U+FFFD` en vez de tumbar el fichero
-/// entero. Un log ilegible se omite: es evidencia que falta, no un fallo del pack.
+/// La decodificacion con perdida ocurre en el borde para que el parser trabaje
+/// siempre sobre `&str`; un log ilegible se omite: evidencia que falta, no fallo
+/// del pack.
 pub fn read_text(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Tope de ficheros cacheados.
-///
-/// 64 deja holgura sobre lo que pide un pack ([`crate::pack::DEFAULT_LOG_FILES`] =
-/// 20 ficheros) y varios dias de logs, y sobre todo acota la memoria de un proceso
-/// que no muere entre peticiones: el cache es de proceso y sin tope creceria con
-/// cada dia nuevo de logs.
+/// Tope de ficheros cacheados: 64 da holgura sobre los 20 que pide un pack y
+/// acota la memoria de un proceso (UI, servidor MCP) que no muere entre peticiones.
 const CACHE_MAX_ENTRIES: usize = 64;
 
-/// Cache de proceso, `OnceLock` porque solo hay `std` (sin dependencias nuevas).
-///
-/// El candado protege el mapa, **no** el parseo: [`parse_file_cached`] lo suelta
-/// mientras lee y parsea, asi que dos lectores concurrentes del mismo fichero
-/// pueden parsearlo dos veces. Se acepta: el resultado es identico y serializar
-/// toda la I/O de logs detras de un candado global costaria mas que ese trabajo
-/// duplicado, que como mucho pasa en el primer acceso.
+/// Cache de proceso (`OnceLock`: solo hay std). El candado protege el mapa, no
+/// el parseo: dos lectores del mismo fichero pueden parsearlo dos veces y se
+/// acepta —serializar toda la I/O de logs costaria mas que ese primer acceso.
 static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
 
-/// Identidad de una version concreta de un fichero.
-///
-/// La ruta sola no basta (un log se reescribe) y el `mtime` solo tampoco (un log
-/// que crece durante la ejecucion puede cambiar de tamano antes de que el sistema
-/// de ficheros refresque la fecha): la clave lleva los tres.
+/// Identidad de una version de un fichero: la ruta sola no basta (se reescribe) y
+/// el `mtime` tampoco (el tamano cambia antes de que se refresque la fecha).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CacheKey {
     path: PathBuf,
@@ -393,9 +352,8 @@ impl Cache {
     /// Guarda una version del fichero y, si el cache esta lleno, desaloja la menos
     /// usada.
     fn insert(&mut self, key: CacheKey, entries: Arc<[LogEntry]>) {
-        // Reemplazar una clave que ya existe no anade una entrada: si se desalojara
-        // aqui, una carrera entre dos hilos que parsean el mismo fichero tiraria
-        // una entrada que se esta volviendo a insertar.
+        // Una clave existente no desaloja: la carrera de dos hilos parseando el
+        // mismo fichero no debe tirar la entrada que se esta reinsertando.
         if self.files.len() >= CACHE_MAX_ENTRIES && !self.files.contains_key(&key) {
             let menos_usada = self
                 .files
@@ -417,14 +375,11 @@ impl Cache {
     }
 }
 
-/// Entradas de un fichero de log, cacheadas por (ruta, mtime, tamano).
-/// El vigilante y la bandeja barren los mismos ficheros una vez por robot: sin
-/// cache, el coste crece con robots x ficheros y el resultado es el mismo.
+/// Entradas de un fichero, cacheadas por `(ruta, mtime, tamano)`: el vigilante y
+/// la bandeja barren los mismos ficheros una vez por robot.
 ///
-/// Devuelve la lista compartida: el llamador no debe mutarla (es un `Arc<[..]>`, no
-/// puede) y no la copia. Si el fichero no se puede leer, `None` y **sin cachear**:
-/// un fallo de lectura puede ser transitorio y el cache no puede convertirlo en
-/// permanente.
+/// Devuelve la lista compartida sin copiar. Un fichero ilegible devuelve `None` y
+/// no se cachea: el fallo puede ser transitorio.
 pub fn parse_file_cached(path: &Path) -> Option<Arc<[LogEntry]>> {
     let Some(key) = CacheKey::of(path) else {
         // Sin fecha ni tamano fiables no hay con que invalidar: se parsea cada vez
@@ -442,12 +397,8 @@ pub fn parse_file_cached(path: &Path) -> Option<Arc<[LogEntry]>> {
     Some(entries)
 }
 
-/// Vacia el cache y reinicia el contador de aciertos.
-///
-/// Es lo que necesita un test para medir en aislamiento y lo que puede querer un
-/// llamador para liberar memoria (por ejemplo el vigilante entre pasadas). El
-/// contador se reinicia porque los aciertos son diagnostico, no estado: un cache
-/// vacio que dijera "12 aciertos" mentiria sobre lo que tiene dentro.
+/// Vacia el cache y reinicia el contador: los aciertos son diagnostico, no
+/// estado, y un cache vacio que dijera "12 aciertos" mentiria.
 pub fn clear_cache() {
     with_cache(|cache| *cache = Cache::default());
 }
@@ -458,11 +409,8 @@ pub fn cache_stats() -> (usize, usize) {
     with_cache(|cache| (cache.files.len(), cache.hits))
 }
 
-/// Acceso al cache con recuperacion del candado envenenado.
-///
-/// Un hilo que entra en panico con el candado tomado no deja el mapa a medias (se
-/// inserta un `Arc` ya construido), asi que se recupera el dato en vez de propagar
-/// el panico como si fuera un fallo de lectura del log.
+/// Acceso al cache recuperando el candado envenenado: el mapa nunca queda a
+/// medias y propagar el panico seria perder el log entero por un fallo ajeno.
 fn with_cache<T>(f: impl FnOnce(&mut Cache) -> T) -> T {
     let mut guard = CACHE
         .get_or_init(Default::default)
@@ -471,11 +419,8 @@ fn with_cache<T>(f: impl FnOnce(&mut Cache) -> T) -> T {
     f(&mut guard)
 }
 
-/// Turno para los tests que miden el cache.
-///
-/// [`cache_stats`] cuenta un estado **global al proceso** y los tests de un crate
-/// corren en paralelo: sin este candado, un test mediria los aciertos de otro. Se
-/// usa desde `logs` y desde `analysis`.
+/// Turno para los tests que miden el cache: [`cache_stats`] es global al proceso
+/// y los tests de un crate corren en paralelo.
 #[cfg(test)]
 pub(crate) fn cache_test_guard() -> std::sync::MutexGuard<'static, ()> {
     static TURNO: Mutex<()> = Mutex::new(());
@@ -544,10 +489,8 @@ fn is_line_label(line: &str) -> bool {
         && line.bytes().any(|b| b.is_ascii_digit())
 }
 
-/// Separa comando, `cmd_id` y resto de la linea.
-///
-/// El `id:` no siempre esta: los comandos internos del runner emiten
-/// `logic :break -  - ` sin UUID. Hay que aceptarlo en vez de perder la peticion.
+/// Separa comando, `cmd_id` y resto: el `id:` no siempre esta (los comandos
+/// internos emiten `logic :break` sin UUID) y se acepta vacio.
 fn split_command_id(rest: &str) -> (String, String, &str) {
     let bytes = rest.as_bytes();
     let mut search = 0;
