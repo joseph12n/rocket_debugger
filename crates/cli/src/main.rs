@@ -6,10 +6,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use rocketdebug_core::analysis::{analyse_with_workspace, load_workspace};
+use rocketdebug_core::analysis::{analyse_with_workspace_at, load_workspace};
 use rocketdebug_core::{build_from_conn_with_logs, db, logs};
 
 mod review;
+mod watch;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -86,6 +87,47 @@ enum Cmd {
         #[arg(long)]
         no_logs: bool,
     },
+
+    /// Vigila la db y alimenta el registro de problemas sin intervencion.
+    ///
+    /// Es el eslabon que convierte el registro en memoria pasiva: `problems_record`
+    /// solo acumula historia cuando un agente se acuerda de llamarlo, y en la
+    /// practica se olvida. Aqui se mira la db cada `--interval` segundos y se
+    /// registran los errores de los robots que cambiaron (comparando el ultimo id de
+    /// `bots` con el de la pasada anterior). Silencio = no cambio nada.
+    ///
+    /// Un vigilante con la db en produccion debe correr en una sola instancia: dos no
+    /// corrompen el registro (usa transacciones y bloqueo), pero duplican trabajo y
+    /// pueden contar dos veces el mismo defecto.
+    ///
+    /// `--once` hace una sola pasada y sale: es lo que se pone en una tarea
+    /// programada y lo que se puede probar sin esperar.
+    Watch {
+        /// Recorre todas las dbs de robots bajo este directorio, como
+        /// `review --workspace`; sin el flag se vigila solo la db de `--db`.
+        #[arg(long, value_name = "DIR")]
+        workspace: Option<PathBuf>,
+        /// Segundos entre pasadas.
+        #[arg(
+            long,
+            default_value_t = watch::DEFAULT_INTERVAL_SECS,
+            value_name = "S",
+            allow_negative_numbers = true
+        )]
+        interval: i64,
+        /// Una sola pasada y sale.
+        #[arg(long)]
+        once: bool,
+        /// Fichero del registro; por defecto `ROCKETDEBUG_REGISTRY` o el del motor.
+        #[arg(long, value_name = "RUTA")]
+        registry: Option<PathBuf>,
+        /// No lee `C:\Rocketbot\logs`.
+        ///
+        /// Sin logs no hay errores de ejecucion: el registro no recibe observaciones
+        /// y la salida lo dice en vez de fingir que el robot esta limpio.
+        #[arg(long)]
+        no_logs: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -155,7 +197,8 @@ fn main() -> anyhow::Result<()> {
                         refs.push((ws_conn, ws_label.as_str()));
                     }
 
-                    let analysis = analyse_with_workspace(&refs, &label, &robot, log_source)?;
+                    let analysis =
+                        analyse_with_workspace_at(&refs, &label, &robot, snapshot, log_source)?;
                     eprintln!(
                         "workspace: {} dbs | {} llamadas ambiguas | {} llamadas sin destino",
                         refs.len(),
@@ -215,6 +258,39 @@ fn main() -> anyhow::Result<()> {
                     .then_some((logs_dir, rocketdebug_core::pack::DEFAULT_LOG_FILES))
             };
             review::run(&db_path, workspace.as_deref(), limit, log_source)
+        }
+        Cmd::Watch {
+            workspace,
+            interval,
+            once,
+            registry,
+            no_logs,
+        } => {
+            // Se valida antes de tocar nada: un intervalo de cero es un bucle en
+            // vacio, no un vigilante mas rapido.
+            let interval = watch::interval_from_secs(interval)?;
+            // Igual que `review`: el motor no decide leer logs, lo decide el CLI.
+            let log_source = if no_logs {
+                None
+            } else {
+                let logs_dir = Path::new(logs::DEFAULT_LOGS_DIR);
+                logs_dir.is_dir().then(|| {
+                    (
+                        logs_dir.to_path_buf(),
+                        rocketdebug_core::pack::DEFAULT_LOG_FILES,
+                    )
+                })
+            };
+            let options = watch::WatchOptions {
+                db: db_path,
+                workspace,
+                interval,
+                once,
+                registry: watch::resolve_registry(registry),
+                log_source,
+            };
+            let mut stdout = std::io::stdout();
+            watch::run(&options, &mut stdout)
         }
     }
 }

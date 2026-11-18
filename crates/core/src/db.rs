@@ -38,6 +38,26 @@ pub struct Snapshot {
     pub project: Value,
 }
 
+/// `created_at` del ultimo snapshot del robot, si lo tiene.
+///
+/// Es la hora con la que se registra una observacion en el historial de problemas.
+/// Si se usara el reloj del barrido, dos escaneos de la **misma** version contarian
+/// como dos avistamientos y el contador dejaria de significar nada: la identidad de
+/// una observacion incluye el instante, asi que ese instante tiene que ser estable.
+pub fn latest_created_at(conn: &Connection, name: &str) -> Result<Option<NaiveDateTime>> {
+    let mut stmt =
+        conn.prepare("SELECT created_at FROM bots WHERE name = ?1 ORDER BY id DESC LIMIT 1")?;
+    let mut rows = stmt.query([name])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    let created: Option<String> = row.get(0).ok();
+    Ok(created
+        .as_deref()
+        .map(parse_date)
+        .filter(|d| *d != NaiveDateTime::default()))
+}
+
 /// Abre en solo lectura. La herramienta nunca escribe `robot.db`.
 pub fn open_readonly(path: &Path) -> Result<Connection> {
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|source| {

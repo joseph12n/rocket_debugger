@@ -276,6 +276,10 @@ struct MaskedPrefix {
 /// - `\home\<x>\...`, `/home/<x>/...`, `\Users\<x>\...` y `/Users/<x>/...` ->
 ///   `~/...`, la forma en que un shell nombra el home.
 ///
+/// `<x>` es todo el tramo hasta el siguiente separador, la comilla que cierra el
+/// parametro o el final de la cadena, asi que un nombre con espacios entra
+/// entero: `C:/Users/John Doe/proyectos/x.txt` -> `%USERPROFILE%/proyectos/x.txt`.
+///
 /// Se enmascara **solo el primer tramo**: en `.../<usuario>/resto` el resto de la
 /// ruta se conserva (en POSIX se normaliza a `/` el separador de la marca). La
 /// funcion es idempotente: aplicar dos veces da el mismo resultado, porque los
@@ -429,42 +433,39 @@ fn starts_with_ic(text: &str, at: usize, needle: &str) -> bool {
         .is_some_and(|s| s.eq_ignore_ascii_case(needle))
 }
 
-/// Fin del tramo del usuario: desde `start` hasta el primer caracter que ya no
-/// puede formar parte de un nombre de usuario.
+/// Fin del tramo del usuario: desde `start` hasta el separador que abre la cola
+/// de la ruta, una comilla o el final de la cadena.
 ///
-/// Devolver `None` con el tramo vacio evita inventarse un usuario en `C:/Users/`
-/// o en `/home//x`, que son textos rotos y no rutas.
+/// El tramo **no** se corta en el primer espacio: la cuenta real de Windows y de
+/// macOS lleva espacios de verdad (`John Doe`, `juan perez`), y cortar ahi dejaba
+/// `%USERPROFILE% Doe\proyectos` con medio nombre a la vista (issue #18). Los
+/// espacios de dentro del tramo se comen con el nombre porque lo que lo delimita
+/// es el separador de la ruta, no el espacio.
+///
+/// Devolver `None` cuando el tramo no tiene ni un caracter visible evita
+/// inventarse un usuario en `C:/Users/`, en `C:/Users/ /x` o en `/home//x`, que
+/// son textos rotos y no rutas.
 fn user_end(text: &str, start: usize) -> Option<usize> {
     let mut end = start;
+    let mut visible = false;
     for (off, c) in text.get(start..)?.char_indices() {
-        if !is_user_char(c) {
+        if is_user_stop(c) {
             break;
         }
         end = start + off + c.len_utf8();
+        visible |= !c.is_whitespace();
     }
-    (end > start).then_some(end)
+    visible.then_some(end)
 }
 
-fn is_user_char(c: char) -> bool {
-    !c.is_whitespace()
-        && !matches!(
-            c,
-            '/' | '\\'
-                | '"'
-                | '\''
-                | '`'
-                | '('
-                | ')'
-                | '['
-                | ']'
-                | '{'
-                | '}'
-                | '<'
-                | '>'
-                | ','
-                | ';'
-                | '|'
-        )
+/// Caracter que cierra el tramo del usuario.
+///
+/// El separador es el limite natural de un nombre de cuenta dentro de una ruta.
+/// La comilla cierra un parametro entrecomillado (los JSON llegan asi). El salto
+/// de linea cierra la linea: un nombre de usuario no cruza de linea, y comerselo
+/// arrastraria a la marca el texto de la linea siguiente.
+fn is_user_stop(c: char) -> bool {
+    matches!(c, '/' | '\\' | '"' | '\'' | '\n' | '\r')
 }
 
 /// Valor listo para el pack. `None` cuando no hay nada que mostrar: el render lo
@@ -728,6 +729,55 @@ mod tests {
     }
 
     #[test]
+    fn enmascara_el_usuario_con_espacios() {
+        // Issue #18: la cuenta de Windows y la de macOS llevan espacios, y el
+        // corte en el primero dejaba `%USERPROFILE% Doe\...` con medio nombre
+        // publicado. El tramo termina en el separador de la ruta, no en el espacio.
+        assert_eq!(
+            mask_user_paths("C:/Users/John Doe/proyectos/x.txt"),
+            "%USERPROFILE%/proyectos/x.txt"
+        );
+        assert_eq!(
+            mask_user_paths(r"C:\Users\Jane Roe\AppData\x"),
+            r"%USERPROFILE%\AppData\x",
+            "el separador original se conserva"
+        );
+        assert_eq!(mask_user_paths("/home/juan perez/x"), "~/x");
+        assert_eq!(
+            mask_user_paths("/Users/John Doe/Documents/x"),
+            "~/Documents/x"
+        );
+        // Sin cola, el tramo llega al final de la cadena.
+        assert_eq!(mask_user_paths("C:/Users/John Doe"), "%USERPROFILE%");
+        assert_eq!(mask_user_paths("/home/juan perez"), "~");
+        // La comilla cierra el parametro, no el nombre: el espacio de dentro del
+        // tramo no puede confundirse con el final del valor.
+        assert_eq!(
+            mask_user_paths(r#""C:/Users/John Doe/x" + fecha"#),
+            r#""%USERPROFILE%/x" + fecha"#
+        );
+        // Un tramo sin nada visible sigue sin enmascararse: `C:/Users/ ` es texto
+        // roto, no un usuario en blanco.
+        for roto in ["C:/Users/", "C:/Users/ /x", "/home//x"] {
+            assert_eq!(mask_user_paths(roto), roto, "se invento un usuario: {roto}");
+        }
+    }
+
+    /// Un texto normal con espacios se queda quieto: sin un patron de ruta no hay
+    /// tramo de usuario que esconder, y enmascarar de mas cambiaria el parametro
+    /// que el agente usa para entender el flujo.
+    #[test]
+    fn el_texto_con_espacios_normales_no_se_toca() {
+        for text in [
+            "el usuario Juan Perez escribio",
+            "Juan Perez envio el reporte a las 10:00",
+            "contrasena del usuario y nombre completo",
+        ] {
+            assert_eq!(mask_user_paths(text), text, "se toco el texto: {text}");
+        }
+    }
+
+    #[test]
     fn enmascara_el_usuario_en_rutas_posix_y_macos() {
         assert_eq!(mask_user_paths("/home/josep/proyectos/x"), "~/proyectos/x");
         assert_eq!(
@@ -760,6 +810,9 @@ mod tests {
             "https://ejemplo.test/api",
             // Una URL `file:` tambien es una direccion, aunque lleve una ruta.
             "file:///C:/Users/josep/x",
+            // Aunque la URL lleve un nombre con espacios, sigue siendo una
+            // direccion: el tramo de usuario de dentro no se enmascara.
+            "https://ejemplo.test/Users/John Doe",
         ] {
             assert_eq!(mask_user_paths(url), url, "se toco una URL: {url}");
         }
@@ -812,6 +865,11 @@ mod tests {
             "https://ejemplo.com/Users/algo",
             r#""C:/Users/josep/a" + "C:\Users\josep\b""#,
             r#""C:\\Users\\josep\\x""#,
+            // Un nombre con espacios tampoco puede volver a enmascararse.
+            "C:/Users/John Doe/proyectos/x.txt",
+            r"C:\Users\Jane Roe\AppData\x",
+            "/home/juan perez/x",
+            r#""https://ejemplo.test/Users/John Doe""#,
         ] {
             let una = mask_user_paths(text);
             let dos = mask_user_paths(&una);

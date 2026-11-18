@@ -442,7 +442,12 @@ fn problems_record(arguments: &Value, settings: &Settings) -> Result<ToolOutput,
             }
         };
 
-    let visto_en = ahora();
+    // Hora del snapshot observado, no del barrido: con el reloj, dos pasadas de la
+    // misma version contarian como dos avistamientos.
+    let visto_en = db::latest_created_at(&conn, &robot)
+        .ok()
+        .flatten()
+        .unwrap_or_else(ahora);
     let mut vistas = 0usize;
     let mut nuevas = 0usize;
     let mut omitidas = 0usize;

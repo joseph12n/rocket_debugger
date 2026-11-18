@@ -21,7 +21,7 @@ catalogo comandos ─┘          ├→ daemon local (HTTP/WS)  ← lo que pint
 | CLI | `rocketdebug-cli` | inspeccion manual y debug del motor |
 | MCP | `rocketdebug-mcp` | fachada para el agente por stdio y HTTP (7 tools) |
 | Registro | `registry` (core) | memoria de firmas y fixes; **el unico sitio donde se escribe** |
-| Daemon | *(pendiente)* | vigilancia de logs y `robot.db`, servidor local |
+| Vigilante | `rocketdebug-cli watch` | barrido periodico que alimenta el registro sin intervencion |
 | UI | *(pendiente)* | Tauri: canvas, heatmap, diff, inbox de hallazgos |
 
 ## Decisiones y su motivo
@@ -117,3 +117,10 @@ Ruta: `ROCKETDEBUG_REGISTRY`, o `ROCKETDEBUG_HOME`, o el directorio de datos del
 
 Los mensajes que el robot escribe con `log_message` **no** se registran: son del robot, no defectos, y
 nadie los va a arreglar. El ruido del motor (`zdev`, `getbot`) tampoco.
+### La hora de una observacion es la del snapshot, no la del barrido
+
+El registro identifica una observacion por `(firma, robot, version, linea, instante)`. Si el instante
+fuera el reloj del escaneo, cada pasada del vigilante contaria la misma version como un avistamiento
+nuevo y `occurrences` dejaria de significar nada. Medido antes del arreglo: dos pasadas seguidas sobre
+la misma db dejaban 164 observaciones donde la primera habia dejado 82. Ahora `db::latest_created_at`
+da la hora del snapshot observado y dos pasadas son idempotentes (82 y 0 nuevas).

@@ -3,10 +3,12 @@
 //! Ningun test de este fichero toca `C:\Rocketbot`. Los datos reales se prueban
 //! aparte en `real_data`, marcado `#[ignore]`.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
-use rocketdebug_core::{build_from_conn, db};
+use rocketdebug_core::{build_from_conn, build_from_conn_with_logs, db, Analysis};
+use serde_json::{json, Value};
 
 fn fixture(name: &str) -> String {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -158,6 +160,211 @@ fn robot_inexistente_da_error_claro() {
     let conn = db::open_readonly(&path).expect("abro");
     let err = build_from_conn(&conn, "no_existe", None, "test\\robot.db").unwrap_err();
     assert!(err.to_string().contains("no_existe"), "error: {err}");
+}
+
+/// Proyecto minimo de una version del robot de prueba.
+fn proyecto(commands: Vec<Value>, vars: &[&str]) -> String {
+    let vars: Vec<Value> = vars
+        .iter()
+        .map(|name| json!({"name": name, "data": null}))
+        .collect();
+    json!({
+        "project": {
+            "commands": commands,
+            "vars": vars,
+            "profile": {"name": "demo"},
+        }
+    })
+    .to_string()
+}
+
+fn nodo(father: &str, line: &str, command: &str) -> Value {
+    json!({
+        "father": father,
+        "line": line,
+        "command": command,
+        "children": [],
+        "else": [],
+    })
+}
+
+/// Primera version del robot de prueba: **3 nodos** y dos hallazgos propios.
+///
+/// La ruta absoluta de la linea 2 da `RUTA_ABSOLUTA` (accionable) y `vieja` es una
+/// variable declarada que no se lee en ninguna linea (`VAR_NO_USADA`).
+fn version_1() -> String {
+    proyecto(
+        vec![
+            json!({
+                "father": "setVar",
+                "line": "1",
+                "command": "\"cafe\"",
+                "var": "busqueda",
+                "children": [],
+                "else": [],
+            }),
+            nodo("setcell", "2", r"C:\datos\salida.xlsx"),
+            nodo("savexlsx", "3", "{ruta_salida}"),
+        ],
+        &["busqueda", "ruta_salida", "vieja"],
+    )
+}
+
+/// Segunda version: **4 nodos** y otro juego de hallazgos.
+///
+/// Ya no hay ruta absoluta ni variable muerta, y aparece un `evaluateIf` sin else
+/// en la linea 4 (`IF_SIN_ELSE`). La linea 4 no existe en la v1: un hallazgo suyo
+/// dentro de un pack de la v1 delata que el analisis miro otra version.
+fn version_2() -> String {
+    proyecto(
+        vec![
+            json!({
+                "father": "setVar",
+                "line": "1",
+                "command": "\"cafe\"",
+                "var": "busqueda",
+                "children": [],
+                "else": [],
+            }),
+            nodo("log_message", "2", "buscando {usada}"),
+            nodo("savexlsx", "3", "{ruta_salida}"),
+            nodo("evaluateIf", "4", r#""{busqueda}" == """#),
+        ],
+        &["busqueda", "ruta_salida", "usada"],
+    )
+}
+
+/// Firmas de los hallazgos (regla + linea), accionables e higiene, en el orden del
+/// analisis: distingue dos versiones sin comparar los mensajes, que llevan conteos
+/// y rutas.
+fn reglas(analysis: &Analysis) -> Vec<(&str, &str)> {
+    analysis
+        .findings
+        .iter()
+        .chain(&analysis.higiene)
+        .map(|f| (f.rule_id.as_str(), f.line.as_str()))
+        .collect()
+}
+
+/// Db con dos versiones del mismo robot: la v1 sin ruta portable y con una
+/// variable muerta, la v2 con el flujo mas largo y un IF sin else.
+fn db_dos_versiones(dir: &Path) -> PathBuf {
+    let v1 = version_1();
+    let v2 = version_2();
+    make_db(
+        dir,
+        "demo",
+        &[
+            (10, "2026-11-17 10:00:00", v1.as_str()),
+            (11, "2026-11-17 10:05:00", v2.as_str()),
+        ],
+    )
+}
+
+/// Issue #18: el pack de la v1 habla de la v1.
+///
+/// Antes, `--snapshot 10` renderizaba el flujo de la v1 pero el analisis seguia
+/// describiendo el ultimo snapshot: dos versiones del mismo robot en el mismo
+/// documento, y el lector no tenia forma de saberlo.
+#[test]
+fn el_pack_de_una_version_anterior_analiza_esa_version() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = db_dos_versiones(tmp.path());
+    let conn = db::open_readonly(&path).expect("abro");
+
+    let pack_v1 = build_from_conn_with_logs(&conn, "demo", Some(10), "test\\robot.db", None)
+        .expect("pack de la v1");
+    assert_eq!(pack_v1.snapshot_id, 10, "el pack es el de la v1");
+    assert_eq!(
+        pack_v1.node_count(),
+        3,
+        "el flujo renderizado es el de la v1: {}",
+        pack_v1.render_markdown()
+    );
+
+    // El analisis describe los mismos nodos que el flujo: el indice coincide y
+    // todo hallazgo con linea cae dentro del flujo pedido. Sin esto, un hallazgo
+    // de la v2 (linea 4) se colaria en el pack de la v1.
+    let del_indice = pack_v1
+        .versions
+        .versions
+        .iter()
+        .find(|v| v.id == 10)
+        .expect("la v1 esta en el indice");
+    assert_eq!(del_indice.nodes, pack_v1.node_count());
+    let lineas_v1: BTreeSet<&str> = pack_v1.flow.iter().map(|n| n.line.as_str()).collect();
+
+    assert_eq!(
+        reglas(&pack_v1.analysis),
+        vec![
+            ("RUTA_ABSOLUTA", "2"),
+            ("SIN_TRY", ""),
+            ("VAR_NO_USADA", ""),
+        ],
+        "los hallazgos son los de la v1"
+    );
+    for finding in pack_v1
+        .analysis
+        .findings
+        .iter()
+        .chain(&pack_v1.analysis.higiene)
+    {
+        if !finding.line.is_empty() {
+            assert!(
+                lineas_v1.contains(finding.line.as_str()),
+                "hallazgo en una linea que la v1 no tiene: {finding:?}"
+            );
+        }
+    }
+    assert_eq!(
+        pack_v1.analysis.unused_declared,
+        vec!["vieja".to_string()],
+        "la variable muerta es la de la v1"
+    );
+
+    // Y la v2 dice otra cosa: se compara para demostrar que el pin cambia el
+    // analisis, no que se trunque el mismo.
+    let pack_v2 = build_from_conn_with_logs(&conn, "demo", Some(11), "test\\robot.db", None)
+        .expect("pack de la v2");
+    assert_eq!(pack_v2.snapshot_id, 11);
+    assert_eq!(pack_v2.node_count(), 4);
+    assert_eq!(
+        reglas(&pack_v2.analysis),
+        vec![("SIN_TRY", ""), ("IF_SIN_ELSE", "4")],
+        "los hallazgos son los de la v2"
+    );
+    assert!(
+        pack_v2.analysis.unused_declared.is_empty(),
+        "la v2 usa las tres variables: {:?}",
+        pack_v2.analysis.unused_declared
+    );
+    assert_ne!(
+        reglas(&pack_v1.analysis),
+        reglas(&pack_v2.analysis),
+        "las dos versiones no pueden producir el mismo analisis"
+    );
+}
+
+/// Sin `--snapshot` el pack sigue siendo el de la ultima version: el pin cambio la
+/// coherencia del pack, no su comportamiento por defecto.
+#[test]
+fn sin_snapshot_el_pack_sigue_siendo_el_ultimo() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = db_dos_versiones(tmp.path());
+    let conn = db::open_readonly(&path).expect("abro");
+
+    let ultimo =
+        build_from_conn_with_logs(&conn, "demo", None, "test\\robot.db", None).expect("pack");
+    let explicito = build_from_conn_with_logs(&conn, "demo", Some(11), "test\\robot.db", None)
+        .expect("pack de la v2");
+
+    assert_eq!(ultimo.snapshot_id, 11, "por defecto se usa el ultimo");
+    assert_eq!(ultimo.node_count(), explicito.node_count());
+    assert_eq!(
+        reglas(&ultimo.analysis),
+        reglas(&explicito.analysis),
+        "pedir el ultimo snapshot o no pedir ninguno es lo mismo"
+    );
 }
 
 #[test]

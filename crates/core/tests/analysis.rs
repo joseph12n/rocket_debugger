@@ -10,9 +10,11 @@
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
-use rocketdebug_core::analysis::{analyse_with_workspace, load_workspace};
+use rocketdebug_core::analysis::{
+    analyse_with_logs, analyse_with_logs_at, analyse_with_workspace, load_workspace,
+};
 use rocketdebug_core::graph::build_edges;
-use rocketdebug_core::{analyse, build_from_conn, db};
+use rocketdebug_core::{analyse, build_from_conn, db, Error};
 use serde_json::{json, Value};
 
 const DB: &str = r"test\robot.db";
@@ -84,6 +86,67 @@ fn hijo_excel() -> Value {
     robot(
         vec![node("savexlsx", "3.1", "%base_path%/{ruta_salida}")],
         &[],
+    )
+}
+
+/// Orquestador en su primera version: una sola llamada y ni un `evaluateIf`.
+fn orq_v1() -> Value {
+    robot(
+        vec![
+            json!({
+                "father": "setVar",
+                "line": "1",
+                "command": "\"cafe\"",
+                "var": "busqueda",
+                "children": [],
+                "else": [],
+            }),
+            call("2", "hijo_web"),
+        ],
+        &["busqueda"],
+    )
+}
+
+/// La segunda version anade una llamada y un `evaluateIf` sin else en la linea 4.
+fn orq_v2() -> Value {
+    robot(
+        vec![
+            json!({
+                "father": "setVar",
+                "line": "1",
+                "command": "\"cafe\"",
+                "var": "busqueda",
+                "children": [],
+                "else": [],
+            }),
+            call("2", "hijo_web"),
+            call("3", "hijo_excel"),
+            node("evaluateIf", "4", "\"{busqueda}\" == \"\""),
+        ],
+        &["busqueda"],
+    )
+}
+
+/// Hijo que lee una variable de su padre. Se guardan dos versiones para comprobar
+/// que fijar el snapshot del padre **no** fija el del hijo.
+fn hijo_web_que_lee(var: &str) -> Value {
+    robot(
+        vec![node("log_message", "2.1", &format!("Buscando {{{var}}}"))],
+        &[],
+    )
+}
+
+/// Db con dos versiones del orquestador y dos del hijo que lee.
+fn db_con_versiones(dir: &Path) -> PathBuf {
+    make_db(
+        dir,
+        vec![
+            (1, "orq".to_string(), orq_v1()),
+            (2, "orq".to_string(), orq_v2()),
+            (10, "hijo_web".to_string(), hijo_web_que_lee("uno")),
+            (11, "hijo_web".to_string(), hijo_web_que_lee("dos")),
+            (12, "hijo_excel".to_string(), hijo_excel()),
+        ],
     )
 }
 
@@ -443,4 +506,77 @@ fn load_workspace_deduplica_por_contenido_y_conserva_homonimos() {
         2,
         "el mismo nombre con contenido distinto son dos hechos"
     );
+}
+
+/// Issue #18: el analisis del robot pedido sale del snapshot pedido, y los demas
+/// robots del workspace siguen aportando su snapshot mas reciente.
+#[test]
+fn el_analisis_de_un_snapshot_anterior_no_mezcla_el_ultimo() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = db_con_versiones(tmp.path());
+    let conn = db::open_readonly(&path).expect("abro");
+
+    let v1 = analyse_with_logs_at(&conn, DB, "orq", Some(1), None).expect("analisis de la v1");
+    assert_eq!(
+        v1.contracts_out.len(),
+        1,
+        "la v1 solo llama a hijo_web: {:?}",
+        v1.contracts_out
+    );
+    let web = &v1.contracts_out[0];
+    assert_eq!(web.child, "hijo_web");
+    assert_eq!(web.line, "2");
+    assert_eq!(
+        web.missing,
+        vec!["dos".to_string()],
+        "el hijo aporta su ultimo snapshot: el contrato que se romperia hoy"
+    );
+    assert!(
+        !v1.higiene.iter().any(|f| f.rule_id == "IF_SIN_ELSE"),
+        "el IF de la linea 4 solo existe en la v2: {:?}",
+        v1.higiene
+    );
+    assert!(
+        v1.missing_calls.is_empty(),
+        "la v1 no llama a ningun robot inexistente: {:?}",
+        v1.missing_calls
+    );
+
+    // `None` conserva la firma y el comportamiento de siempre: ultimo snapshot.
+    let ultima = analyse_with_logs(&conn, DB, "orq", None).expect("analisis de la ultima");
+    assert_eq!(
+        ultima.contracts_out.len(),
+        2,
+        "la ultima version llama a los dos hijos: {:?}",
+        ultima.contracts_out
+    );
+    assert!(
+        ultima
+            .higiene
+            .iter()
+            .any(|f| f.rule_id == "IF_SIN_ELSE" && f.line == "4"),
+        "la v2 tiene el IF sin else: {:?}",
+        ultima.higiene
+    );
+    assert_eq!(
+        ultima
+            .contracts_out
+            .iter()
+            .find(|c| c.child == "hijo_web")
+            .map(|c| c.missing.clone()),
+        Some(vec!["dos".to_string()]),
+        "el hijo se analiza igual en las dos peticiones"
+    );
+}
+
+/// Un snapshot que no existe es un error y no una caida al ultimo: describir otra
+/// version en silencio es el defecto que este pin corrige.
+#[test]
+fn un_snapshot_inexistente_no_cae_al_ultimo() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = db_con_versiones(tmp.path());
+    let conn = db::open_readonly(&path).expect("abro");
+
+    let err = analyse_with_logs_at(&conn, DB, "orq", Some(999), None).expect_err("no existe");
+    assert!(matches!(err, Error::SnapshotNotFound(999)), "error: {err}");
 }

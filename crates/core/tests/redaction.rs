@@ -39,9 +39,14 @@ fn make_db(dir: &Path, json: &str) -> PathBuf {
 
 /// Envuelve las variables en un `project` minimo pero con la forma real.
 fn robot_con_vars(vars: serde_json::Value) -> String {
+    robot_con("Fixture de redaccion", vars)
+}
+
+/// Igual que [`robot_con_vars`] pero con la descripcion del perfil a la vista.
+fn robot_con(descripcion: &str, vars: serde_json::Value) -> String {
     serde_json::json!({
         "project": {
-            "profile": {"name": "credenciales", "description": "Fixture de redaccion"},
+            "profile": {"name": "credenciales", "description": descripcion},
             "commands": [{
                 "father": "log_message",
                 "command": "INICIO credenciales",
@@ -224,5 +229,46 @@ fn el_pack_no_filtra_el_usuario_de_los_parametros() {
     assert!(
         md.contains("RUTA_ABSOLUTA"),
         "el hallazgo que cita la ruta debe seguir ahi:\n{md}"
+    );
+}
+
+/// Issue #18: la cabecera pintaba la descripcion del perfil con `one_line`, sin
+/// pasar por el helper que enmascara, asi que una ruta escrita en la descripcion
+/// se publicaba entera aunque el resto del render estuviera limpio.
+#[test]
+fn la_descripcion_del_perfil_no_publica_el_usuario() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let json = robot_con(
+        "Reporte diario: exporta a C:/Users/josep/OneDrive/Documentos y avisa por correo",
+        serde_json::json!([]),
+    );
+    let pack = pack_de(tmp.path(), &json);
+
+    // El pack conserva el dato fiel: la garantia vive en el render, igual que en
+    // los parametros de los comandos.
+    assert!(
+        pack.description
+            .as_deref()
+            .unwrap_or_default()
+            .contains("josep"),
+        "el pack no deberia destruir la descripcion: {:?}",
+        pack.description
+    );
+
+    let md = pack.render_markdown();
+    assert!(
+        !md.contains("josep"),
+        "el usuario se escapo por la descripcion:\n{md}"
+    );
+    assert!(
+        !md.contains("C:/Users"),
+        "la ruta de la descripcion se publico entera:\n{md}"
+    );
+    // Enmascarar no puede borrar la descripcion: es contexto del robot.
+    assert!(
+        md.contains(
+            "> Reporte diario: exporta a %USERPROFILE%/OneDrive/Documentos y avisa por correo"
+        ),
+        "falta la descripcion enmascarada en la cabecera:\n{md}"
     );
 }
