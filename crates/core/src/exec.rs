@@ -976,6 +976,10 @@ fn slug(text: &str) -> String {
 
 /// `true` si `text` es el nombre del proceso de Rocketbot. Aislado para probar
 /// la deteccion sin `tasklist`.
+///
+/// Solo la usa el codigo de Windows, pero se prueba en todas las plataformas:
+/// fuera de Windows se marca para que `dead_code` no la reclame.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn is_rocketbot_process(name: &str) -> bool {
     name.trim_matches('"')
         .trim()
@@ -986,7 +990,9 @@ fn is_rocketbot_process(name: &str) -> bool {
 ///
 /// Cuando no hay coincidencias, `tasklist` imprime una linea localizada
 /// ("INFO: No tasks are running...") que no empieza por el nombre del proceso y
-/// se ignora sola.
+/// se ignora sola. Igual que [`is_rocketbot_process`]: probada en todas las
+/// plataformas, usada solo en Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn parse_tasklist(output: &str) -> Vec<u32> {
     let mut pids = Vec::new();
     for line in output.lines() {
