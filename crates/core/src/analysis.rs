@@ -826,11 +826,10 @@ struct Target<'a> {
 /// Hechos de una db, con el hash del contenido que usa el dedupe.
 ///
 /// El snapshot es el **ultimo** de cada robot, salvo para el robot exigido: si
-/// [`Target::snapshot`] trae un id, sus hechos salen de esa fila. `load_snapshots`
-/// decodifica todas las versiones porque no hay consulta que pida solo una; con
-/// las dbs reales (decenas de versiones, cientos de KB) es barato y evita una
-/// segunda forma de leer `bots` que se desincronice cuando cambie el formato.
-/// Cuando llegue el daemon, esto se cachea por (db, robot, snapshot).
+/// [`Target::snapshot`] trae un id, sus hechos salen de esa fila. Se lee solo la
+/// fila necesaria ([`db::load_latest_snapshot`] o [`db::load_snapshot`]), no el
+/// historial entero: el analisis no necesita las versiones anteriores y una
+/// version vieja corrupta no debe bloquear la ultima (issue #18).
 fn load_db_facts(
     conn: &rusqlite::Connection,
     db_label: &str,
@@ -843,24 +842,22 @@ fn load_db_facts(
         // los demas `pinned` queda en `None` y se toma el ultimo, como siempre.
         let required = target.is_some_and(|t| t.robot == summary.name.as_str());
         let pinned = target.filter(|_| required).and_then(|t| t.snapshot);
-        let snaps = match db::load_snapshots(conn, &summary.name) {
-            Ok(snaps) => snaps,
-            // Ver doc de `analyse_with_workspace`: omite el resto, propaga el del
-            // robot exigido.
-            Err(_) if !required => continue,
-            Err(e) => return Err(e),
-        };
+        // Solo se decodifica la version que el analisis necesita: la fijada o la
+        // ultima. Cargar todo el historial por robot era O(versiones) por pasada
+        // (issue #18) y ademas una version vieja corrupta bloqueaba la ultima.
         let snap = match pinned {
-            // Un snapshot pedido que no existe es un error y no una caida al
-            // ultimo: devolver otra version seria exactamente el pack que miente
-            // que este pin corrige.
-            Some(id) => snaps
-                .iter()
-                .find(|s| s.id == id)
-                .ok_or(Error::SnapshotNotFound(id))?,
-            None => match snaps.last() {
-                Some(snap) => snap,
-                None => continue,
+            Some(id) => match db::load_snapshot(conn, &summary.name, id) {
+                Ok(snap) => snap,
+                Err(_) if !required => continue,
+                Err(error) => return Err(error),
+            },
+            None => match db::load_latest_snapshot(conn, &summary.name) {
+                Ok(Some(snap)) => snap,
+                Ok(None) => continue,
+                // Un robot distinto e ilegible solo se omite: como mucho hara que
+                // su contrato no aparezca.
+                Err(_) if !required => continue,
+                Err(error) => return Err(error),
             },
         };
         let root = db::project_root(&snap.project);
