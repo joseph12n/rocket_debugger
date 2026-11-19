@@ -7,7 +7,6 @@ Rust stable. En Windows no hay MSVC: se compila con el toolchain GNU y un GCC po
 
 ```powershell
 rustup toolchain install stable-x86_64-pc-windows-gnu
-# el bin de mingw64 (WinLibs) tiene que estar en el PATH
 cargo +stable-x86_64-pc-windows-gnu build
 ```
 
@@ -56,7 +55,7 @@ Tope: **400 lineas de codigo cambiadas**. No cuentan `docs/`, `fixtures/`, los `
 es un traslado, no una revision. Se mide con:
 
 ```bash
-git diff --numstat origin/main...HEAD   # foto rapida: suma anadidas y borradas
+git diff --numstat origin/main...HEAD
 ```
 
 `pr.ps1` calcula el numero que vale (descuenta las lineas movidas) y no sube si se pasa del tope.
@@ -79,7 +78,7 @@ clave de firma: Settings -> SSH and GPG keys -> New SSH key -> tipo *Signing Key
 `gh ssh-key add <pub> --type signing` (pide el scope `admin:ssh_signing_key`). Comprobar:
 
 ```powershell
-git log -1 --format='%G? %GS'   # G = firma buena
+git log -1 --format='%G? %GS'
 ```
 
 ## Hooks locales
@@ -113,16 +112,16 @@ Orden: rama -> cambios -> gate -> `pr.ps1` -> CI y Sonar -> merge (tope->base si
 3. Gate local, que replica CI:
 
 ```powershell
-pwsh scripts/gate.ps1           # fmt + clippy -D warnings + tests
-pwsh scripts/gate.ps1 -Quick    # omite tests, al iterar
-pwsh scripts/gate.ps1 -Release  # anade el build release del job de Windows
+pwsh scripts/gate.ps1
+pwsh scripts/gate.ps1 -Quick
+pwsh scripts/gate.ps1 -Release
 ```
 
 4. Push y PR en una orden:
 
 ```powershell
 pwsh scripts/pr.ps1 -BodyFile C:\tmp\pr.md
-pwsh scripts/pr.ps1 -Merge     # y lo aterriza con merge rebase
+pwsh scripts/pr.ps1 -Merge
 ```
 
 5. El cuerpo del PR dice que cambia y como se verifico: gate local en verde, CI y SonarCloud. Si
@@ -131,6 +130,15 @@ pwsh scripts/pr.ps1 -Merge     # y lo aterriza con merge rebase
 7. El merge se hace con `pr.ps1 -Merge` (fast-forward y push), no con el boton de GitHub:
    rebase/squash reescriben los commits y **pierden la firma SSH**; por fast-forward llegan a la
    base tal como se firmaron.
+
+## Comentarios
+
+El codigo no lleva: ni doc de modulo, ni doc de API, ni inline, ni en tests, scripts, workflows o
+configuracion. El codigo, el nombre, el tipo y el test son la explicacion; lo que antes contaba un
+comentario vive en `docs/ARCHITECTURE.md` o en el historial de commits. Los ejemplos de doctest se
+movieron a tests normales y la ayuda del CLI se declara con atributos de clap (`help`, `about`).
+`docs/` y `fixtures/` son documentacion y datos: no son comentarios y no se tocan. `Cargo.lock` es
+autogenerado por Cargo y conserva su cabecera (cargo la repone en cada escritura).
 
 ## Que no se hace
 

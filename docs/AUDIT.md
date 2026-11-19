@@ -199,11 +199,21 @@ conservada). PR6 y PR8 se partieron en dos por el tope de 400 lineas cambiadas, 
 las 11 ramas quedan en el remoto, no se borran. El plan y las reglas siguen en engram
 (`plan/sanitizacion-comentarios` + procedimiento `sanitizacion-comentarios-rocketdebugger`).
 
+### v3 · cero comentarios (2026-11-19)
+
+Politica final: no queda ningun comentario en ningun fichero de codigo o configuracion (Rust de
+src y tests, `Cargo.toml`, YAML de CI, scripts PowerShell, assets de la UI y `.gitattributes`). Se
+eliminaron **1.904 lineas de comentario en 58 ficheros**; el codigo quedo identico en
+comportamiento: los 5 ejemplos de doctest eran redundantes con tests unitarios ya existentes y la
+ayuda de clap paso a atributos `help`/`about`. Gate local (fmt/clippy/test) y CI verdes.
+Excepciones: `Cargo.lock` es autogenerado y conserva su cabecera (cargo la repone en cada
+escritura); `docs/` y `fixtures/` son documentacion y datos, no comentarios.
+
 ## 5. Roadmap sugerido
 
 1. Landing de la cadena (#29 -> #32), del tope hacia la base. Hecho.
-2. Sanitizacion v2 por grupos PR1-PR9: hecha en 11 PRs (#49-#59), 3.296 -> 1.277 lineas de
-   comentario. La tabla de la seccion 4 conserva objetivo y resultado real.
+2. Sanitizacion de comentarios: v2 en 11 PRs (#49-#59), 3.296 -> 1.277 lineas; v3 el mismo dia
+   deja el repo en cero comentarios (ver final de la seccion 4).
 3. H3 (trivial) y H2 (extractor unico) con sus tests.
 4. H1 partir `analysis.rs`; luego H7 testkit, H6 job de tests en Windows, H4 variantes.
 5. H5 solo si la bandeja crece.

@@ -70,8 +70,8 @@ Auditoria de arquitectura y plan de sanitizacion en [`docs/AUDIT.md`](docs/AUDIT
 - Documentacion e issues en espanol. Codigo e identificadores en ingles.
 - Ramas `<tipo>/<slug-en-ingles>` y PRs de 400 lineas de codigo como maximo: ver
   [`CONTRIBUTING.md`](CONTRIBUTING.md).
-- Decisiones de diseno que no son obvias se documentan en el codigo con el *por que*,
-  no el *que*.
+- El codigo no lleva comentarios (ni doc de API): las decisiones no obvias viven en
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), en el nombre, en el tipo o en un test.
 - Nada de dependencia de `C:\Rocketbot` en tests: los fixtures son sinteticos.
   Los tests de integracion contra datos reales van marcados `#[ignore]`.
 
@@ -82,7 +82,6 @@ Este equipo no tiene MSVC. El proyecto compila con el toolchain GNU y un GCC por
 
 ```powershell
 rustup toolchain install stable-x86_64-pc-windows-gnu
-# anadir el bin de mingw64 al PATH
 cargo +stable-x86_64-pc-windows-gnu build
 ```
 
@@ -95,17 +94,17 @@ build release en Windows) y SonarCloud son la senal de calidad, no la revision l
 Antes de subir, el gate local replica lo que exige CI:
 
 ```powershell
-pwsh scripts/gate.ps1           # fmt + clippy + tests
-pwsh scripts/gate.ps1 -Quick    # sin tests, al iterar sobre comentarios
-pwsh scripts/gate.ps1 -Release  # anade el build release del job de Windows
+pwsh scripts/gate.ps1
+pwsh scripts/gate.ps1 -Quick
+pwsh scripts/gate.ps1 -Release
 ```
 
 El ciclo completo (push, alta del PR si no existe y espera de comprobaciones) se
 automatiza con:
 
 ```powershell
-pwsh scripts/pr.ps1 -BodyFile C:\tmp\pr.md   # deja el PR en verde
-pwsh scripts/pr.ps1 -Merge                   # fast-forward a la base, conserva la firma
+pwsh scripts/pr.ps1 -BodyFile C:\tmp\pr.md
+pwsh scripts/pr.ps1 -Merge
 ```
 
 ## Roadmap
