@@ -1,10 +1,3 @@
-//! Motor de reglas: hallazgos accionables sobre un flujo ya aplanado.
-//!
-//! Las reglas son **datos** (`rules/builtin.json`), no codigo: el evaluador
-//! interpreta el `id` y el `fix` sale del JSON. El producto son unos pocos
-//! hallazgos ordenados por severidad y truncados, repartidos en accionables
-//! (defecto en una linea concreta) e higiene (habito del robot entero).
-
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,16 +7,12 @@ use serde::{Deserialize, Deserializer};
 use crate::pathscan;
 use crate::tree::{self, Branch, FlatNode};
 
-/// Hallazgos maximos que devuelve [`evaluate`]: presupuesto de atencion.
 pub const MAX_FINDINGS: usize = 5;
 
-/// Anidamiento a partir del cual el flujo cuesta seguirlo (depth 0 cuenta 1).
 pub const DEPTH_LIMIT: usize = 4;
 
-/// JSON embebido: el binario no depende de rutas de instalacion.
 const BUILTIN_RULES: &str = include_str!("../rules/builtin.json");
 
-/// Severidad de una regla: un valor inventado en el JSON no parsea.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Alta,
@@ -32,7 +21,6 @@ pub enum Severity {
 }
 
 impl Severity {
-    /// Rango explicito: Alta es la mayor sin depender del orden del enum.
     fn rank(self) -> u8 {
         match self {
             Severity::Baja => 0,
@@ -41,7 +29,6 @@ impl Severity {
         }
     }
 
-    /// Etiqueta del render en espanol (`alta`, `media`, `baja`).
     pub fn severity_label(&self) -> &'static str {
         match self {
             Severity::Alta => "alta",
@@ -77,9 +64,6 @@ impl<'de> Deserialize<'de> for Severity {
     }
 }
 
-/// Eje de la separacion util: si el defecto se arregla leyendo una linea.
-/// Se declara por regla en `rules/builtin.json`, no se deduce del `line`:
-/// `IF_SIN_ELSE` apunta a una linea y aun asi es higiene.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Accionable,
@@ -87,7 +71,6 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// Etiqueta del render en espanol (`accionable`, `higiene`).
     pub fn label(&self) -> &'static str {
         match self {
             Kind::Accionable => "accionable",
@@ -109,13 +92,10 @@ impl<'de> Deserialize<'de> for Kind {
     }
 }
 
-/// Una regla declarada en `rules/builtin.json`. `scope` y `when` son metadata;
-/// el evaluador decide por `id` y `fix` es el texto que se copia al hallazgo.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RuleSpec {
     pub id: String,
     pub severity: Severity,
-    /// Cubo al que pertenece la regla. Obligatorio: un `kind` ausente no parsea.
     pub kind: Kind,
     pub scope: String,
     pub when: String,
@@ -126,28 +106,21 @@ pub struct RuleSpec {
 pub struct Finding {
     pub rule_id: String,
     pub severity: Severity,
-    /// Cubo heredado de la regla: el render agrupa y trunca por aqui.
     pub kind: Kind,
-    /// Linea de Studio del nodo implicado; vacia si afecta al robot entero.
     pub line: String,
     pub message: String,
     pub fix: String,
 }
 
-/// Carga las reglas embebidas; falla ruidosamente si el JSON no parsea.
 pub fn builtin_rules() -> Vec<RuleSpec> {
     serde_json::from_str(BUILTIN_RULES)
         .expect("rules/builtin.json embebido no parsea: revisa ids y severidades")
 }
 
-/// Una regla concreta por id, para evaluaciones fuera de este modulo.
 pub fn builtin_rule(id: &str) -> Option<RuleSpec> {
     builtin_rules().into_iter().find(|rule| rule.id == id)
 }
 
-/// Evalua todas las reglas y devuelve hasta [`MAX_FINDINGS`] hallazgos ordenados
-/// por severidad. Los dos cubos compiten por el mismo presupuesto: para topes por
-/// cubo usa [`evaluate_split`].
 pub fn evaluate(
     nodes: &[FlatNode],
     collisions: &BTreeMap<String, usize>,
@@ -157,7 +130,6 @@ pub fn evaluate(
     evaluate_with_limit(nodes, collisions, declared_unused, vars_total, MAX_FINDINGS)
 }
 
-/// Igual que [`evaluate`] con un tope explicito (tests, UI con presupuesto).
 pub fn evaluate_with_limit(
     nodes: &[FlatNode],
     collisions: &BTreeMap<String, usize>,
@@ -178,15 +150,11 @@ pub fn evaluate_with_limit(
             _ => {}
         }
     }
-    // Estable: dentro de la misma severidad se conserva el orden de generacion.
     out.sort_by_key(|f| Reverse(f.severity));
     out.truncate(max_findings);
     out
 }
 
-/// Devuelve (accionables, higiene), cada cubo ordenado por severidad y truncado a
-/// `max_por_cubo`. Filtrar tras ordenar sin tope conserva el orden relativo; un
-/// tope comun dejaria que la higiene (masiva) se coma lo accionable.
 pub fn evaluate_split(
     nodes: &[FlatNode],
     collisions: &BTreeMap<String, usize>,
@@ -310,9 +278,6 @@ fn unused_vars(
     }
 }
 
-/// `true` si el nodo de `index` tiene un hijo directo en la rama `else`.
-/// El aplanado es pre-orden: lo es solo el que cumple `depth == d + 1` y
-/// `branch == Else`; mirar el nodo siguiente confunde un try con su primer hijo.
 fn has_else_branch(nodes: &[FlatNode], index: usize) -> bool {
     let depth = nodes[index].depth;
     nodes[index + 1..]
@@ -332,8 +297,6 @@ fn push_finding(rule: &RuleSpec, line: &str, message: String, out: &mut Vec<Find
     });
 }
 
-/// Primera ruta con letra de unidad (`C:\`, `C:/`) fuera de una URL. La trampa
-/// es `https://`: se exige que la letra no continue un esquema.
 fn absolute_path(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     (0..bytes.len().saturating_sub(2)).find_map(|i| {
@@ -347,7 +310,6 @@ fn absolute_path(text: &str) -> Option<String> {
     })
 }
 
-/// Recorta la ruta para el mensaje: un parametro puede ser un JSON entero.
 fn path_snippet(rest: &str) -> String {
     rest.chars()
         .take(PATH_SNIPPET_MAX)
@@ -469,8 +431,6 @@ mod tests {
 
     #[test]
     fn una_regla_sin_kind_no_parsea_en_silencio() {
-        // Con un `default` una regla nueva caeria en un cubo sin que nadie lo
-        // decidiera; el error de parseo es la unica senal de que falta el dato.
         let err = serde_json::from_str::<RuleSpec>(
             r#"{"id":"X","severity":"alta","scope":"robot","when":"w","fix":"f"}"#,
         )
@@ -480,8 +440,6 @@ mod tests {
 
     #[test]
     fn la_severidad_acepta_texto_con_espacios_y_mayusculas() {
-        // `kind` es obligatorio desde que los hallazgos se separan en cubos; esta
-        // prueba sigue midiendo solo la tolerancia de `severity`.
         let rule: RuleSpec = serde_json::from_str(
             r#"{"id":"X","severity":" ALTA ","kind":"accionable","scope":"robot","when":"w","fix":"f"}"#,
         )

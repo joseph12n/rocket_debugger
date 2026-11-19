@@ -1,6 +1,3 @@
-//! Ensamblado del context pack: la unica estructura que consumen el render
-//! markdown, el JSON y las metricas de ahorro.
-
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -25,8 +22,6 @@ pub struct VarInfo {
 #[derive(Debug, Clone)]
 pub struct Pack {
     pub robot: String,
-    /// Etiqueta de la db sin ruta absoluta: el pack se comparte sin filtrar
-    /// directorios del usuario.
     pub db_label: String,
     pub snapshot_id: i64,
     pub snapshot_at: NaiveDateTime,
@@ -34,13 +29,9 @@ pub struct Pack {
     pub description: Option<String>,
     pub depth: usize,
     pub vars: Vec<VarInfo>,
-    /// Lineas repetidas: si hay alguna, `line` no sirve para direccionar nodos.
     pub collisions: BTreeMap<String, usize>,
     pub flow: Vec<FlatNode>,
-    /// Hallazgos, contratos implicitos y variables muertas de **este** snapshot;
-    /// se calcula contra la db entera y respeta `--snapshot` (issue #18).
     pub analysis: Analysis,
-    /// JSON completo del snapshot, para medir el ahorro real.
     pub raw_pretty: String,
 }
 
@@ -49,7 +40,6 @@ impl Pack {
         self.flow.len()
     }
 
-    /// Contabilidad del ahorro: JSON crudo vs render entregado.
     pub fn sizing(&self, rendered: &str) -> Sizing {
         let raw_chars = self.raw_pretty.chars().count();
         let render_chars = rendered.chars().count();
@@ -62,14 +52,8 @@ impl Pack {
     }
 }
 
-/// Logs que se leen como maximo en un pack automatico.
-///
-/// Medido: el directorio real pesa ~6,6 MB en 13 ficheros; 20 cubren la semana
-/// de trabajo normal sin arrastrar meses.
 pub const DEFAULT_LOG_FILES: usize = 20;
 
-/// Construye el pack del snapshot indicado (por defecto, el ultimo).
-/// No lee logs: el pack de test no depende de `C:\Rocketbot`.
 pub fn build_from_conn(
     conn: &rusqlite::Connection,
     robot: &str,
@@ -79,9 +63,6 @@ pub fn build_from_conn(
     build_from_conn_with_logs(conn, robot, snapshot, db_label, None)
 }
 
-/// Igual que [`build_from_conn`], con un origen de logs explicito.
-///
-/// `None` deja la seccion de errores vacia y no toca el sistema de ficheros.
 pub fn build_from_conn_with_logs(
     conn: &rusqlite::Connection,
     robot: &str,
@@ -99,10 +80,6 @@ pub fn build_from_conn_with_logs(
     )
 }
 
-/// Igual que [`build_from_conn_with_logs`], comprobando las rutas declaradas
-/// contra el dispositivo con `path_probe` (lo necesita `RUTA_MIGRADA`).
-///
-/// Con [`paths::NoPaths`] el resultado es exactamente el historico.
 pub fn build_from_conn_with_logs_and_paths(
     conn: &rusqlite::Connection,
     robot: &str,
@@ -119,8 +96,6 @@ pub fn build_from_conn_with_logs_and_paths(
             .ok_or(crate::error::Error::SnapshotNotFound(id))?,
         None => snaps.last().expect("load_snapshots nunca devuelve vacio"),
     };
-    // Se pasa el `id` resuelto y no el `--snapshot` crudo: con `None` el analisis
-    // debe describir el mismo snapshot que el flujo (issue #18).
     let analysis = analysis::analyse_with_logs_at_paths(
         conn,
         db_label,
@@ -175,7 +150,6 @@ fn build(
     }
 }
 
-/// Variables ya redactadas: el pack se comparte y la db puede llevar credenciales.
 fn vars_of(root: &Value) -> Vec<VarInfo> {
     paths::declared_vars(root)
         .into_iter()

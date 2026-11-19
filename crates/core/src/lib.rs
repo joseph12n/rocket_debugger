@@ -1,11 +1,3 @@
-//! Motor de deteccion y suministro de contexto para flujos de Rocketbot.
-//!
-//! Convierte un `robot.db` en un context pack que un agente lee de una vez, con
-//! cada error atribuido al snapshot de codigo vivo en su timestamp.
-//!
-//! Invariante: `id` del nodo == `cmd_id` del log. `line` no es unica (Try y Catch
-//! comparten numeracion), asi que solo sirve como etiqueta de display.
-
 pub mod analysis;
 pub mod attribution;
 pub mod db;

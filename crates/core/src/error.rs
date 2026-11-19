@@ -1,7 +1,5 @@
 use std::path::PathBuf;
 
-/// Errores del motor. Todos llevan contexto suficiente para que el mensaje
-/// sea accionable sin abrir el codigo.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("no pude abrir la base de datos {path}: {source}")]

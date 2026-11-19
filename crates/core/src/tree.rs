@@ -1,6 +1,3 @@
-//! Arbol de comandos -> lista plana en pre-orden; `line` no es unica (Try y
-//! Catch comparten numeracion), asi que direccionar nodos usa `id`.
-
 use std::collections::BTreeMap;
 
 use serde_json::Value;
@@ -20,15 +17,12 @@ impl Branch {
 
 #[derive(Debug, Clone)]
 pub struct FlatNode {
-    /// Numero de linea de Studio. **No es unico**: Try y Catch comparten numeracion.
     pub line: String,
-    /// UUID del nodo; coincide con el `cmd_id` del log.
     pub id: String,
     pub cmd: String,
     pub group: Option<String>,
     pub option: Option<String>,
     pub desc: Option<String>,
-    /// Parametros ya normalizados a texto de una linea.
     pub params: String,
     pub write_var: Option<String>,
     pub branch: Branch,
@@ -55,7 +49,6 @@ fn text(v: &Value) -> Option<String> {
     }
 }
 
-/// `line` viene como entero en la raiz y como cadena `"2.10.5"` en los hijos.
 pub fn normalize_line(v: &Value) -> String {
     match v {
         Value::Number(n) => n.to_string(),
@@ -64,8 +57,6 @@ pub fn normalize_line(v: &Value) -> String {
     }
 }
 
-/// `command` es polimorfico (texto, expresion Python o JSON); un JSON de objeto
-/// se re-serializa compacto para no inflar el context pack.
 pub fn params_text(cmd: &Value) -> String {
     match cmd {
         Value::String(s) => {
@@ -124,7 +115,6 @@ pub fn flatten(commands: &[Value]) -> Vec<FlatNode> {
     out
 }
 
-/// Lineas repetidas: es el defecto estructural mas grave detectable sin ejecutar.
 pub fn collisions(nodes: &[FlatNode]) -> BTreeMap<String, usize> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for n in nodes {
@@ -134,7 +124,6 @@ pub fn collisions(nodes: &[FlatNode]) -> BTreeMap<String, usize> {
     counts
 }
 
-/// Profundidad en niveles (un robot plano con hijos devuelve 2).
 pub fn max_depth(nodes: &[FlatNode]) -> usize {
     nodes.iter().map(|n| n.depth + 1).max().unwrap_or(0)
 }

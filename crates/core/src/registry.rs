@@ -1,32 +1,3 @@
-//! Registro historico de problemas: la memoria que el motor conserva entre sesiones.
-//!
-//! Es el unico sitio donde la herramienta escribe: `robot.db` se abre siempre en
-//! solo lectura. El reloj lo inyecta quien llama (aqui nunca se lee) y repetir
-//! `(firma, robot, version, linea, instante)` no suma avistamientos.
-//!
-//! ```
-//! use rocketdebug_core::db::parse_date;
-//! use rocketdebug_core::registry::{Observation, Registry};
-//!
-//! let mut registro = Registry::in_memory().unwrap();
-//! let obs = Observation {
-//!     signature: "NameError:name:{var}:not_defined".into(),
-//!     robot: "DEMO_ciclo".into(),
-//!     db_label: "rocketbot/robot.db".into(),
-//!     version: Some(59),
-//!     line: "2".into(),
-//!     message: "NameError: name 'contador' is not defined".into(),
-//!     seen_at: parse_date("2026-11-17 12:49:22"),
-//! };
-//!
-//! assert!(registro.record_observation(&obs).unwrap(), "primera vez");
-//! assert!(!registro.record_observation(&obs).unwrap(), "el motor lo vuelve a ver");
-//!
-//! let hits = registro.search("demo", 10).unwrap();
-//! assert_eq!(hits.len(), 1);
-//! assert_eq!(hits[0].occurrences, 1);
-//! ```
-
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -41,14 +12,10 @@ const FILE_NAME: &str = "problems.db";
 
 const APP_DIR: &str = "rocket_debugger";
 
-/// Variable de entorno que mueve el registro a otro directorio.
 pub const HOME_ENV: &str = "ROCKETDEBUG_HOME";
 
-/// Espera maxima si otra conexion tiene la base bloqueada.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Instantes ISO-8601 de ancho fijo y sin zona: el orden del texto es el del
-/// tiempo, que es lo que permite conservar `first_seen` con `MIN()` en SQL.
 const TS_FMT: &str = "%Y-%m-%dT%H:%M:%S%.9f";
 
 const SCHEMA: &str = "\
@@ -95,26 +62,21 @@ CREATE TABLE IF NOT EXISTS fixes (
 CREATE INDEX IF NOT EXISTS fixes_by_signature ON fixes (signature_id);
 ";
 
-/// Un avistamiento concreto de un problema en una ejecucion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observation {
     pub signature: String,
     pub robot: String,
-    /// Etiqueta relativa de la db; nunca una ruta absoluta.
     pub db_label: String,
     pub version: Option<i64>,
-    /// Linea del pack (`2`, `2.1`): una etiqueta, no una direccion.
     pub line: String,
     pub message: String,
     pub seen_at: NaiveDateTime,
 }
 
-/// Un arreglo conocido, lo justo para reconocer el mismo caso despues.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FixRecord {
     pub signature: String,
     pub robot: String,
-    /// Version de la que se partia y version arreglada, si se conocen.
     pub from_version: Option<i64>,
     pub to_version: Option<i64>,
     pub summary: String,
@@ -123,15 +85,12 @@ pub struct FixRecord {
     pub recorded_at: NaiveDateTime,
 }
 
-/// Lo que el registro sabe de una firma: lo que se le muestra al agente antes de
-/// diagnosticar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureStats {
     pub signature: String,
     pub occurrences: usize,
     pub first_seen: NaiveDateTime,
     pub last_seen: NaiveDateTime,
-    /// Robots afectados, sin repetir y en orden alfabetico.
     pub robots: Vec<String>,
     pub fixes: usize,
 }
@@ -142,7 +101,6 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// Abre el registro, creando el directorio y el esquema si no existen.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
             if !dir.as_os_str().is_empty() {
@@ -165,26 +123,18 @@ impl Registry {
 
     fn init(conn: Connection) -> Result<Self> {
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        // Sqlite no aplica las `REFERENCES` si no se pide.
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(SCHEMA)?;
         Ok(Self { conn })
     }
 
-    /// Registra un avistamiento y devuelve `false` si ya estaba registrado: el
-    /// upsert conserva `first_seen` y no repite el avistamiento.
     pub fn record_observation(&mut self, o: &Observation) -> Result<bool> {
         let seen_at = format_ts(o.seen_at);
-        // `IMMEDIATE` toma el bloqueo de escritura al empezar: sin el, dos
-        // procesos cuentan el mismo avistamiento dos veces.
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let signature_id = ensure_signature(&tx, &o.signature, &seen_at)?;
 
-        // `version IS ?` compara NULL con NULL; con `=` una observacion sin
-        // version no encontraria su duplicado.
-        // `seen_at` es la hora del snapshot observado, no la del barrido.
         let already: bool = tx.query_row(
             "SELECT EXISTS(
                  SELECT 1 FROM observations
@@ -212,8 +162,6 @@ impl Registry {
                 seen_at
             ],
         )?;
-        // MIN/MAX comparan el texto, y el formato de `seen_at` ordena como el
-        // tiempo: un avistamiento desordenado no mueve los extremos.
         tx.execute(
             "UPDATE signatures
                 SET occurrences = occurrences + 1,
@@ -226,8 +174,6 @@ impl Registry {
         Ok(true)
     }
 
-    /// Registra un arreglo y devuelve su id. La firma se crea con `0`
-    /// ocurrencias: un fix no es un avistamiento.
     pub fn record_fix(&mut self, f: &FixRecord) -> Result<i64> {
         let recorded_at = format_ts(f.recorded_at);
         let tx = self
@@ -254,10 +200,6 @@ impl Registry {
         Ok(id)
     }
 
-    /// Busca por subcadena en la firma o en el robot, sin distinguir mayusculas;
-    /// `query` vacia devuelve todo y `limit` es un tope literal (0, nada).
-    ///
-    /// Orden: ocurrencias desc, `last_seen` desc y firma.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SignatureStats>> {
         let needle = query.trim().to_lowercase();
 
@@ -277,7 +219,6 @@ impl Registry {
         })?;
         let firmas = rows.collect::<rusqlite::Result<Vec<_>>>()?;
 
-        // El filtro va en Rust: el `lower()` de sqlite solo pliega ASCII.
         let mut robots: HashMap<i64, Vec<String>> = HashMap::new();
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT signature_id, robot FROM observations ORDER BY signature_id, robot",
@@ -324,7 +265,6 @@ impl Registry {
         Ok(out)
     }
 
-    /// Numero de firmas distintas y de fixes registrados.
     pub fn counts(&self) -> Result<(usize, usize)> {
         let (firmas, fixes): (i64, i64) = self.conn.query_row(
             "SELECT (SELECT COUNT(*) FROM signatures), (SELECT COUNT(*) FROM fixes)",
@@ -335,8 +275,6 @@ impl Registry {
     }
 }
 
-/// Ruta por defecto: `ROCKETDEBUG_HOME`, el directorio de datos de la plataforma
-/// o, como ultimo recurso, el temporal. No crea nada: la crea [`Registry::open`].
 pub fn default_path() -> PathBuf {
     resolve_path(std::env::var_os(HOME_ENV), platform_base())
 }
@@ -367,7 +305,6 @@ fn platform_base() -> PathBuf {
     }
 }
 
-/// Crea la firma con `0` ocurrencias si no existia y devuelve su id.
 fn ensure_signature(tx: &Connection, signature: &str, at: &str) -> Result<i64> {
     tx.execute(
         "INSERT INTO signatures (signature, occurrences, first_seen, last_seen)
@@ -383,8 +320,6 @@ fn ensure_signature(tx: &Connection, signature: &str, at: &str) -> Result<i64> {
     Ok(id)
 }
 
-/// Instante a texto con 9 digitos de fraccion, para que el orden del texto sea
-/// el del tiempo.
 fn format_ts(t: NaiveDateTime) -> String {
     format!(
         "{}.{:09}",
@@ -458,18 +393,12 @@ mod tests {
         let t = crate::db::parse_date("2026-11-17 12:49:22");
         assert_eq!(format_ts(t), "2026-11-17T12:49:22.000000000");
         assert_eq!(parse_ts(&format_ts(t)), t);
-        // La comparacion de textos tiene que dar el mismo orden que el tiempo.
         let antes = format_ts(crate::db::parse_date("2026-11-17 12:49:22"));
         let despues = format_ts(crate::db::parse_date("2026-11-17 12:49:22.5"));
         assert!(antes < despues, "{antes} no ordena antes de {despues}");
-        // Un valor corrupto degrada a epoch en vez de tumbar la busqueda.
         assert_eq!(parse_ts("no-es-fecha"), NaiveDateTime::default());
     }
 
-    /// Re-escanear la misma version no puede inflar el contador: la identidad
-    /// incluye el instante, pero quien registra pasa el del **snapshot**, no el del
-    /// barrido (ver `db::latest_created_at`). Con la misma hora, la segunda pasada
-    /// es idempotente.
     #[test]
     fn la_misma_version_escaneada_dos_veces_no_suma() {
         let mut registro = Registry::in_memory().expect("registro");
@@ -480,7 +409,6 @@ mod tests {
             version: Some(25),
             line: "2.10".to_string(),
             message: "NameError: name 'contador' is not defined".to_string(),
-            // La hora del snapshot v25, no la del reloj.
             seen_at: crate::db::parse_date("2026-11-17 12:47:10"),
         };
         assert!(registro.record_observation(&obs).expect("primera"));
@@ -502,7 +430,6 @@ mod tests {
             "2",
             "2026-11-17 12:49:22",
         );
-        // Mismo defecto en otra ejecucion: otro instante, misma firma -> cuenta.
         let segunda = obs(
             FIRMA_NOMBRE,
             "DEMO_ciclo",
@@ -516,7 +443,6 @@ mod tests {
         assert!(reg.record_observation(&segunda).unwrap(), "otro instante");
         assert!(reg.record_observation(&otra).unwrap(), "otra firma");
 
-        // El motor vuelve a ver la misma linea del mismo log: no suma.
         assert!(
             !reg.record_observation(&segunda).unwrap(),
             "la observacion repetida devuelve false"
@@ -542,8 +468,6 @@ mod tests {
     #[test]
     fn una_version_desconocida_tambien_es_idempotente() {
         let mut reg = Registry::in_memory().unwrap();
-        // En SQL un NULL nunca colisiona con otro NULL: sin el indice con
-        // COALESCE, esta observacion entraria en cada barrido.
         let sin_version = obs("Error:Incorrect padding", "ruido", None, "-", T0);
         assert!(reg.record_observation(&sin_version).unwrap());
         assert!(!reg.record_observation(&sin_version).unwrap());
@@ -560,12 +484,10 @@ mod tests {
         reg.record_observation(&obs(FIRMA_CLAVE, "ventas_mensuales", Some(3), "1", T0))
             .unwrap();
 
-        // Subcadena de la firma, en minusculas aunque la firma tenga mayusculas.
         let por_firma = reg.search("nameerror", 10).unwrap();
         assert_eq!(por_firma.len(), 1);
         assert_eq!(por_firma[0].signature, FIRMA_NOMBRE);
 
-        // Subcadena del robot: devuelve la firma que ese robot sufrio.
         let por_robot = reg.search("MERCADO", 10).unwrap();
         assert_eq!(por_robot.len(), 1);
         assert_eq!(por_robot[0].signature, FIRMA_CLAVE);
@@ -575,10 +497,8 @@ mod tests {
             "todos los robots de la firma, en orden"
         );
 
-        // La misma firma se encuentra tambien por el segundo robot.
         assert_eq!(reg.search("ventas", 10).unwrap().len(), 1);
 
-        // Query vacia (o solo espacios): todo.
         assert_eq!(reg.search("", 10).unwrap().len(), 2);
         assert_eq!(reg.search("   ", 10).unwrap().len(), 2);
 
@@ -634,8 +554,6 @@ mod tests {
         assert_eq!(stats[0].fixes, 1);
         assert_eq!(stats[0].occurrences, 1);
 
-        // Un fix de una firma que el motor aun no habia visto: la firma existe
-        // para que el historial la muestre, pero con 0 avistamientos.
         reg.record_fix(&fix(
             "TimeoutError:esperando_ventana",
             "otro_robot",
@@ -668,22 +586,16 @@ mod tests {
         reg.record_observation(&obs(venenosa, robot, None, "1", T0))
             .unwrap();
 
-        // El texto se busca tal cual lo escribio el usuario, comillas incluidas.
         let hits = reg.search("'; DROP TABLE observations; --", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].signature, venenosa);
         assert_eq!(hits[0].robots, vec![robot]);
 
-        // La base sigue entera: se puede seguir escribiendo y contando.
         assert_eq!(reg.counts().unwrap(), (1, 0));
         assert!(reg
             .record_observation(&obs(venenosa, "otro_robot", None, "1", T0))
             .unwrap());
 
-        // `%` y `_` son literales, no comodines de LIKE: si algun dia el filtro
-        // pasa a SQL, esto lo delata. `%` no aparece en ningun dato, asi que no
-        // encuentra nada aunque un LIKE lo tomase por "cualquier cosa"; `_` solo
-        // casa con el robot que lo lleva escrito, no con cualquier caracter.
         assert!(reg.search("%", 10).unwrap().is_empty());
         assert_eq!(reg.search("_", 10).unwrap().len(), 1);
     }
@@ -701,12 +613,10 @@ mod tests {
         }
         assert!(path.exists(), "el fichero se crea al abrir");
 
-        // Reabrir no falla: todo el esquema es `IF NOT EXISTS`.
         let reg = Registry::open(&path).unwrap();
         assert_eq!(reg.counts().unwrap(), (1, 0));
         assert_eq!(reg.search("firma", 10).unwrap()[0].occurrences, 1);
 
-        // Y sigue siendo escribible: el duplicado no entra aunque se reabra.
         drop(reg);
         let mut reg = Registry::open(&path).unwrap();
         assert!(!reg

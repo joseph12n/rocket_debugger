@@ -1,19 +1,11 @@
-//! Historial de snapshots y atribucion temporal.
-//!
-//! ```text
-//! snapshot_vivo(t) = argmax { created_at <= t }
-//! ```
-
 use chrono::NaiveDateTime;
 
 #[derive(Debug, Clone)]
 pub struct VersionInfo {
     pub id: i64,
     pub created_at: NaiveDateTime,
-    /// Tamano del base64 en la base de datos (no del JSON decodificado).
     pub bytes: i64,
     pub nodes: usize,
-    /// Hash corto del contenido: mismo hash = mismo robot copiado en otra db.
     pub hash: String,
 }
 
@@ -31,7 +23,6 @@ impl VersionIndex {
         self.versions.is_empty()
     }
 
-    /// Version que estaba viva en el instante `t`.
     pub fn live_at(&self, t: NaiveDateTime) -> Option<&VersionInfo> {
         self.versions
             .iter()
@@ -43,7 +34,6 @@ impl VersionIndex {
         self.versions.last()
     }
 
-    /// Version inmediatamente anterior a `id`, si existe.
     pub fn previous(&self, id: i64) -> Option<&VersionInfo> {
         let idx = self.versions.iter().position(|v| v.id == id)?;
         if idx == 0 {
@@ -81,7 +71,6 @@ mod tests {
 
     #[test]
     fn atribuye_al_snapshot_vivo_no_al_ultimo() {
-        // Caso real: el error de `contador` ocurrio a las 12:49:22.
         let t = crate::db::parse_date("2026-11-17 12:49:22");
         let idx = indice();
         let vivo = idx.live_at(t).expect("hay version viva");

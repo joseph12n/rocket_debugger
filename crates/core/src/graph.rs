@@ -1,15 +1,7 @@
-//! Grafo de llamadas entre robots y contrato implicito de variables.
-//!
-//! `execRocketBotDB` ejecuta al hijo en el interprete del padre, asi que el hijo
-//! ve todas sus variables y puede pisarlas: un contrato que no esta escrito en el
-//! robot y que hace que "variable declarada y sin uso" falle en un orquestador.
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::tree::FlatNode;
 
-/// Variables que inyecta el entorno de Rocketbot: no las declara el robot y se
-/// excluyen de las lecturas para no convertir el contrato en ruido.
 const RUNTIME_VARS: [&str; 6] = [
     "rb_home",
     "base_path",
@@ -23,37 +15,26 @@ fn is_runtime(name: &str) -> bool {
     RUNTIME_VARS.contains(&name)
 }
 
-/// Hechos de un robot ya extraidos de su snapshot.
 #[derive(Debug, Clone)]
 pub struct RobotFacts {
     pub db: String,
-    /// Dbs donde vive una copia identica (dedupe por contenido): el runner busca
-    /// al hijo en la db del padre y una copia identica resuelve igual.
     pub also_in: Vec<String>,
     pub name: String,
     pub nodes: Vec<FlatNode>,
-    /// Variables declaradas en el panel (`project.vars`); el hijo las hereda
-    /// todas, incluidas las declaradas a `null`.
     pub declared: BTreeSet<String>,
-    /// Valor declarado de cada variable, para comprobaciones de contenido.
     pub vars: Vec<crate::paths::VarValue>,
 }
 
 impl RobotFacts {
-    /// Etiquetas de db del hecho: la primaria primero y despues las copias.
     pub fn db_labels(&self) -> impl Iterator<Item = &str> {
         std::iter::once(self.db.as_str()).chain(self.also_in.iter().map(String::as_str))
     }
 
-    /// `true` si el hecho vive en esa db, como primaria o como copia identica.
     pub fn lives_in(&self, db: &str) -> bool {
         self.db == db || self.also_in.iter().any(|label| label == db)
     }
 }
 
-/// Arista padre -> hijo, una por nodo `execRocketBotDB`; `line` es la del nodo
-/// en el padre y no es unica (Try/Catch). El runner resuelve el nombre en la db
-/// del padre: si el hijo solo existe fuera, la arista es ambigua, no inexistente.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Edge {
     pub parent: String,
@@ -65,8 +46,6 @@ pub struct Edge {
     pub ambiguous: bool,
 }
 
-/// Contrato implicito de una llamada: `provided` son las declaradas mas las
-/// escritas antes de la llamada; `missing`, lo que el hijo lee y nadie le da.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Contract {
     pub parent: String,
@@ -76,7 +55,6 @@ pub struct Contract {
     pub missing: Vec<String>,
 }
 
-/// Uso de variables de un robot: `variable -> lineas` de lecturas y escrituras.
 pub fn reads_and_writes(
     nodes: &[FlatNode],
 ) -> (BTreeMap<String, Vec<String>>, BTreeMap<String, Vec<String>>) {
@@ -105,8 +83,6 @@ fn push_line(map: &mut BTreeMap<String, Vec<String>>, var: &str, line: &str) {
     }
 }
 
-/// Nombres `{var}` de un texto. Si el contenido no es un identificador se avanza
-/// un caracter: en JSON (`{"url":"{url}"}`) el primer `}` cierra el objeto.
 fn placeholders(text: &str) -> Vec<&str> {
     let bytes = text.as_bytes();
     let mut out = Vec::new();
@@ -130,7 +106,6 @@ fn placeholders(text: &str) -> Vec<&str> {
     out
 }
 
-/// Identificador simple: empieza por letra o `_` y sigue con alfanumericos o `_`.
 fn is_var_name(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
@@ -140,22 +115,16 @@ fn is_var_name(s: &str) -> bool {
     chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
-/// Clave de comparacion de lineas: son rutas de indices, no decimales (`2.10` va
-/// despues de `2.9`). Un tramo no numerico cuenta como 0 y el orden sigue total.
 fn line_key(line: &str) -> Vec<u64> {
     line.split('.')
         .map(|part| part.trim().parse().unwrap_or(0))
         .collect()
 }
 
-/// `a` se ejecuta antes que `b`; una ruta prefijo va antes (`2.10` < `2.10.1`).
 fn is_before(a: &str, b: &str) -> bool {
     line_key(a) < line_key(b)
 }
 
-/// Una arista por nodo `execRocketBotDB`, resolviendo el nombre del hijo en la db
-/// del padre (o en una copia identica); los hijos solo en dbs ajenas generan
-/// aristas `ambiguous` y los inexistentes se omiten y salen en [`missing_calls`].
 pub fn build_edges(facts: &[RobotFacts]) -> Vec<Edge> {
     let mut edges = Vec::new();
 
@@ -204,7 +173,6 @@ pub fn build_edges(facts: &[RobotFacts]) -> Vec<Edge> {
     edges
 }
 
-/// Db compartida donde el padre encontraria al hijo; la db del padre manda.
 fn shared_db(parent: &RobotFacts, candidates: &[&RobotFacts]) -> Option<String> {
     if candidates.iter().any(|fact| fact.lives_in(&parent.db)) {
         return Some(parent.db.clone());
@@ -221,7 +189,6 @@ fn shared_db(parent: &RobotFacts, candidates: &[&RobotFacts]) -> Option<String> 
     shared.into_iter().next().map(str::to_string)
 }
 
-/// Llamada a un robot que no existe en ninguna db del workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MissingCall {
     pub parent: String,
@@ -230,8 +197,6 @@ pub struct MissingCall {
     pub child: String,
 }
 
-/// Llamadas cuyo destino no existe en ninguna db del workspace. [`build_edges`]
-/// las omite (sin hechos no hay contrato); se devuelven con la linea del padre.
 pub fn missing_calls(facts: &[RobotFacts]) -> Vec<MissingCall> {
     let mut out = Vec::new();
 
@@ -243,8 +208,6 @@ pub fn missing_calls(facts: &[RobotFacts]) -> Vec<MissingCall> {
             let Some(child) = child_name(&node.params) else {
                 continue;
             };
-            // Basta el nombre: si el hijo existe solo en otra db, la arista es
-            // ambigua, no inexistente.
             if facts.iter().any(|fact| fact.name == child) {
                 continue;
             }
@@ -260,7 +223,6 @@ pub fn missing_calls(facts: &[RobotFacts]) -> Vec<MissingCall> {
     out
 }
 
-/// El nombre del hijo es el `params` recortado de comillas simples o dobles.
 fn child_name(params: &str) -> Option<String> {
     let unquoted = strip_quotes(params.trim()).trim();
     if unquoted.is_empty() {
@@ -282,7 +244,6 @@ fn strip_quotes(s: &str) -> &str {
     s
 }
 
-/// Calcula el contrato de cada arista; omite las que no tienen hechos de ambos lados.
 pub fn contracts(facts: &[RobotFacts], edges: &[Edge]) -> Vec<Contract> {
     let mut out = Vec::with_capacity(edges.len());
 
@@ -294,8 +255,6 @@ pub fn contracts(facts: &[RobotFacts], edges: &[Edge]) -> Vec<Contract> {
             continue;
         };
 
-        // Declaradas + escritas antes de la llamada: una variable asignada
-        // despues no existe todavia para el hijo.
         let mut provided: BTreeSet<String> = parent.declared.clone();
         for node in &parent.nodes {
             let Some(var) = &node.write_var else {
@@ -331,7 +290,6 @@ pub fn contracts(facts: &[RobotFacts], edges: &[Edge]) -> Vec<Contract> {
     out
 }
 
-/// Busca los hechos por `(db, nombre)` y cae al nombre suelto.
 fn find_fact<'a>(facts: &'a [RobotFacts], db: &str, name: &str) -> Option<&'a RobotFacts> {
     facts
         .iter()
@@ -344,14 +302,10 @@ fn find_fact<'a>(facts: &'a [RobotFacts], db: &str, name: &str) -> Option<&'a Ro
         .or_else(|| facts.iter().find(|fact| fact.name == name))
 }
 
-/// Variables declaradas que nadie lee ni escribe, contando a los hijos, por
-/// nombre de robot. Solo se devuelven los robots con al menos una muerta.
 pub fn unused_declared(
     facts: &[RobotFacts],
     child_contracts: &[Contract],
 ) -> BTreeMap<String, Vec<String>> {
-    // Lecturas de los hijos por robot padre: el uso es el mismo aunque el hijo
-    // se llame varias veces.
     let mut read_by_child: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for contract in child_contracts {
         for child in facts.iter().filter(|fact| fact.name == contract.child) {
@@ -429,8 +383,6 @@ mod tests {
         }
     }
 
-    /// Nodo de llamada tal como lo guarda Studio: el nombre va en `params`, a
-    /// veces entre comillas.
     fn llamada(line: &str, child: &str) -> FlatNode {
         nodo(line, "execRocketBotDB", &format!("\"{child}\""), None)
     }
@@ -492,8 +444,6 @@ mod tests {
         assert!(cs[0].missing.is_empty());
         assert!(cs[1].missing.is_empty());
 
-        // Solo `destinatario` esta muerta: las otras dos las consume un hijo o las
-        // escribe el padre. Sin grafo, las tres parecerian muertas.
         let sin_uso = unused_declared(&facts, &cs);
         assert_eq!(sin_uso.len(), 1);
         assert_eq!(sin_uso["orq"], vec!["destinatario".to_string()]);
@@ -501,7 +451,6 @@ mod tests {
 
     #[test]
     fn la_provision_depende_de_la_linea_de_la_llamada() {
-        // Sin declaradas: aqui solo cuenta lo escrito antes de cada llamada.
         let padre = hechos(
             "A",
             "padre",
@@ -517,7 +466,6 @@ mod tests {
             "A",
             "hijo_a",
             &[],
-            // `base_path` es runtime y no debe aparecer en missing.
             vec![nodo(
                 "1",
                 "log_message",
@@ -611,7 +559,6 @@ mod tests {
         let nodes = vec![
             nodo("1", "setVar", r#"{"url":"{url}","ruta":"{ruta}"}"#, None),
             nodo("2", "if", "len({filas}) > 0 and {contador} < 10", None),
-            // Basura que no es un identificador: no se inventan variables.
             nodo("3", "log_message", "{} {a b} {obj.atributo}", None),
         ];
         let (reads, _) = reads_and_writes(&nodes);
@@ -685,7 +632,6 @@ mod tests {
     fn una_llamada_sin_destino_se_reporta_con_su_linea() {
         let facts = vec![
             hechos("A", "orq", &[], vec![llamada("4", "no_existe")]),
-            // Un robot mas para que el padre no sea el unico hecho de la db.
             hechos("A", "otro", &[], vec![]),
         ];
 
@@ -714,7 +660,6 @@ mod tests {
             hechos("B", "hijo", &[], vec![]),
         ];
 
-        // Existe en otra db: dos llamadas, dos aristas ambiguas, ninguna perdida.
         let edges = build_edges(&facts);
         assert_eq!(edges.len(), 2);
         assert!(edges.iter().all(|edge| edge.ambiguous));
@@ -726,8 +671,6 @@ mod tests {
 
     #[test]
     fn una_copia_identica_en_otra_db_resuelve_en_la_db_del_padre() {
-        // El dedupe deja un solo hecho, con la etiqueta de la db B, pero la copia
-        // A es identica: el padre vive en A y el runner resolveria el nombre alli.
         let padre = hechos("A", "orq", &[], vec![llamada("2", "hijo")]);
         let mut hijo = hechos("B", "hijo", &[], vec![]);
         hijo.also_in = vec!["A".to_string()];
@@ -744,10 +687,6 @@ mod tests {
 
     #[test]
     fn el_contrato_usa_el_homologo_que_vive_en_esa_db() {
-        // `hijo` existe dos veces: una copia identica de A que tambien esta en C
-        // (la db del padre) y un homologo distinto en B. El contrato tiene que
-        // salir de la copia que el runner encontraria en C, no de la primera que
-        // aparezca en la lista.
         let padre = hechos("C", "orq", &[], vec![llamada("2", "hijo")]);
         let homologo = hechos(
             "B",

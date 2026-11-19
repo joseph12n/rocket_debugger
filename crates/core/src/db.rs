@@ -1,6 +1,3 @@
-//! Lectura de `robot.db`: `bots` es un historial; `ORDER BY id` da la evolucion
-//! y `created_at` los intervalos de atribucion de errores.
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -10,7 +7,6 @@ use serde_json::Value;
 
 use crate::error::{Error, Result};
 
-/// Formato de `bots.created_at` observado en el entorno real.
 pub const DATE_FMT: &str = "%Y-%m-%d %H:%M:%S";
 
 pub const DEFAULT_DB: &str = r"C:\Rocketbot\robot.db";
@@ -22,20 +18,15 @@ pub struct RobotSummary {
     pub latest_id: i64,
 }
 
-/// Una fila de `bots`: un snapshot inmutable del robot.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub id: i64,
     pub name: String,
     pub created_at: NaiveDateTime,
-    /// Base64 tal cual esta en la db: mide el tamano crudo sin volver a consultar.
     pub raw_b64: String,
-    /// Proyecto ya decodificado (`project` o la raiz si no hay envoltura).
     pub project: Value,
 }
 
-/// `created_at` del ultimo snapshot del robot, si lo tiene.
-/// Es la hora estable de la observacion: dos escaneos de la misma version no cuentan doble.
 pub fn latest_created_at(conn: &Connection, name: &str) -> Result<Option<NaiveDateTime>> {
     let mut stmt =
         conn.prepare("SELECT created_at FROM bots WHERE name = ?1 ORDER BY id DESC LIMIT 1")?;
@@ -50,7 +41,6 @@ pub fn latest_created_at(conn: &Connection, name: &str) -> Result<Option<NaiveDa
         .filter(|d| *d != NaiveDateTime::default()))
 }
 
-/// `(id, created_at)` del ultimo snapshot del robot, sin decodificar el JSON.
 pub fn latest_snapshot(conn: &Connection, name: &str) -> Result<Option<(i64, NaiveDateTime)>> {
     let mut stmt =
         conn.prepare("SELECT id, created_at FROM bots WHERE name = ?1 ORDER BY id DESC LIMIT 1")?;
@@ -66,7 +56,6 @@ pub fn latest_snapshot(conn: &Connection, name: &str) -> Result<Option<(i64, Nai
     )))
 }
 
-/// Abre en solo lectura. La herramienta nunca escribe `robot.db`.
 pub fn open_readonly(path: &Path) -> Result<Connection> {
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|source| {
         Error::Open {
@@ -76,7 +65,6 @@ pub fn open_readonly(path: &Path) -> Result<Connection> {
     })
 }
 
-/// Tolerante: si el formato cambia, se degrada a epoch en vez de fallar.
 pub fn parse_date(s: &str) -> NaiveDateTime {
     let t = s.trim();
     NaiveDateTime::parse_from_str(t, DATE_FMT)
@@ -99,7 +87,6 @@ pub fn list_robots(conn: &Connection) -> Result<Vec<RobotSummary>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// Todos los snapshots de un robot, en orden cronologico de guardado.
 pub fn load_snapshots(conn: &Connection, name: &str) -> Result<Vec<Snapshot>> {
     let mut stmt =
         conn.prepare("SELECT id, name, created_at, data FROM bots WHERE name = ?1 ORDER BY id")?;
@@ -114,7 +101,6 @@ pub fn load_snapshots(conn: &Connection, name: &str) -> Result<Vec<Snapshot>> {
     Ok(out)
 }
 
-/// Un snapshot concreto, leyendo **solo su fila**: una version corrupta no bloquea la ultima.
 pub fn load_snapshot(conn: &Connection, name: &str, id: i64) -> Result<Snapshot> {
     let mut stmt =
         conn.prepare("SELECT id, name, created_at, data FROM bots WHERE name = ?1 AND id = ?2")?;
@@ -125,7 +111,6 @@ pub fn load_snapshot(conn: &Connection, name: &str, id: i64) -> Result<Snapshot>
     }
 }
 
-/// Ultimo snapshot del robot, sin decodificar el historial.
 pub fn load_latest_snapshot(conn: &Connection, name: &str) -> Result<Option<Snapshot>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, created_at, data FROM bots WHERE name = ?1 ORDER BY id DESC LIMIT 1",
@@ -141,8 +126,6 @@ fn snapshot_from_row(row: &rusqlite::Row<'_>) -> Result<Snapshot> {
     let id: i64 = row.get(0)?;
     let name: String = row.get(1)?;
     let created: Option<String> = row.get(2).ok();
-    // `data` es TEXT (base64) en las bases reales, pero un export puede dejarlo
-    // como BLOB. Se acepta cualquiera de las dos formas.
     let bytes: Vec<u8> = match row.get_ref(3)? {
         rusqlite::types::ValueRef::Null => Vec::new(),
         rusqlite::types::ValueRef::Text(t) => t.to_vec(),
@@ -158,7 +141,6 @@ fn snapshot_from_row(row: &rusqlite::Row<'_>) -> Result<Snapshot> {
     })
 }
 
-/// `bots.data` es base64 de un JSON; se acepta JSON plano (formato no documentado).
 fn decode_project(id: i64, bytes: &[u8]) -> Result<Value> {
     if bytes.is_empty() {
         return Ok(Value::Null);
@@ -183,12 +165,10 @@ fn decode_project(id: i64, bytes: &[u8]) -> Result<Value> {
     serde_json::from_slice::<Value>(&decoded).map_err(|source| Error::Json { id, source })
 }
 
-/// El proyecto vive bajo la clave `project`; si algun dia no esta, la raiz sirve.
 pub fn project_root(json: &Value) -> &Value {
     json.get("project").unwrap_or(json)
 }
 
-/// Comandos de un proyecto ya decodificado (`project.commands`).
 pub fn commands_of(root: &Value) -> &[Value] {
     match root.get("commands").and_then(Value::as_array) {
         Some(commands) => commands.as_slice(),
@@ -196,8 +176,6 @@ pub fn commands_of(root: &Value) -> &[Value] {
     }
 }
 
-/// Descubre bases de datos validas bajo una raiz, excluyendo `backups/` y las
-/// bases auxiliares de Studio que comparten nombre con `robot.db`.
 pub fn discover_databases(root: &Path) -> Result<Vec<PathBuf>> {
     const SKIP_FILES: [&str; 3] = ["analytics.db", "files.db", "nodb.db"];
     let mut out = Vec::new();
@@ -234,8 +212,6 @@ pub fn discover_databases(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-/// Etiqueta de una db sin ruta absoluta: se comparte sin el arbol del usuario.
-/// Normaliza ambos separadores porque `Path` solo reconoce `\` en Windows.
 pub fn label(path: &Path) -> String {
     let normalizado = path.to_string_lossy().replace('\\', "/");
     let mut partes: Vec<&str> = normalizado.split('/').filter(|p| !p.is_empty()).collect();
@@ -249,10 +225,6 @@ pub fn label(path: &Path) -> String {
     }
 }
 
-/// Etiquetas **unicas** y relativas para un conjunto de dbs de un workspace.
-///
-/// Alarga la cola de [`label`] solo para las que colisionan y anade un sufijo hash
-/// determinista si agotan la ruta (issue #18); nunca incluye la unidad ni la raiz.
 pub fn labels_for(paths: &[PathBuf]) -> Vec<String> {
     let normalized: Vec<String> = paths
         .iter()
@@ -273,8 +245,6 @@ pub fn labels_for(paths: &[PathBuf]) -> Vec<String> {
                 .split('/')
                 .filter(|part| !part.is_empty() && *part != ".")
                 .collect();
-            // La unidad no es un tramo de la ruta: no aporta identidad y no debe
-            // viajar en la etiqueta.
             if parts.first().is_some_and(|part| is_windows_drive(part)) {
                 parts.remove(0);
             }
@@ -310,8 +280,6 @@ pub fn labels_for(paths: &[PathBuf]) -> Vec<String> {
         }
     }
 
-    // Misma cola completa en otra unidad o raiz: el hash de la ruta completa las
-    // separa sin revelarla.
     for (index, slot) in assigned.iter_mut().enumerate() {
         if slot.is_some() {
             continue;
@@ -471,16 +439,12 @@ mod tests {
     fn leer_un_snapshot_no_decodifica_las_demas_versiones() {
         let conn = db_con_una_version_corrupta();
 
-        // La ultima se lee aunque la primera este rota: antes `load_snapshot`
-        // decodificaba todo el historial y una version vieja tumbaba el analisis.
         let latest = load_latest_snapshot(&conn, "r")
             .expect("la consulta no falla")
             .expect("hay ultima version");
         assert_eq!(latest.id, 2);
         assert_eq!(load_snapshot(&conn, "r", 2).expect("la v2 es valida").id, 2);
 
-        // La corrupta sigue fallando si se pide ella, y el historial completo
-        // sigue fallando: el que necesita todo el historial es el unico que paga.
         assert!(load_snapshot(&conn, "r", 1).is_err());
         assert!(load_snapshots(&conn, "r").is_err());
         assert!(matches!(
