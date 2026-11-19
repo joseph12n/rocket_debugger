@@ -1,7 +1,3 @@
-//! CLI de rocket_debugger.
-//!
-//! Nunca escribe en `robot.db`: la herramienta detecta, el agente edita.
-
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -20,8 +16,13 @@ mod watch;
     about = "Depurador de flujos Rocketbot: context pack y atribucion de errores"
 )]
 struct Cli {
-    /// Ruta a robot.db. Por defecto la del Studio local, o ROCKETBOT_DB.
-    #[arg(long, global = true, env = "ROCKETBOT_DB", value_name = "RUTA")]
+    #[arg(
+        help = "Ruta a robot.db. Por defecto la del Studio local, o ROCKETBOT_DB.",
+        long,
+        global = true,
+        env = "ROCKETBOT_DB",
+        value_name = "RUTA"
+    )]
     db: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -30,67 +31,78 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Lista los robots de la base de datos con sus versiones.
+    #[command(about = "Lista los robots de la base de datos con sus versiones.")]
     List {
-        /// Directorio del workspace: lista todas las dbs de robots bajo la raiz.
-        #[arg(long, value_name = "DIR")]
+        #[arg(
+            help = "Directorio del workspace: lista todas las dbs de robots bajo la raiz.",
+            long,
+            value_name = "DIR"
+        )]
         workspace: Option<PathBuf>,
     },
 
-    /// Emite el context pack de un robot.
+    #[command(about = "Emite el context pack de un robot.")]
     Pack {
         robot: String,
-        /// Snapshot concreto (por defecto, el ultimo).
-        #[arg(long)]
+        #[arg(help = "Snapshot concreto (por defecto, el ultimo).", long)]
         snapshot: Option<i64>,
-        /// Imprime la contabilidad de tokens en stderr.
-        #[arg(long)]
+        #[arg(help = "Imprime la contabilidad de tokens en stderr.", long)]
         stats: bool,
-        /// Analiza el grafo contra todas las dbs de robots bajo este directorio.
-        #[arg(long, value_name = "DIR")]
+        #[arg(
+            help = "Analiza el grafo contra todas las dbs de robots bajo este directorio.",
+            long,
+            value_name = "DIR"
+        )]
         workspace: Option<PathBuf>,
     },
 
-    /// Busca bases de datos de robots bajo una raiz.
+    #[command(about = "Busca bases de datos de robots bajo una raiz.")]
     Dbs {
         #[arg(long, default_value = r"C:\rocketbot_bots")]
         root: PathBuf,
     },
 
-    /// Vista de bandeja de entrada: que robots estan mal y cuanto, en una pantalla.
+    #[command(
+        about = "Vista de bandeja de entrada: que robots estan mal y cuanto, en una pantalla."
+    )]
     Review {
-        /// Recorre todas las dbs de robots bajo este directorio.
-        #[arg(long, value_name = "DIR")]
+        #[arg(
+            help = "Recorre todas las dbs de robots bajo este directorio.",
+            long,
+            value_name = "DIR"
+        )]
         workspace: Option<PathBuf>,
-        /// Maximo de robots en la tabla; el resto se resume en una linea.
-        #[arg(long, default_value_t = review::DEFAULT_LIMIT, value_name = "N")]
+        #[arg(help = "Maximo de robots en la tabla; el resto se resume en una linea.", long, default_value_t = review::DEFAULT_LIMIT, value_name = "N")]
         limit: usize,
-        /// No lee `C:\Rocketbot\logs`: mas rapido y hermetico.
-        #[arg(long)]
+        #[arg(help = "No lee `C:\\Rocketbot\\logs`: mas rapido y hermetico.", long)]
         no_logs: bool,
     },
 
-    /// Vigila la db y alimenta el registro de problemas sin intervencion.
+    #[command(about = "Vigila la db y alimenta el registro de problemas sin intervencion.")]
     Watch {
-        /// Recorre todas las dbs de robots bajo este directorio; sin el flag, solo la db de `--db`.
-        #[arg(long, value_name = "DIR")]
-        workspace: Option<PathBuf>,
-        /// Segundos entre pasadas.
         #[arg(
+            help = "Recorre todas las dbs de robots bajo este directorio; sin el flag, solo la db de `--db`.",
+            long,
+            value_name = "DIR"
+        )]
+        workspace: Option<PathBuf>,
+        #[arg(
+            help = "Segundos entre pasadas.",
             long,
             default_value_t = watch::DEFAULT_INTERVAL_SECS,
             value_name = "S",
             allow_negative_numbers = true
         )]
         interval: i64,
-        /// Una sola pasada y sale.
-        #[arg(long)]
+        #[arg(help = "Una sola pasada y sale.", long)]
         once: bool,
-        /// Fichero del registro; por defecto `ROCKETDEBUG_REGISTRY` o el del motor.
-        #[arg(long, value_name = "RUTA")]
+        #[arg(
+            help = "Fichero del registro; por defecto `ROCKETDEBUG_REGISTRY` o el del motor.",
+            long,
+            value_name = "RUTA"
+        )]
         registry: Option<PathBuf>,
-        /// No lee `C:\Rocketbot\logs`.
-        #[arg(long)]
+        #[arg(help = "No lee `C:\\Rocketbot\\logs`.", long)]
         no_logs: bool,
     },
 }
@@ -131,7 +143,6 @@ fn main() -> anyhow::Result<()> {
             let log_source = logs_dir
                 .is_dir()
                 .then_some((logs_dir, rocketdebug_core::pack::DEFAULT_LOG_FILES));
-            // El CLI si comprueba el dispositivo: `RUTA_MIGRADA` necesita saber si la ruta existe aqui.
             let path_probe = LocalPaths::from_env(&db_path);
 
             let pack = match &workspace {
@@ -149,14 +160,12 @@ fn main() -> anyhow::Result<()> {
                 Some(dir) => {
                     let discovered = db::discover_databases(dir)
                         .with_context(|| format!("descubriendo bases en {}", dir.display()))?;
-                    // La db pedida va primera y no se repite: es la etiqueta del robot analizado.
                     let mut paths = vec![db_path.clone()];
                     paths.extend(
                         discovered
                             .into_iter()
                             .filter(|path| !same_file(path, &db_path)),
                     );
-                    // Etiquetas unicas para todo el conjunto: dos entregas con el mismo `sandbox\robot.db` no colisionan como identidad.
                     let labels = db::labels_for(&paths);
                     let label = labels[0].clone();
 
@@ -164,7 +173,6 @@ fn main() -> anyhow::Result<()> {
                     for (path, ws_label) in paths.iter().zip(labels.iter()).skip(1) {
                         match db::open_readonly(path) {
                             Ok(ws_conn) => opened.push((ws_conn, ws_label.clone())),
-                            // Una db ilegible no puede tumbar el pack: se avisa y el analisis sigue.
                             Err(e) => eprintln!("aviso: {e}"),
                         }
                     }
@@ -232,7 +240,6 @@ fn main() -> anyhow::Result<()> {
             limit,
             no_logs,
         } => {
-            // El motor no lee logs: este CLI decide si este entorno los tiene.
             let log_source = if no_logs {
                 None
             } else {
@@ -276,9 +283,6 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Lista las dbs de un workspace y resume cuanto se deduplica.
-///
-/// Cuenta hechos, no nombres: dos homonimos con contenido distinto son dos.
 fn list_workspace(dir: &Path) -> anyhow::Result<()> {
     let found = db::discover_databases(dir)
         .with_context(|| format!("descubriendo bases en {}", dir.display()))?;
@@ -289,7 +293,6 @@ fn list_workspace(dir: &Path) -> anyhow::Result<()> {
 
     let mut opened = Vec::new();
     let mut rows = 0usize;
-    // Etiquetas unicas para todo el conjunto: dos entregas anidadas no se confunden.
     let labels = db::labels_for(&found);
     for (path, label) in found.into_iter().zip(labels) {
         let conn = match db::open_readonly(&path) {
@@ -331,16 +334,10 @@ fn print_robots(label: &str, robots: &[db::RobotSummary]) {
     }
 }
 
-/// Etiqueta de la db sin ruta absoluta: `BBRE2\robot_run.db`.
-///
-/// Se normalizan las dos formas de separador: `Path` solo reconoce `\` en Windows.
 pub(crate) fn db_label(path: &Path) -> String {
     db::label(path)
 }
 
-/// `true` si las dos rutas son el mismo fichero.
-///
-/// Se canonizan porque `--db` puede venir relativa y el descubrimiento absoluta.
 fn same_file(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
@@ -358,7 +355,6 @@ mod tests {
             db_label(Path::new(r"C:\Users\josep\proyecto\entrega\robot_run.db")),
             "entrega\\robot_run.db"
         );
-        // La misma ruta en forma posix: el resultado no puede depender del host.
         assert_eq!(
             db_label(Path::new("/home/josep/proyecto/entrega/robot_run.db")),
             "entrega\\robot_run.db"
@@ -368,7 +364,6 @@ mod tests {
 
     #[test]
     fn la_misma_db_por_dos_rutas_no_se_duplica() {
-        // El descubrimiento y `--db` no tienen por que escribir la ruta igual.
         assert!(same_file(Path::new("."), Path::new("./")));
         assert!(!same_file(
             Path::new("."),

@@ -1,8 +1,3 @@
-//! Vigilante del registro: lo alimenta sin que nadie se acuerde de hacerlo.
-//!
-//! Solo lee la db; el unico fichero que escribe es el registro. La primera pasada
-//! analiza todos los robots y las siguientes solo los que cambiaron de `latest_id`.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -13,13 +8,10 @@ use rocketdebug_core::analysis::{self, Analysis};
 use rocketdebug_core::db;
 use rocketdebug_core::registry::{Observation, Registry};
 
-/// Segundos entre pasadas si no se pide otro intervalo (30 s).
 pub const DEFAULT_INTERVAL_SECS: i64 = 30;
 
-/// Variable de entorno que fija la ruta del registro cuando no se pasa `--registry`.
 pub const REGISTRY_ENV: &str = "ROCKETDEBUG_REGISTRY";
 
-/// Lo que el comando necesita, ya resuelto por el CLI.
 #[derive(Debug)]
 pub struct WatchOptions {
     pub db: PathBuf,
@@ -30,9 +22,6 @@ pub struct WatchOptions {
     pub log_source: Option<(PathBuf, usize)>,
 }
 
-/// Valida `--interval` y lo convierte en duracion.
-///
-/// Cero o negativo se rechaza: no es "lo mas rapido", es un bucle en vacio.
 pub fn interval_from_secs(secs: i64) -> anyhow::Result<Duration> {
     if secs <= 0 {
         bail!("--interval {secs}: tiene que ser >= 1 segundo (0 o negativo gira en vacio)");
@@ -40,7 +29,6 @@ pub fn interval_from_secs(secs: i64) -> anyhow::Result<Duration> {
     Ok(Duration::from_secs(secs as u64))
 }
 
-/// Ruta del registro: `--registry`, o `ROCKETDEBUG_REGISTRY`, o la del motor.
 pub fn resolve_registry(flag: Option<PathBuf>) -> PathBuf {
     flag.or_else(|| {
         std::env::var_os(REGISTRY_ENV)
@@ -50,9 +38,6 @@ pub fn resolve_registry(flag: Option<PathBuf>) -> PathBuf {
     .unwrap_or_else(rocketdebug_core::registry::default_path)
 }
 
-/// Ejecuta `rocketdebug watch`.
-///
-/// Novedades por stdout; avisos por stderr, para leer stdout sin filtrar.
 pub fn run(options: &WatchOptions, out: &mut dyn Write) -> anyhow::Result<()> {
     let mut registry = Registry::open(&options.registry)
         .with_context(|| format!("abriendo el registro {}", options.registry.display()))?;
@@ -90,8 +75,6 @@ pub fn run(options: &WatchOptions, out: &mut dyn Write) -> anyhow::Result<()> {
     }
 }
 
-/// Una pasada: mira las dbs, analiza lo que cambio y lo registra.
-/// Devuelve el estado con el que se compara la pasada siguiente.
 fn pasada(
     options: &WatchOptions,
     anterior: &BTreeMap<String, i64>,
@@ -105,7 +88,6 @@ fn pasada(
         .log_source
         .as_ref()
         .map(|(dir, max_files)| (dir.as_path(), *max_files));
-    // Un instante por pasada: repetir el barrido en el mismo segundo es idempotente.
     let visto_en = ahora();
 
     let mut ids = BTreeMap::new();
@@ -115,7 +97,6 @@ fn pasada(
     for fuente in &vigiladas {
         let conn = match db::open_readonly(&fuente.path) {
             Ok(conn) => conn,
-            // Una db ilegible se avisa y se omite: no aborta la pasada.
             Err(e) => {
                 eprintln!("aviso: {}: {e}", fuente.label);
                 continue;
@@ -166,7 +147,6 @@ fn pasada(
                     writeln!(out, "{}", linea_robot(&nombre, &recuento, lee_logs))?;
                     analizados += 1;
                 }
-                // Un robot ilegible se avisa, pero cuenta como visto: se reintenta al guardarlo, no cada pasada.
                 Err(e) => eprintln!("aviso: {nombre}: {e}"),
             }
         }
@@ -185,7 +165,6 @@ struct EstadoPasada {
     analizados: usize,
 }
 
-/// Registra los errores de un analisis; omite lo que el robot escribe con `log_message`.
 fn registrar(
     registry: &mut Registry,
     conn: &rusqlite::Connection,
@@ -194,7 +173,6 @@ fn registrar(
     analysis: &Analysis,
     respaldo: chrono::NaiveDateTime,
 ) -> Recuento {
-    // La hora es la del snapshot observado: con la del reloj, cada pasada contaria la misma version como nueva.
     let visto_en = rocketdebug_core::db::latest_created_at(conn, robot)
         .ok()
         .flatten()
@@ -230,7 +208,6 @@ fn registrar(
     recuento
 }
 
-/// Lo que una pasada dejo en el registro para un robot.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Recuento {
     nuevas: usize,
@@ -239,7 +216,6 @@ struct Recuento {
 }
 
 impl Recuento {
-    /// Texto de novedades; con cero dice por que (con `--no-logs` no se leyo el log).
     fn resumen(&self, lee_logs: bool) -> String {
         let mut texto = format!(
             "{}, {}",
@@ -271,7 +247,6 @@ fn linea_robot(nombre: &str, recuento: &Recuento, lee_logs: bool) -> String {
     format!("{nombre}: {}", recuento.resumen(lee_logs))
 }
 
-/// `1 nueva` / `N nuevas`: la salida la lee una persona, no un parser.
 fn cuenta(n: usize, singular: &str, plural: &str) -> String {
     if n == 1 {
         format!("1 {singular}")
@@ -280,7 +255,6 @@ fn cuenta(n: usize, singular: &str, plural: &str) -> String {
     }
 }
 
-/// Linea de arranque: que se vigila, que registro se escribe y cada cuanto.
 fn cabecera(descripcion: &str, options: &WatchOptions) -> String {
     let mut texto = format!(
         "watch: {descripcion} | registro {} | cada {} s",
@@ -299,9 +273,6 @@ fn cabecera(descripcion: &str, options: &WatchOptions) -> String {
     texto
 }
 
-/// Claves que hay que analizar: nuevas o con `latest_id` distinto.
-///
-/// El orden de salida es el de `ahora`, no el del mapa interno.
 pub fn robots_cambiados(antes: &BTreeMap<String, i64>, ahora: &[(String, i64)]) -> Vec<String> {
     ahora
         .iter()
@@ -310,7 +281,6 @@ pub fn robots_cambiados(antes: &BTreeMap<String, i64>, ahora: &[(String, i64)]) 
         .collect()
 }
 
-/// Hora del sello; `chrono` va sin `clock`, el reloj lo pone quien llama.
 fn ahora() -> chrono::NaiveDateTime {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -321,7 +291,6 @@ fn ahora() -> chrono::NaiveDateTime {
         .unwrap_or_default()
 }
 
-/// Dbs que se vigilan: la de `--db` (exista o no), o las del workspace.
 fn fuentes(options: &WatchOptions) -> anyhow::Result<Vec<Fuente>> {
     match &options.workspace {
         None => Ok(vec![Fuente {
@@ -342,23 +311,18 @@ fn fuentes(options: &WatchOptions) -> anyhow::Result<Vec<Fuente>> {
     }
 }
 
-/// Una db vigilada: donde esta y como se llama en la salida.
 struct Fuente {
     path: PathBuf,
     label: String,
 }
 
 impl Fuente {
-    /// Clave del estado: lleva la etiqueta delante para separar homonimos entre dbs.
     fn clave(&self, robot: &str) -> String {
         format!("{}\\{robot}", self.label)
     }
 }
 
-/// Etiqueta de una db del workspace: su ruta relativa a la raiz.
-/// Unica (dos entregas anidadas no colisionan) y sin la ruta absoluta del usuario.
 fn etiqueta_relativa(root: &Path, path: &Path) -> String {
-    // Se compara texto con `/` normalizado: `Path` solo trata `\` como separador en Windows.
     let normal = |p: &Path| p.to_string_lossy().replace('\\', "/");
     let (root_n, path_n) = (normal(root), normal(path));
     let raiz = root_n.trim_end_matches('/');
@@ -396,13 +360,8 @@ mod tests {
 
     use base64::Engine as _;
 
-    /// Sufijo unico por directorio: dos tests en paralelo no pueden compartir ruta.
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-    /// Directorio temporal que se borra solo.
-    ///
-    /// No se usa `tempfile` a proposito: son `create_dir_all` + `remove_dir_all`, y
-    /// el CLI no necesita una dependencia mas para eso.
     struct TempDir {
         path: PathBuf,
     }
@@ -429,19 +388,12 @@ mod tests {
 
     impl Drop for TempDir {
         fn drop(&mut self) {
-            // En Windows un fichero aun abierto no se puede borrar: si falla, el
-            // directorio queda en %TEMP% y el test no falla por la limpieza.
             let _ = std::fs::remove_dir_all(&self.path);
         }
     }
 
-    /// Proyecto minimo que el motor sabe decodificar y analizar.
     const ROBOT: &str = r#"{"project":{"commands":[{"father":"log_message","line":"1","command":"__NAME__","children":[],"else":[]}],"vars":[],"profile":{"name":"__NAME__"}}}"#;
 
-    /// Crea un `robot.db` con la tabla `bots` que lee el motor.
-    ///
-    /// Mismo patron que `crates/cli/tests/review.rs`: `id`, `name`, `created_at` y
-    /// `data` (base64 del JSON del proyecto).
     fn make_db(dir: &Path, robots: &[&str]) -> PathBuf {
         std::fs::create_dir_all(dir).expect("creo la carpeta de la db");
         let path = dir.join("robot.db");
@@ -480,7 +432,6 @@ mod tests {
         .expect("inserto el snapshot");
     }
 
-    /// Guarda una version nueva: es lo que hace Studio al pulsar "guardar".
     fn guardar_otra_version(db: &Path, id: i64, name: &str) {
         let conn = rusqlite::Connection::open(db).expect("abro la db temporal");
         insertar(&conn, id, name, &ROBOT.replace("__NAME__", name));
@@ -507,10 +458,9 @@ mod tests {
         .into_iter()
         .collect();
         let ahora = vec![
-            ("alpha".to_string(), 1), // igual: no se toca
-            ("beta".to_string(), 9),  // guardado nuevo
-            ("delta".to_string(), 2), // robot nuevo en la db
-                                      // gamma desaparecio: no hay nada que analizar y no puede salir
+            ("alpha".to_string(), 1),
+            ("beta".to_string(), 9),
+            ("delta".to_string(), 2),
         ];
 
         assert_eq!(robots_cambiados(&antes, &ahora), vec!["beta", "delta"]);
@@ -530,7 +480,6 @@ mod tests {
             .collect();
         let ahora = vec![("alpha".to_string(), 1), ("beta".to_string(), 2)];
         assert!(robots_cambiados(&antes, &ahora).is_empty());
-        // Y un robot desaparecido tampoco se anuncia como cambio.
         let ahora = vec![("alpha".to_string(), 1)];
         assert!(robots_cambiados(&antes, &ahora).is_empty());
     }
@@ -568,11 +517,9 @@ mod tests {
             !texto.contains("--once"),
             "sin `--once` no se anuncia una pasada unica: {texto}"
         );
-        // Sin logs lo dice: no habra observaciones y no se puede fingir que si.
         assert!(texto.contains("--no-logs"), "{texto}");
         assert!(texto.contains("no recibira observaciones"), "{texto}");
 
-        // Con `--once` y logs, ni lo uno ni lo otro.
         opciones.once = true;
         opciones.log_source = Some((dir.path().to_path_buf(), 20));
         let texto = cabecera("db entrega\\robot.db", &opciones);
@@ -591,7 +538,6 @@ mod tests {
             linea_robot("DEMO_ciclo", &recuento, true),
             "DEMO_ciclo: 3 nuevas, 2 ya conocidas"
         );
-        // Singular: la salida la lee una persona.
         let una = Recuento {
             nuevas: 1,
             conocidas: 1,
@@ -601,7 +547,6 @@ mod tests {
             linea_robot("uno", &una, true),
             "uno: 1 nueva, 1 ya conocida"
         );
-        // Sin defectos, con logs y solo mensajes del robot.
         let solo_logs = Recuento {
             nuevas: 0,
             conocidas: 0,
@@ -612,7 +557,6 @@ mod tests {
             "charla: 0 nuevas, 0 ya conocidas \
              (sin defectos que registrar: 2 mensajes de log_message omitidos)"
         );
-        // Sin logs no se puede afirmar que el robot este limpio.
         let nada = Recuento::default();
         assert_eq!(
             linea_robot("mudo", &nada, false),
@@ -624,7 +568,6 @@ mod tests {
     fn el_registro_explicito_manda() {
         let path = PathBuf::from("C:\\datos\\problems.db");
         assert_eq!(resolve_registry(Some(path.clone())), path);
-        // Sin flag, el camino por defecto del motor termina siempre igual.
         assert_eq!(
             resolve_registry(None).file_name().and_then(|n| n.to_str()),
             Some("problems.db")
@@ -633,7 +576,6 @@ mod tests {
 
     #[test]
     fn una_pasada_crea_el_registro_y_dice_que_no_registro_nada() {
-        // El caso que se pone en una tarea programada: db temporal y `--once`.
         let dir = TempDir::new("once");
         let db = make_db(dir.path(), &["alpha"]);
         let registro = dir.path().join("problems.db");
@@ -652,7 +594,6 @@ mod tests {
         assert!(texto.contains("| registro "), "{texto}");
         assert!(texto.contains("cada 30 s"), "{texto}");
         assert!(texto.contains("--no-logs"), "{texto}");
-        // Sin logs: cero observaciones, y se dice; no se finge un robot limpio.
         assert!(
             texto.contains(
                 "alpha: 0 nuevas, 0 ya conocidas (--no-logs: no se leyeron logs, 0 observaciones)"
@@ -660,7 +601,6 @@ mod tests {
             "{texto}"
         );
 
-        // Y el registro esta vacio de verdad, no solo en el texto.
         let registro = Registry::open(&dir.path().join("problems.db")).expect("abro el registro");
         assert_eq!(registro.counts().expect("cuento"), (0, 0));
     }
@@ -673,7 +613,6 @@ mod tests {
         let opciones = options(&db, &registro);
         let mut reg = Registry::open(&registro).expect("abro el registro");
 
-        // Primera pasada: todos los robots, y se dice.
         let mut primera = Vec::new();
         let estado = pasada(&opciones, &BTreeMap::new(), &mut reg, &mut primera)
             .expect("la primera pasada no falla");
@@ -682,7 +621,6 @@ mod tests {
         assert!(texto.contains("alpha: "), "{texto}");
         assert!(texto.contains("beta: "), "{texto}");
 
-        // Segunda pasada sin tocar la db: silencio (nada de lineas en stdout).
         let mut segunda = Vec::new();
         let estado_igual = pasada(&opciones, &estado.ids, &mut reg, &mut segunda)
             .expect("la segunda pasada no falla");
@@ -694,7 +632,6 @@ mod tests {
         assert_eq!(estado_igual.analizados, 0);
         assert_eq!(estado_igual.ids, estado.ids);
 
-        // Se guarda una version nueva de beta: la tercera pasada solo mira beta.
         guardar_otra_version(&db, 3, "beta");
         let mut tercera = Vec::new();
         let estado_cambio = pasada(&opciones, &estado_igual.ids, &mut reg, &mut tercera)
@@ -712,7 +649,6 @@ mod tests {
     fn un_robot_ilegible_no_aborta_la_pasada() {
         let dir = TempDir::new("roto");
         let db = make_db(dir.path(), &["alpha"]);
-        // Una fila que no se puede decodificar: el listado la ve, el analisis no.
         let conn = rusqlite::Connection::open(&db).expect("abro la db temporal");
         insertar(&conn, 2, "roto", "esto-no-es-base64");
         drop(conn);
@@ -737,7 +673,6 @@ mod tests {
             !texto.contains("roto: "),
             "del robot ilegible no se inventa una linea: {texto}"
         );
-        // Cuenta como visto: se reintenta cuando lo guarden, no en cada vuelta.
         assert_eq!(estado.analizados, 1);
         assert_eq!(estado.ids.len(), 2);
     }
@@ -757,8 +692,6 @@ mod tests {
             .expect("la pasada del workspace no falla");
 
         let texto = String::from_utf8(salida).expect("utf-8");
-        // La etiqueta es la ruta relativa a la raiz: se distinguen las dos entregas y
-        // no se filtra la ruta absoluta del temporal.
         assert!(
             texto.contains("entrega_a\\robot.db\\alpha: "),
             "falta la etiqueta de la primera db: {texto}"
@@ -774,7 +707,6 @@ mod tests {
         assert_eq!(estado.analizados, 2);
         assert_eq!(estado.dbs_leidas, 2);
 
-        // Un robot homonimo en dos dbs son dos robots distintos en el estado.
         make_db(&dir.path().join("entrega_c"), &["alpha"]);
         let mut salida = Vec::new();
         let estado = pasada(&opciones, &estado.ids, &mut reg, &mut salida)
@@ -798,11 +730,8 @@ mod tests {
             una, otra,
             "dos dbs con el mismo fichero no pueden compartir clave"
         );
-        // Y la etiqueta no lleva la ruta absoluta de la raiz.
         assert!(!una.contains("C:"), "{una}");
 
-        // La misma funcion en forma posix: el separador del host no puede cambiar
-        // el resultado (CI compila en Linux y esto lo detecto alli).
         let posix = etiqueta_relativa(
             Path::new("/home/u/proyectos"),
             Path::new("/home/u/proyectos/a/entrega/robot.db"),

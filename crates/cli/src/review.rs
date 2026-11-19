@@ -1,8 +1,3 @@
-//! Presentacion de la vista de bandeja: la agregacion vive en el motor.
-//!
-//! Aqui solo se resuelve el origen y se pinta: los numeros y el orden vienen de
-//! `rocketdebug_core` y no se recalculan.
-
 use std::path::Path;
 use std::time::Instant;
 
@@ -10,20 +5,14 @@ use anyhow::Context;
 use rocketdebug_core::db;
 use rocketdebug_core::review::{review_conn, review_workspace, Review, ReviewRow};
 
-/// Filas que se listan sin `--limit` (20); el resto se resume en una linea.
 pub const DEFAULT_LIMIT: usize = 20;
 
-/// Anchos minimos de cada columna: si un valor no cabe, la columna se ensancha.
 const NAME_MIN_WIDTH: usize = 24;
 const NODES_MIN_WIDTH: usize = 8;
 const ACTIONABLE_MIN_WIDTH: usize = 5;
 const HYGIENE_MIN_WIDTH: usize = 5;
 const LIVE_MIN_WIDTH: usize = 7;
 
-/// Ejecuta `rocketdebug review` y escribe la vista en stdout.
-///
-/// `log_source` ya viene resuelto por el CLI; el tiempo va por stderr, fuera del
-/// contrato de formato.
 pub fn run(
     db_path: &Path,
     workspace: Option<&Path>,
@@ -45,7 +34,6 @@ pub fn run(
     Ok(())
 }
 
-/// Abre el origen (una db o el workspace) y pide la foto al motor.
 fn collect(
     db_path: &Path,
     workspace: Option<&Path>,
@@ -61,13 +49,11 @@ fn collect(
         Some(dir) => {
             let paths = db::discover_databases(dir)
                 .with_context(|| format!("descubriendo bases en {}", dir.display()))?;
-            // Etiquetas unicas para el conjunto: dos arboles con el mismo fichero no colisionan.
             let labels = db::labels_for(&paths);
             let mut opened = Vec::with_capacity(paths.len());
             for (path, label) in paths.iter().zip(labels) {
                 match db::open_readonly(path) {
                     Ok(conn) => opened.push((conn, label)),
-                    // Una db ilegible se avisa y se omite; el resto del panorama sigue.
                     Err(e) => eprintln!("aviso: {e}"),
                 }
             }
@@ -80,7 +66,6 @@ fn collect(
     }
 }
 
-/// Cabecera de la vista: prefijo historico del CLI sobre la etiqueta del motor.
 fn display_source(review: &Review, workspace: bool) -> String {
     if workspace {
         format!("workspace: {}", dbs_label(review.dbs))
@@ -89,7 +74,6 @@ fn display_source(review: &Review, workspace: bool) -> String {
     }
 }
 
-/// Cuantas filas aporto cada db, por stderr; en un workspace distingue entregas.
 fn report_dbs(review: &Review) {
     let mut actual: Option<&str> = None;
     let mut count = 0usize;
@@ -108,7 +92,6 @@ fn report_dbs(review: &Review) {
     }
 }
 
-/// `1 db` / `N dbs`: la salida la lee una persona, no un parser.
 fn dbs_label(dbs: usize) -> String {
     if dbs == 1 {
         "1 db".to_string()
@@ -117,7 +100,6 @@ fn dbs_label(dbs: usize) -> String {
     }
 }
 
-/// Anchos de las cinco columnas, calculados sobre las filas que se van a pintar.
 struct ColumnWidths {
     name: usize,
     nodes: usize,
@@ -163,7 +145,6 @@ impl ColumnWidths {
     }
 }
 
-/// `1 robot` / `N robots`: la salida la lee una persona, no un parser.
 fn robots_label(count: usize) -> String {
     if count == 1 {
         "1 robot".to_string()
@@ -172,7 +153,6 @@ fn robots_label(count: usize) -> String {
     }
 }
 
-/// Ancho de una columna numerica: el minimo del formato o mas si el valor no cabe.
 fn numeric_width(minimum: usize, values: impl Iterator<Item = usize>) -> usize {
     match values.max() {
         Some(maximum) => {
@@ -187,9 +167,6 @@ fn numeric_width(minimum: usize, values: impl Iterator<Item = usize>) -> usize {
     }
 }
 
-/// Pinta el panorama: cabecera, tabla ordenada y totales.
-///
-/// Los totales suman todas las filas, no solo las que entran por `limit`.
 pub fn format_review(source: &str, review: &mut Review, limit: usize) -> String {
     review.sorted();
 
@@ -259,7 +236,6 @@ mod tests {
         }
     }
 
-    /// Nombres de las filas de la tabla, en el orden en que salen.
     fn table_names(out: &str) -> Vec<&str> {
         out.lines()
             .skip(3)
@@ -299,7 +275,6 @@ mod tests {
             "resultado: 8 accionables, 12 higiene, 0 vivos en 3 robots\n",
         );
         assert_eq!(out, expected);
-        // Alineacion = todas las lineas de la tabla miden lo mismo.
         let table: Vec<usize> = out
             .lines()
             .filter(|line| line.starts_with("  "))
@@ -321,7 +296,6 @@ mod tests {
         let out = format_review(r"db: BBRE2\robot_run.db", &mut review, 2);
         assert!(out.contains("  ... y 1 robot mas\n"), "{out}");
         assert_eq!(table_names(&out), ["ML_06_Legacy", "reporteMercadolibre"]);
-        // Los totales cuentan las tres filas aunque solo se pinten dos.
         assert!(
             out.ends_with("resultado: 8 accionables, 12 higiene, 0 vivos en 3 robots\n"),
             "{out}"

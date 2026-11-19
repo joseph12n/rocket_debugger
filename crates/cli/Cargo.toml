@@ -12,18 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 rocketdebug-core = { path = "../core" }
-# El vigilante necesita la conexion para leer la hora del snapshot observado.
 rusqlite = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
-# Solo para sellar la hora de una observacion del vigilante: `registry` no lee el
-# reloj, se lo inyecta quien llama (chrono va sin la feature `clock` en todo el
-# workspace). Es la misma dependencia que usa el crate MCP para lo mismo.
 chrono = { workspace = true }
 
 [dev-dependencies]
-# Solo para crear la `robot.db` sintetica del test de integracion de `review`: el
-# comando abre las dbs con `rocketdebug_core::db::open_readonly` y nunca escribe,
-# asi que el CLI no necesita SQL en su codigo de produccion.
 rusqlite = { workspace = true }
 base64 = { workspace = true }
