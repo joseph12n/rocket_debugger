@@ -1,54 +1,28 @@
 //! Normalizacion de mensajes de error en firmas estables.
 //!
-//! Un mismo defecto se repite con datos distintos: la variable del `NameError`,
-//! la linea del runner, la ruta del fichero, el puerto de conexion... Si cada
-//! variante cuenta como un error diferente, cuarenta `NameError` de la misma
-//! causa parecen cuarenta problemas y el panel deja de ser accionable. Aqui se
-//! reducen a una sola firma:
-//!
-//! ```text
-//! NameError: name 'contador' is not defined  ─┐
-//!                                            ├→ NameError:name:{var}:not_defined
-//! NameError: name 'similitud' is not defined ─┘
-//! ```
-//!
-//! Los patrones se reconocen recorriendo la cadena a mano. El crate no depende de
-//! `regex` a proposito: una dependencia mas en el motor no se paga con lo que
-//! aporta aqui, y todos los patrones son cortos y locales.
+//! La firma ignora los valores variables (nombres, hashes, rutas, puertos, horas)
+//! y es idempotente: el mismo defecto da el mismo texto entre ejecuciones.
 
-/// Firma de un `NameError` con variable desconocida: el nombre no forma parte
-/// del defecto, solo el hecho de que llegue sin definir.
 const UNDEFINED_NAME: &str = "name:{var}:not_defined";
 
-/// Cabecera con la que Python abre una traza: a partir de ahi el mensaje deja de
-/// describir el defecto.
+/// Cabecera de la traza de Python: a partir de ahi el mensaje no describe el defecto.
 const TRACEBACK: &str = "Traceback (most recent call last):";
 
 /// Modulos de la plataforma que fallan por defecto propio, no por el robot.
 const MODULE_DEFECTS: [&str; 4] = ["datatransform", "getbot", "getbot_service", "zdev"];
 
-/// Longitud minima para tratar una tira hexadecimal como hash. 32 es el tamano
-/// de un MD5 y el minimo de los hashes que Rocketbot escribe en los mensajes;
-/// por debajo, cualquier numero largo se confundiria con un hash.
+/// 32 es el tamano de un MD5: por debajo, cualquier numero largo se confundiria con un hash.
 const HASH_MIN: usize = 32;
 
-/// De quien es el fallo, a grandes rasgos.
-///
-/// La UI agrupa por esto. La distincion importa: mezclar ruido del motor con
-/// defectos del robot es lo que hace que el panel este siempre en rojo y se deje
-/// de mirar.
+/// De quien es el fallo: la UI agrupa por esto y mezclar ruido del motor con defectos del robot la deja en rojo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
-    /// Fallo en codigo del robot (o de un modulo de usuario).
     Robot,
-    /// Ruido conocido del motor: no se puede arreglar desde el robot.
     EngineNoise,
-    /// Defecto de un modulo de la plataforma (`datatransform`, `getbot`, `zdev`).
     Module,
 }
 
-/// Firma estable de un mensaje de error: dos ejecuciones del mismo defecto dan el
-/// mismo texto aunque cambien la variable, la linea, la ruta, el puerto o el hash.
+/// Firma estable: dos ejecuciones del mismo defecto dan el mismo texto aunque cambien variable, linea, ruta, puerto o hash.
 ///
 /// ```
 /// use rocketdebug_core::signature::normalize;
@@ -63,10 +37,7 @@ pub enum ErrorKind {
 /// );
 /// ```
 pub fn normalize(message: &str) -> String {
-    // Una traza de Python no describe el defecto: cambia con el numero de linea de
-    // la version instalada y romperia la agrupacion entre ejecuciones del mismo
-    // error. Fuera de la traza, los saltos de linea son espacios como cualquier
-    // otro (asi llega el mensaje tras `parse_text`).
+    // Una traza de Python no describe el defecto: cambia con la version instalada y rompe la agrupacion entre ejecuciones.
     let sin_traza = match message.find(TRACEBACK) {
         Some(at) => &message[..at],
         None => message,
@@ -81,12 +52,7 @@ pub fn normalize(message: &str) -> String {
     collapse_ws(&s)
 }
 
-/// Ruido conocido del motor. Son fallos del propio Rocketbot que no se pueden
-/// arreglar desde el robot; clasificarlos como del robot envenena el informe.
-///
-/// - `zdev`: el decodificador base64 interno (`Incorrect padding`,
-///   `Invalid base64-encoded string`, `UnicodeDecodeError`).
-/// - `getbot`: `IndexError` al resolver una llamada a subrobot.
+/// Ruido conocido del motor (zdev base64, getbot IndexError): no se arregla desde el robot y envenena el informe.
 pub fn is_engine_noise(message: &str) -> bool {
     let lower = message.to_lowercase();
     match exception_module(message) {
@@ -99,8 +65,6 @@ pub fn is_engine_noise(message: &str) -> bool {
         Some(module) if module.eq_ignore_ascii_case("getbot") => {
             lower.contains("indexerror") || lower.contains("list index out of range")
         }
-        // El fallo de base64 tambien aparece a nivel de motor, sin el marcador
-        // `<string> zdev`; su propio texto lo delata.
         None => {
             lower.contains("incorrect padding") || lower.contains("invalid base64-encoded string")
         }
@@ -108,12 +72,7 @@ pub fn is_engine_noise(message: &str) -> bool {
     }
 }
 
-/// Clasifica un error por responsable.
-///
-/// Un fallo en un modulo de la plataforma es `Module` aunque ademas sea ruido
-/// conocido (`zdev`, `getbot`): las dos cosas son ciertas y la UI necesita el
-/// responsable, no la etiqueta mas amable. `EngineNoise` queda para el ruido de
-/// motor que no se puede atribuir a un modulo concreto.
+/// Un modulo de plataforma es Module aunque ademas sea ruido conocido; EngineNoise solo para ruido sin modulo concreto.
 pub fn classify(message: &str) -> ErrorKind {
     let en_modulo_defectuoso = exception_module(message).is_some_and(|module| {
         MODULE_DEFECTS
@@ -129,15 +88,10 @@ pub fn classify(message: &str) -> ErrorKind {
     ErrorKind::Robot
 }
 
-/// Modulo nombrado en `EXCEPTION IN (<string> X, L_n "")`.
-///
-/// El `<string> X` es el modulo interno que estaba ejecutando el runner, no el
-/// comando del robot: es el unico dato con el que se puede decidir si el fallo es
-/// del robot o de la plataforma.
+/// El modulo del `<string> X` del runner: unico dato para decidir si el fallo es del robot o de la plataforma.
 fn exception_module(message: &str) -> Option<&str> {
     const MARK: &str = "<string>";
-    // `to_ascii_lowercase` conserva la longitud en bytes y las fronteras de
-    // caracter, asi que el indice del `to_ascii_lowercase` vale sobre el original.
+    // `to_ascii_lowercase` conserva longitud y fronteras de caracter: el indice vale sobre el original.
     let lower = message.to_ascii_lowercase();
     let at = lower.find(MARK)?;
     let rest = message.get(at + MARK.len()..)?.trim_start();
@@ -180,17 +134,12 @@ fn is_path_byte(b: u8) -> bool {
         )
 }
 
-/// Caracter que impide que un `/` inicie una ruta absoluta. Evita que
-/// `http://host/x` se parta por la mitad y que `foo/bar` (ruta relativa) cuente.
+/// Impide que un `/` inicie ruta: `http://host/x` no se parte y `foo/bar` no cuenta.
 fn is_posix_path_blocker(b: u8) -> bool {
     is_word_byte(b) || matches!(b, b'-' | b'.' | b'/' | b'\\' | b':' | b'$')
 }
 
-/// Sustituye rutas absolutas por `<path>`.
-///
-/// Se corta en el primer espacio: un `C:\Program Files\...` produce dos
-/// fragmentos. Es una decision consciente; tragarte la prosa por intentar
-/// adivinar donde acaba la ruta desestabiliza mas firmas de las que arregla.
+/// Sustituye rutas absolutas por `<path>`; se corta en el primer espacio (decision consciente).
 fn mask_paths(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
@@ -243,8 +192,7 @@ fn unc_path_end(s: &str, i: usize) -> Option<usize> {
     Some(scan_path(s, i + 2))
 }
 
-/// Ruta absoluta POSIX. El primer caracter tras `/` tiene que ser de nombre de
-/// fichero, para no confundir `//` ni `http://` con una ruta.
+/// Ruta absoluta POSIX; el primer caracter tras `/` debe ser de nombre de fichero.
 fn posix_path_end(s: &str, i: usize) -> Option<usize> {
     let bytes = s.as_bytes();
     if bytes.get(i) != Some(&b'/') {
@@ -269,8 +217,7 @@ fn scan_path(s: &str, start: usize) -> usize {
     i
 }
 
-/// `L_123` -> `L_?`. Se exige inicio de palabra para no tocar nombres de robot
-/// como `ML_06_Legacy`.
+/// `L_123` -> `L_?`, exigiendo inicio de palabra para no tocar nombres como `ML_06_Legacy`.
 fn mask_line_numbers(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
@@ -324,10 +271,7 @@ fn mask_hashes(s: &str) -> String {
     out
 }
 
-/// Puerto en `host:8080` -> `host:<port>`, y en `port 8080` -> `port <port>`.
-///
-/// El host de delante no puede ser solo digitos: si lo fuera, `12:43:47` de una
-/// hora se tomaria por un puerto.
+/// Puerto en `host:8080` -> `host:<port>` y en `port 8080` -> `port <port>`; `12:43:47` es una hora.
 fn mask_ports(s: &str) -> String {
     let s = mask_colon_ports(s);
     mask_labelled_ports(&s)
@@ -357,7 +301,6 @@ fn mask_colon_ports(s: &str) -> String {
             let digitos = end - (i + 1);
             let frontera = end == bytes.len() || !bytes[end].is_ascii_digit();
             if host_con_nombre && (2..=5).contains(&digitos) && frontera {
-                // Se copia hasta el `:` inclusive; los digitos se sustituyen.
                 out.push_str(&s[copied..i + 1]);
                 out.push_str("<port>");
                 copied = end;
@@ -389,8 +332,6 @@ fn mask_labelled_ports(s: &str) -> String {
             let fin_palabra = tras >= bytes.len() || !is_word_byte(bytes[tras]);
             if fin_palabra {
                 let mut j = tras;
-                // Admite tambien la forma etiquetada con dos puntos:
-                // `puerto: 8080` / `port : 8080`.
                 while j < bytes.len() && bytes[j] == b' ' {
                     j += 1;
                 }
@@ -407,7 +348,6 @@ fn mask_labelled_ports(s: &str) -> String {
                 let digitos = j - inicio;
                 let frontera = j == bytes.len() || !bytes[j].is_ascii_digit();
                 if (2..=5).contains(&digitos) && frontera {
-                    // Se copia hasta el primer digito, no hasta el final.
                     out.push_str(&s[copied..inicio]);
                     out.push_str("<port>");
                     copied = j;
@@ -470,8 +410,7 @@ fn compact_undefined_name(s: &str) -> String {
     out
 }
 
-/// Quita el espacio tras `Error:` / `Exception:`: la firma no depende de como
-/// formatee Python la excepcion.
+/// Quita el espacio tras `Error:` / `Exception:`: la firma no depende de como formatee Python.
 fn compact_error_colon(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut comiendo = false;

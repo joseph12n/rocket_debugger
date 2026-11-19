@@ -1,8 +1,8 @@
 //! Render del context pack y contabilidad de tokens.
 //!
-//! El entregable para el agente es markdown, no JSON: es ~4x mas compacto que el
-//! JSON equivalente (las claves se repiten una vez por nodo) y un modelo lo lee
-//! igual de bien. Cada seccion del render es una card de la UI futura.
+//! Markdown, no JSON: cada seccion del render es una card de la UI futura.
+//! Presupuesto: ~2,5k tokens por robot, 5+5 hallazgos, params a 100 y mensajes a
+//! 140. Un tope que recorta declara el total real en cabecera y linea de cierre.
 
 use std::fmt::Write as _;
 
@@ -15,57 +15,26 @@ use crate::rules::{Finding, Severity};
 
 /// Se cortan los parametros largos: un `execJs` de 2 KB aporta el inicio, no el final.
 pub const PARAM_MAX: usize = 100;
-/// Se cortan los valores de variables por la misma razon.
 pub const VAR_MAX: usize = 60;
 
-/// Descripcion del perfil en la cabecera del render.
-///
-/// Pasa por el mismo [`field`] que el resto de campos: una descripcion real puede
-/// citar la carpeta de trabajo (`exporta a C:/Users/<x>/...`) y esa ruta
-/// identifica a la persona igual que un parametro; antes se pintaba con `one_line`
-/// y salia entera (issue #18). El tope evita que una descripcion larga se coma la
-/// cabecera, que es lo primero que lee el agente.
+/// Tope de la descripcion; pasa por [`field`] porque puede citar la carpeta de trabajo (issue #18).
 const DESCRIPTION_MAX: usize = 200;
 
-/// Llamadas de contrato que se listan por seccion.
-///
-/// Un orquestador con 8 hijos ya ocupa ~30 lineas de contrato; el resto del detalle
-/// se consulta en el pack del subrobot, que es donde se puede actuar.
+/// Contrato listado por seccion: el resto se consulta en el pack del subrobot.
 pub const CONTRACT_MAX: usize = 8;
 
-/// Variables por linea de contrato.
-///
-/// El orquestador real declara 86 variables y sus hijos leen 83: listarlas todas
-/// convertiria el contrato en la seccion mas grande del pack sin decir nada nuevo
-/// (lo que importa es *que* se provee, no el inventario completo).
 pub const CONTRACT_VARS_MAX: usize = 6;
 
-/// Errores vivos que se listan uno a uno.
-///
-/// Medido en la entrega BBRE2: `reporteMercadolibre` deja 49 firmas historicas y
-/// `ML_06_Legacy` 5. Con seis filas el agente ve las que mas duelen; el resto es
-/// cola larga y se cuenta, no se lista.
+/// Medido en BBRE2: seis filas ensenan los errores que duelen; el resto se cuenta.
 pub const ERRORS_LIVE_MAX: usize = 6;
-/// Errores con parametros cambiados que se listan: son los candidatos a "el fix
-/// estaba a medias" y con tres basta para decidir si hay que mirar el diff.
 pub const ERRORS_PAYLOAD_MAX: usize = 3;
-/// Nombres que se listan en las lineas agregadas (historicos y plataforma).
 pub const ERRORS_GROUP_MAX: usize = 3;
 
-/// Mensaje de error en el render.
-///
-/// El analisis ya lo recorta a 160; aqui se baja a 120 porque va multiplicado por
-/// cada fila y la seccion entera tiene que caber en el presupuesto del pack.
 const ERROR_MESSAGE_SHOW: usize = 120;
 
-/// Hallazgos que se listan por seccion (accionables e higiene por separado).
-///
-/// El analisis ya no recorta: trae todos y aqui se decide cuanto se pinta. Cinco
-/// por seccion es lo que se lee de verdad; el resto se cuenta en la cabecera y en
-/// una linea final, para que el lector sepa que existe y no lo confunda con el total.
+/// Cinco por seccion: lo que se lee de verdad; el resto se cuenta en cabecera y cierre.
 pub const MAX_PER_SECTION: usize = 5;
 
-/// Un mensaje que cita una ruta larga no puede comerse el presupuesto de contexto.
 const FINDING_MESSAGE_MAX: usize = 140;
 const FINDING_FIX_MAX: usize = 120;
 
@@ -87,13 +56,11 @@ impl Sizing {
     }
 }
 
-/// Estimacion de tokens. ~3,7 caracteres por token para JSON/codigo; el error
-/// tipico es +-15%, suficiente para tomar decisiones de context budget.
+/// Estimacion a ~3,7 caracteres por token para JSON/codigo; error tipico +-15%.
 pub fn estimate_tokens(s: &str) -> usize {
     (s.chars().count() as f64 / 3.7).ceil() as usize
 }
 
-/// Colapsa saltos de linea para que un nodo ocupe una sola linea en el render.
 fn one_line(s: &str) -> String {
     let joined = s.replace("\r\n", " ⏎ ").replace('\n', " ⏎ ");
     joined.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -108,22 +75,13 @@ fn clip(s: &str, max: usize) -> String {
 }
 
 fn field(s: &str, max: usize) -> String {
-    // La garantia de privacidad vive aqui, en el unico helper por el que pasan
-    // los parametros del flujo, los mensajes y arreglos de hallazgos y los
-    // mensajes de error. Replicarla en cada `writeln!` seria olvidarse de uno el
-    // dia que se anada una seccion nueva (issue #16).
-    //
-    // Enmascarar antes de recortar importa: si el corte cae dentro del nombre del
-    // usuario o del correo, el tramo ya no coincide con el patron y se escaparia
-    // medio dato.
+    // La politica de redaccion (rutas y correos) vive solo aqui: enmascarar antes
+    // de recortar; si no, un corte dentro del nombre o del correo se escaparia (issue #16).
     let masked = redact::mask_user_paths(&one_line(s));
     clip(&redact::mask_emails(&masked), max)
 }
 
-/// Pinta un cubo de hallazgos con tope y aviso de lo omitido.
-///
-/// El recuento por severidad es de lo **mostrado**, y si se recorta se dice
-/// explicitamente ("5 de 23") porque el silencio hacia creer que ese era el total.
+/// Cubo con tope: si se recorta se dice ("5 de 23"); el silencio hacia creer que era el total.
 fn render_bucket(o: &mut String, title: &str, findings: &[Finding]) {
     if findings.is_empty() {
         return;
@@ -150,7 +108,6 @@ fn render_bucket(o: &mut String, title: &str, findings: &[Finding]) {
         count(Severity::Baja)
     );
     for f in findings.iter().take(shown) {
-        // Linea vacia = el hallazgo afecta al robot entero, no a un nodo.
         let line = if f.line.is_empty() {
             "L-".to_string()
         } else {
@@ -172,10 +129,7 @@ fn render_bucket(o: &mut String, title: &str, findings: &[Finding]) {
     let _ = writeln!(o);
 }
 
-/// Lista de variables acotada: `a, b, c (+3 mas)`.
-///
-/// `(nada)` para la lista vacia: en el contrato, "provee: " y nada detras se lee
-/// como un error de formato, no como "no provee ninguna".
+/// Lista acotada (`a, b, c (+3 mas)`); la vacia se pinta `(nada)` para no parecer un error de formato.
 fn vars_preview(vars: &[String]) -> String {
     if vars.is_empty() {
         return "(nada)".to_string();
@@ -268,30 +222,13 @@ impl Pack {
         o
     }
 
-    /// Hallazgos del motor de reglas, en dos secciones: accionables e higiene.
-    ///
-    /// Se separan porque compiten por el mismo cupo y no valen lo mismo: una
-    /// colision de linea es un defecto concreto y ``SIN_TRY`` es una carencia
-    /// general del robot. Medido sobre 3 dbs reales: las reglas genericas eran el
-    /// 36% de lo mostrado y hundian la precision util al 64%.
-    ///
-    /// Cada seccion se omite si esta vacia: un "## Hallazgos (0)" ensena al agente
-    /// a saltarsela, y el dia que tenga contenido la saltara igual.
+    /// Accionables e higiene separados: compiten por el mismo cupo y no valen lo mismo; la seccion vacia se omite.
     fn render_findings(&self, o: &mut String) {
         render_bucket(o, "Hallazgos", &self.analysis.findings);
         render_bucket(o, "Higiene", &self.analysis.higiene);
     }
 
-    /// Contrato implicito de las llamadas `execRocketBotDB`.
-    ///
-    /// El hijo corre dentro del interprete del padre y ve su panel de variables; eso
-    /// no esta escrito en ningun sitio y es la causa de los `NameError` que el log
-    /// solo muestra cuando ya fallo. Aqui se ve antes de ejecutar: que provee el
-    /// padre (`contracts_out`) y que espera de quien lo llama (`contracts_in`).
-    ///
-    /// Las llamadas que el grafo no pudo resolver van al final: una llamada ambigua
-    /// (el hijo solo existe en otra db) o sin destino (no existe en ninguna) es un
-    /// fallo latente que en runtime aparece como robot no encontrado en la linea N.
+    /// Contrato implicito de execRocketBotDB: lo que provee el padre, lo que espera el hijo y lo que el grafo no resolvio.
     fn render_contracts(&self, o: &mut String) {
         let analysis = &self.analysis;
         let sin_resolver =
@@ -333,9 +270,6 @@ impl Pack {
             );
         }
 
-        // Llamadas que el grafo no pudo resolver. No se callan: una llamada a un robot
-        // inexistente revienta en runtime en esa linea, y un homonimo fuera de la db
-        // es una conjetura que conviene saber que se esta haciendo.
         for call in &analysis.missing_calls {
             let _ = writeln!(
                 o,
@@ -351,22 +285,10 @@ impl Pack {
         let _ = writeln!(o);
     }
 
-    /// Errores del log ya atribuidos al snapshot que estaba vivo.
-    ///
-    /// Va detras del contrato y delante de las variables: es la unica seccion que
-    /// dice que se rompio **de verdad**, y el orden importa porque el pack se lee
-    /// de arriba abajo y se deja de leer muy pronto.
-    ///
-    /// Se acota por cubos y por filas (6 vivos + 3 con payload cambiado + 3
-    /// agregadas). El caso real de `reporteMercadolibre` son 51 firmas: listarlas
-    /// seria la mitad del presupuesto de 2,5k tokens en cola larga, justo lo que
-    /// hace inutil el panel de errores. Los historicos y el ruido se resumen en una
-    /// linea: ni se arreglan hoy ni se arreglan desde el robot.
+    /// Errores atribuidos al snapshot vivo; se acota por cubos y filas y el resto se cuenta.
     fn render_errors(&self, o: &mut String) {
         let errors = &self.analysis.errors;
         if errors.is_empty() {
-            // Un "## Errores (0)" ensena a saltarse la seccion: se omite entera,
-            // igual que los hallazgos y el contrato.
             return;
         }
         let _ = writeln!(
@@ -418,11 +340,7 @@ impl Pack {
         let _ = writeln!(o);
     }
 
-    /// Seccion de errores como documento independiente.
-    ///
-    /// La tool `robot_errors` la consume sin recortar el markdown del pack: el
-    /// formato de la seccion sigue viviendo en un solo sitio y cambiar el orden de
-    /// las secciones no puede romper la tool (deuda de #18).
+    /// Seccion de errores como documento independiente: el formato vive en un solo sitio y la tool no depende del orden.
     pub fn render_errors_section(&self) -> Option<String> {
         let mut out = String::new();
         self.render_errors(&mut out);
@@ -430,7 +348,6 @@ impl Pack {
         (!text.is_empty()).then(|| text.to_string())
     }
 
-    /// Resumen de una linea para el listado de robots.
     pub fn summary_line(&self) -> String {
         format!(
             "{:<26} v{:<3} nodos {:>3}  vars {:>3}  prof {}",
@@ -455,16 +372,7 @@ fn missing_line(o: &mut String, contract: &Contract) {
     );
 }
 
-/// Una fila de error: `- x3 L2.10 evaluateIf: NameError: name 'contador'...`.
-///
-/// La linea vacia se rotula `L-`: es un error que no se pudo ubicar en el
-/// snapshot, y dejarla en blanco se leeria como un fallo de formato.
-/// Diff entre dos snapshots, listo para que lo lea un agente.
-///
-/// Los params pasan por el mismo [`field`] que el resto del render, asi que el
-/// enmascarado de rutas y el recorte valen tambien aqui. Eso importa porque
-/// [`crate::diff`] devuelve los params **crudos** a proposito: la politica de
-/// redaccion vive en un solo sitio y este es.
+/// Diff entre dos snapshots listo para un agente; los params pasan por [`field`] y salen enmascarados.
 pub fn render_changes(changes: &[NodeChange]) -> String {
     let mut o = String::with_capacity(1024);
     let _ = writeln!(o, "{}", diff::summarize(changes));
@@ -480,7 +388,6 @@ pub fn render_changes(changes: &[NodeChange]) -> String {
         };
         let mut linea = format!("{signo} L{} {}", c.line, c.command);
         match c.kind {
-            // En un `Added` el contenido esta en `after`; en un `Removed`, en `before`.
             ChangeKind::Added | ChangeKind::Removed => {
                 let texto = c.after.as_deref().or(c.before.as_deref()).unwrap_or("");
                 let _ = write!(linea, "  {}", field(texto, PARAM_MAX));
@@ -517,9 +424,6 @@ fn error_line(item: &ErrorItem) -> String {
 }
 
 /// Modulo de plataforma tal como lo nombra el runner: `EXCEPTION IN (<string> X, ...)`.
-///
-/// Se toma del mensaje porque el cubo ya viene decidido por `signature::classify`;
-/// aqui solo se necesita el nombre para mostrar y no merece otra clasificacion.
 fn module_of(message: &str) -> Option<&str> {
     const MARK: &str = "<string>";
     let at = message.find(MARK)?;
@@ -537,17 +441,12 @@ fn module_of(message: &str) -> Option<&str> {
 fn platform_source(item: &ErrorItem) -> &str {
     match module_of(&item.message) {
         Some(module) => module,
-        // Sin marcador de modulo queda el comando del robot, que al menos dice
-        // por donde pasaba el flujo cuando fallo la plataforma.
         None if item.command.is_empty() => "?",
         None => item.command.as_str(),
     }
 }
 
-/// `setVar(x3), raise_exception(x3), module(x3) …` con el recorte declarado.
-///
-/// Cuenta ocurrencias, no firmas: el agente necesita saber que lo que mas se
-/// repitio fue `setVar`, no cuantas variantes de mensaje tuvo.
+/// `setVar(x3), raise_exception(x3), module(x3) ...`: cuenta ocurrencias, no firmas, y declara el recorte.
 fn tally_preview(items: &[ErrorItem], clave: impl Fn(&ErrorItem) -> &str) -> String {
     let mut cuenta: Vec<(&str, usize)> = Vec::new();
     for item in items {
@@ -569,7 +468,6 @@ fn tally_preview(items: &[ErrorItem], clave: impl Fn(&ErrorItem) -> &str) -> Str
         .collect::<Vec<_>>()
         .join(", ");
     if cuenta.len() > ERRORS_GROUP_MAX {
-        // Un solo caracter: la linea ya esta en el limite del presupuesto.
         out.push_str(" …");
     }
     out
