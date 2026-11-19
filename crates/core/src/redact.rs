@@ -1,38 +1,18 @@
 //! Redaccion de secretos antes de entregar un context pack.
 //!
-//! El pack se comparte (lo lee un agente, viaja en una incidencia, lo pinta la UI)
-//! y `project.vars` de un robot real guarda credenciales: Rocketbot las cifra en
-//! formato Fernet (`gAAAAA`) y el usuario las bautiza con nombres que ya dicen lo
-//! que son (`db_password`, `api_key`). Sin filtrarlas, el render publica el
-//! secreto tal cual.
-//!
-//! # Decisiones
-//!
-//! - Se redacta **al construir el pack**, no en el render: todos los consumidores
-//!   (markdown, JSON, MCP) salen del mismo dato limpio y no queda una segunda ruta
-//!   por la que el secreto escape.
-//! - Se decide por **nombre**, no por valor: el valor es indistinguible de un texto
-//!   normal. Un falso positivo borra informacion util, asi que solo entran terminos
-//!   que de verdad nombran credenciales (`usuario`, `contador` o `url` se quedan
-//!   fuera: saber a quien apunta una peticion es parte del diagnostico).
-//! - En variables, una ruta local se sustituye entera por `(ruta)`: no ayuda a
-//!   diagnosticar y el pack promete no llevar rutas absolutas del usuario. En
-//!   parametros y hallazgos la ruta **si** es diagnostico, asi que [`mask_user_paths`]
-//!   tapa solo el tramo del usuario (`%USERPROFILE%`, `~`) y conserva la cola.
-//! - Ese enmascarado va en el render: el pack conserva el parametro fiel y la
-//!   garantia queda concentrada en un punto de salida (ver [`crate::render`]).
+//! Orden de reglas: cifrado > nombre sensible > ruta. En parametros y hallazgos
+//! solo se enmascara el tramo del usuario (`%USERPROFILE%`, `~/`); los correos
+//! quedan como `j***@dominio`. La redaccion se aplica al construir el pack, no
+//! en el render: todos los consumidores salen del mismo dato limpio.
 
 use crate::pathscan;
 
 /// Firma de Fernet: Rocketbot cifra asi lo que guarda en `project.vars`.
 const FERNET_PREFIX: &str = "gAAAAA";
 
-/// Un token Fernet util ronda el centenar de caracteres. Por debajo de este
-/// umbral es mas probable que sea un texto casual que empieza igual.
+/// Un token Fernet util ronda el centenar de caracteres; por debajo es texto casual.
 const MIN_ENCRYPTED_LEN: usize = 40;
 
-/// Terminos que nombran credenciales. `contrasena` y `contraseña` conviven porque
-/// el mismo usuario escribe las dos formas segun el teclado que tenga a mano.
 const SENSITIVE_TERMS: [&str; 14] = [
     "pass",
     "password",
@@ -50,8 +30,7 @@ const SENSITIVE_TERMS: [&str; 14] = [
     "auth",
 ];
 
-/// Marcador de un valor que llega cifrado. Dice que hay secreto sin publicarlo y
-/// sin fingir que la variable esta vacia.
+/// Marcador de un valor que llega cifrado.
 pub const ENCRYPTED_MARK: &str = "(valor cifrado)";
 
 /// Marcador de un valor oculto por el nombre de su variable.
@@ -60,17 +39,13 @@ pub const HIDDEN_MARK: &str = "(oculto)";
 /// Marcador de un valor que es una ruta absoluta del equipo del usuario.
 pub const PATH_MARK: &str = "(ruta)";
 
-/// Detecta un blob Fernet sin validarlo de verdad: basta con que sea plausible.
-/// Si un texto normal empieza por `gAAAAA` y sigue en el alfabeto base64,
-/// ocultarlo no pierde informacion util.
+/// Detecta un blob Fernet plausible, sin validarlo de verdad.
 pub fn is_encrypted(value: &str) -> bool {
     let v = value.trim();
     if v.len() < MIN_ENCRYPTED_LEN || !v.starts_with(FERNET_PREFIX) {
         return false;
     }
-    // Fernet usa base64 URL-safe (`-`, `_`), pero se acepta tambien el estandar
-    // (`+`, `/`) y el relleno `=`: el objetivo es no dejar pasar el blob, no
-    // auditar como lo codifico Rocketbot.
+    // Se aceptan los dos alfabetos base64: el objetivo es no dejar pasar el blob.
     v.bytes().all(is_base64_byte)
 }
 
@@ -78,8 +53,7 @@ fn is_base64_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'-' | b'_' | b'=')
 }
 
-/// El nombre declara una credencial, comparando sin distinguir mayusculas y sin
-/// que estorben los separadores (`db_password`, `DB-PASSWORD`, `api_key`).
+/// El nombre declara una credencial, sin distinguir mayusculas ni separadores.
 pub fn is_sensitive_name(name: &str) -> bool {
     let lower = name.trim().to_lowercase();
     if lower.is_empty() {
@@ -92,17 +66,11 @@ pub fn is_sensitive_name(name: &str) -> bool {
 }
 
 fn name_matches(lower: &str, flat: &str, term: &str) -> bool {
-    // Token exacto: `db_pass` -> `pass`.
     if lower.split(is_separator).any(|token| token == term) {
         return true;
     }
-    // Pegado: `mipassword` no es un token, y `api_key` no puede serlo porque el
-    // propio termino lleva separador. Se comparan ambos sin separadores para que
-    // `api_key`, `apikey` y `API-KEY` sean el mismo nombre.
-    //
-    // La subcadena puede marcar de mas en un nombre raro (`compass` contiene
-    // `pass`), pero ocultar un valor inocuo cuesta menos que publicar una
-    // credencial, y el dano queda acotado al valor de esa variable.
+    // La subcadena puede marcar de mas (`compass` contiene `pass`): ocultar un
+    // valor inocuo cuesta menos que publicar una credencial.
     flat.contains(strip_separators(term).as_str())
 }
 
@@ -114,31 +82,22 @@ fn strip_separators(s: &str) -> String {
     s.chars().filter(|c| !is_separator(*c)).collect()
 }
 
-/// Raices POSIX que en la practica solo aparecen como ruta absoluta del usuario:
-/// nadie escribe `/home/...` para referirse a una carpeta relativa del proyecto.
+/// Raices POSIX que en la practica solo aparecen como ruta absoluta.
 const POSIX_ROOTS: [&str; 6] = ["/home/", "/Users/", "/var/", "/tmp/", "/etc/", "/opt/"];
 
-/// UNC de Windows: `\\servidor\recurso`.
 const UNC_PREFIX: &str = r"\\";
 
-/// `true` si el valor lleva una ruta absoluta del sistema. Las URLs y las rutas
-/// relativas quedan fuera a proposito: `https://x` y `reporte.xlsx` son datos de
-/// diagnostico, no ubicaciones de la maquina de quien ejecuto el robot.
+/// `true` si el valor lleva una ruta absoluta; URLs y rutas relativas quedan fuera.
 pub fn is_absolute_path(value: &str) -> bool {
     let v = value.trim();
     if v.is_empty() {
         return false;
     }
-    // Los tramos de URL se calculan una sola vez: `file:///C:/x` contiene `C:/`
-    // y aun asi no es una ruta del usuario.
     let urls = pathscan::url_spans(v);
     has_windows_drive(v, &urls) || has_unc(v) || has_posix_root(v, &urls)
 }
 
-/// Unidad Windows (`C:\`, `C:/`). La letra no puede continuar un esquema: en
-/// `https://` la `s` va delante de `:` y el patron la confundiria con una unidad,
-/// que es justo el falso positivo que hay que evitar. Tampoco cuenta si cae
-/// dentro de una URL ya abierta (`file:///C:/x`).
+/// Unidad Windows (`C:\`, `C:/`), si no continua un esquema ni cae en una URL.
 fn has_windows_drive(text: &str, urls: &[(usize, usize)]) -> bool {
     text.as_bytes().windows(3).enumerate().any(|(i, w)| {
         w[0].is_ascii_alphabetic()
@@ -149,10 +108,7 @@ fn has_windows_drive(text: &str, urls: &[(usize, usize)]) -> bool {
     })
 }
 
-/// UNC (`\\servidor\recurso`), al principio del valor o embebida en una
-/// expresion (`copia en \\srv\share\datos`). Se exige que el servidor no este
-/// vacio y que vuelva a aparecer un separador: `\\` suelto es un escape, no una
-/// ruta.
+/// UNC (`\\servidor\recurso`), al inicio o embebida; un `\\` suelto es un escape.
 fn has_unc(text: &str) -> bool {
     if text.starts_with(UNC_PREFIX) {
         return true;
@@ -168,8 +124,7 @@ fn has_unc(text: &str) -> bool {
     })
 }
 
-/// Raiz POSIX conocida. Se exige que abra token: en `carpeta/home/x` el prefijo
-/// aparece, pero la ruta es relativa y se conserva.
+/// Raiz POSIX conocida que abre token: en `carpeta/home/x` es relativa.
 fn has_posix_root(text: &str, urls: &[(usize, usize)]) -> bool {
     POSIX_ROOTS.iter().any(|root| {
         text.match_indices(root)
@@ -177,13 +132,10 @@ fn has_posix_root(text: &str, urls: &[(usize, usize)]) -> bool {
     })
 }
 
-/// Marcador del tramo del usuario en una ruta Windows.
 const USERPROFILE_MARK: &str = "%USERPROFILE%";
 
-/// Marcador del tramo del usuario en una ruta POSIX (y en la forma macOS).
 const HOME_MARK: &str = "~";
 
-/// Tramo de una ruta que hay que substituir: hasta donde llega (byte) y por que.
 struct MaskedPrefix {
     end: usize,
     mark: &'static str,
@@ -191,23 +143,13 @@ struct MaskedPrefix {
 
 /// Sustituye el tramo del usuario de las rutas absolutas por un marcador estable.
 ///
-/// `C:\Users\<x>\...` -> `%USERPROFILE%\...` (conservando el separador original) y
-/// las formas `\home\<x>`, `/home/<x>`, `/Users/<x>` -> `~/...`. `<x>` llega hasta
-/// el siguiente separador o la comilla que cierra el parametro, asi que un nombre
-/// con espacios entra entero; solo se enmascara **el primer tramo**.
-///
-/// Es idempotente. No toca URLs ni texto normal: un falso positivo aqui cambiaria
-/// el parametro con el que el agente entiende el flujo.
+/// Es idempotente y no toca URLs ni texto normal.
 pub fn mask_user_paths(text: &str) -> String {
     let urls = pathscan::url_spans(text);
-    // `None` hasta el primer reemplazo: cuando no hay nada que enmascarar se
-    // devuelve el original sin asignar ni una cadena nueva.
     let mut out: Option<String> = None;
     let mut copied = 0;
     let mut chars = text.char_indices().peekable();
     while let Some((at, _)) = chars.next() {
-        // Una ruta dentro de una URL (incluido `file:///C:/Users/...`) no es una
-        // ruta del disco para efectos de privacidad: se deja como esta.
         if pathscan::inside_any(&urls, at) {
             continue;
         }
@@ -218,7 +160,6 @@ pub fn mask_user_paths(text: &str) -> String {
         buf.push_str(&text[copied..at]);
         buf.push_str(prefix.mark);
         copied = prefix.end;
-        // El tramo ya se sustituyo entero: no se vuelve a mirar dentro de el.
         while chars.peek().is_some_and(|(next, _)| *next < prefix.end) {
             chars.next();
         }
@@ -232,25 +173,14 @@ pub fn mask_user_paths(text: &str) -> String {
     }
 }
 
-/// Patron de ruta con usuario que empieza en `at`, si lo hay.
-///
-/// Windows primero: `C:/Users/x` tambien contiene `/Users/x`, y si se evaluara la
-/// forma POSIX primero el resultado seria `C:~/x`.
+/// Patron de ruta con usuario que empieza en `at`; Windows primero.
 fn masked_prefix_at(text: &str, at: usize) -> Option<MaskedPrefix> {
     windows_users_at(text, at).or_else(|| posix_home_at(text, at))
 }
 
-/// Enmascara direcciones de correo conservando el dominio.
+/// Enmascara correos conservando la primera letra local y el dominio (`j***@ejemplo.com`).
 ///
-/// El pack se comparte con el agente y los parametros de un envio (`to`,
-/// `from_name`) llevan datos personales. La marca conserva la primera letra y el
-/// dominio (`j***@ejemplo.com`): el agente sabe a que proveedor apunta el envio,
-/// pero no a quien. El patron es estrecho a proposito: exige local, `@`, un
-/// dominio con punto y una extension alfabetica de dos o mas letras; `foo@bar` o
-/// un `@` de JavaScript no se tocan.
-///
-/// Es idempotente: la marca ya no casa con el patron porque `*` no es un caracter
-/// valido del tramo local.
+/// Es idempotente y no toca un `@` sin forma de correo.
 pub fn mask_emails(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = String::new();
@@ -299,10 +229,6 @@ fn is_email_domain(byte: u8) -> bool {
 }
 
 /// Dominio con al menos un punto y una extension alfabetica de 2+ letras.
-///
-/// No se aceptan etiquetas vacias (`a..b`), ni que empiecen o acaben en guion:
-/// son formas que un parser estricto rechaza y que en un log suelen ser trozos de
-/// una expresion, no un correo.
 fn is_valid_email_domain(domain: &str) -> bool {
     if domain.len() > 253 || domain.contains("..") {
         return false;
@@ -327,18 +253,11 @@ fn is_valid_email_domain(domain: &str) -> bool {
     tld.len() >= 2 && tld.bytes().all(|byte| byte.is_ascii_alphabetic())
 }
 
-/// `C:\Users\<x>` / `C:/Users/<x>`: se conserva el separador que sigue al usuario.
-///
-/// Tambien reconoce la forma escapada de un parametro JSON
-/// (`"C:\\Users\\<x>\\x"`): `tree::params_text` re-serializa los objetos y una
-/// ruta de Windows llega al render con las barras dobladas, que es otro punto por
-/// el que se escaparia el usuario.
+/// `C:\Users\<x>` / `C:/Users/<x>`, tambien con las barras escapadas de un JSON.
 fn windows_users_at(text: &str, at: usize) -> Option<MaskedPrefix> {
     let bytes = text.as_bytes();
     if !bytes.get(at).is_some_and(u8::is_ascii_alphabetic)
         || bytes.get(at + 1) != Some(&b':')
-        // La letra no puede continuar un esquema: en `https://` la `s` va detras
-        // de una letra y el patron la confundiria con una unidad.
         || !pathscan::opens_token(text, at)
     {
         return None;
@@ -365,9 +284,6 @@ fn windows_users_at(text: &str, at: usize) -> Option<MaskedPrefix> {
 }
 
 /// `\home\<x>`, `/home/<x>`, `\Users\<x>` y `/Users/<x>`: la marca es `~/`.
-///
-/// El separador que sigue al usuario se consume y se normaliza a `/` para que la
-/// salida sea siempre `~/resto`, que es como se lee una ruta de home.
 fn posix_home_at(text: &str, at: usize) -> Option<MaskedPrefix> {
     let bytes = text.as_bytes();
     if !bytes.get(at).is_some_and(|c| is_sep(*c)) || !opens_home_token(text, at) {
@@ -397,15 +313,9 @@ fn posix_home_at(text: &str, at: usize) -> Option<MaskedPrefix> {
     }
 }
 
-/// `~/`: la marca de home cuando aun queda cola detras.
 const HOME_MARK_WITH_SEP: &str = "~/";
 
-/// Apertura de token para una raiz POSIX.
-///
-/// Ademas de no continuar una palabra, se rechaza `:`, `~` y `%` delante:
-/// - `C:/home/x` es una carpeta `home` de la unidad C, no el home de un usuario;
-/// - `~/home/x` y `%USERPROFILE%/home/x` ya llevan el usuario enmascarado, y
-///   volver a enmascararlos romperia la idempotencia.
+/// Apertura de token para una raiz POSIX: no tras `:`, `~` ni `%` (unidad, marca, escape).
 fn opens_home_token(text: &str, at: usize) -> bool {
     let prev = text[..at].chars().next_back();
     prev.is_none() || prev.is_some_and(|c| !is_word_char(c) && !matches!(c, ':' | '~' | '%'))
@@ -419,29 +329,15 @@ fn is_sep(b: u8) -> bool {
     matches!(b, b'\\' | b'/')
 }
 
-/// Compara sin distinguir mayusculas (`users`, `Users` y `USERS` son la misma
-/// carpeta en Windows y en macOS).
+/// Compara sin distinguir mayusculas.
 fn starts_with_ic(text: &str, at: usize, needle: &str) -> bool {
     text.get(at..at + needle.len())
         .is_some_and(|s| s.eq_ignore_ascii_case(needle))
 }
 
-/// Fin del tramo del usuario: desde `start` hasta el separador que abre la cola
-/// de la ruta, una comilla de cierre o el final de la cadena.
+/// Fin del tramo del usuario: el separador, la comilla de cierre o el final.
 ///
-/// El tramo **no** se corta en el primer espacio: la cuenta real de Windows y de
-/// macOS lleva espacios de verdad (`John Doe`, `juan perez`), y cortar ahi dejaba
-/// `%USERPROFILE% Doe\proyectos` con medio nombre a la vista (issue #18). Los
-/// espacios de dentro del tramo se comen con el nombre porque lo que lo delimita
-/// es el separador de la ruta, no el espacio.
-///
-/// El apostrofo es parte del nombre (`O'Brien`) y no un delimitador, salvo cuando
-/// lo sigue un espacio o el final: ahi si es la comilla que cierra un parametro
-/// entrecomillado. La comilla doble siempre cierra un JSON.
-///
-/// Devolver `None` cuando el tramo no tiene ni un caracter visible evita
-/// inventarse un usuario en `C:/Users/`, en `C:/Users/ /x` o en `/home//x`, que
-/// son textos rotos y no rutas.
+/// No se corta en el espacio (`John Doe`, issue #18); `None` si no hay caracter visible.
 fn user_end(text: &str, start: usize) -> Option<usize> {
     let mut end = start;
     let mut visible = false;
@@ -452,7 +348,6 @@ fn user_end(text: &str, start: usize) -> Option<usize> {
         if c == '\'' {
             let after = start + off + c.len_utf8();
             match text.get(after..).and_then(|rest| rest.chars().next()) {
-                // Cierra una comilla de parametro, no el nombre.
                 None => break,
                 Some(next)
                     if next.is_whitespace()
@@ -469,25 +364,12 @@ fn user_end(text: &str, start: usize) -> Option<usize> {
     visible.then_some(end)
 }
 
-/// Caracter que cierra el tramo del usuario.
-///
-/// El separador es el limite natural de un nombre de cuenta dentro de una ruta.
-/// La comilla doble cierra un parametro JSON y el salto de linea cierra la linea:
-/// un nombre de usuario no cruza de linea, y comerselo arrastraria a la marca el
-/// texto de la linea siguiente. El apostrofo **no** esta aqui: se decide en
-/// [`user_end`] porque puede ser parte del nombre (`O'Brien`).
+/// Caracter que cierra el tramo del usuario; el apostrofo se decide en [`user_end`].
 fn is_user_stop(c: char) -> bool {
     matches!(c, '/' | '\\' | '"' | '\n' | '\r')
 }
 
-/// Valor listo para el pack. `None` cuando no hay nada que mostrar: el render lo
-/// pinta como `(sin valor inicial)`, igual que antes de redactar.
-///
-/// El orden de las reglas es el contrato. El cifrado manda sobre todo lo demas:
-/// un blob no se explica por su nombre ni por su forma. El nombre manda sobre la
-/// ruta: si la variable se llama `db_password`, decir `(ruta)` solo confirmaria
-/// que la credencial apunta a una ruta. Y el valor normal se conserva: redactar
-/// no puede cegar el diagnostico.
+/// Valor listo para el pack; `None` cuando no hay nada que mostrar.
 pub fn redacted_value(name: &str, value: &str) -> Option<String> {
     if value.trim().is_empty() {
         return None;
@@ -501,8 +383,6 @@ pub fn redacted_value(name: &str, value: &str) -> Option<String> {
     if is_absolute_path(value) {
         return Some(PATH_MARK.to_string());
     }
-    // Un correo en el panel de variables tambien es dato personal; se conserva el
-    // dominio para no cegar el diagnostico.
     Some(mask_emails(value))
 }
 
