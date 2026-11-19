@@ -1,53 +1,9 @@
-//! Agregacion de la vista de bandeja: una fila por robot y sus contadores.
+//! Agregacion de la vista de bandeja: una fila por robot con sus contadores.
 //!
-//! La vista nacio en el CLI (`crates/cli/src/review.rs`), pero la UI que viene
-//! necesita **los mismos numeros**. Duplicar la agregacion alli seria garantizar
-//! que algun dia digan cosas distintas, asi que el barrido vive aqui y el CLI se
-//! queda como formateador.
-//!
-//! # Los numeros son los del pack
-//!
-//! Cada fila sale del mismo [`analysis::Workspace`] que alimenta el context pack,
-//! sobre la misma db y con el mismo origen de logs: la vista no es un resumen
-//! paralelo que pueda desincronizarse del pack, es el pack contado. Por eso no hay
-//! un camino rapido con numeros propios.
-//!
-//! * `accionables` = `analysis.findings.len()`
-//! * `higiene` = `analysis.higiene.len()`
-//! * `vivos` = firmas de `analysis.errors.live`
-//!
-//! `vivos` cuenta **firmas, no ocurrencias**, que es la definicion que ya usa el
-//! render: tres `zdev` iguales son un problema, no tres, y sumar ocurrencias
-//! inflaria el panel. La vista hereda la cifra del pack sin reinterpretarla.
-//!
-//! # Coste (issue #18)
-//!
-//! [`analysis::Workspace`] carga y deduplica los hechos **una sola vez** y cada
-//! fila analiza su robot sobre esa foto: recorrer N robots ya no decodifica la db
-//! N veces. Con logs, el coste que queda es leer los ficheros de log una vez por
-//! robot, y el cache de [`crate::logs::parse_file_cached`] lo absorbe.
-//!
-//! # Una db o un workspace
-//!
-//! [`review_workspace`] no conoce la raiz de descubrimiento: recibe las conexiones
-//! ya abiertas con su etiqueta, igual que [`analysis::analyse_with_workspace_at_and_paths`]. El
-//! mismo robot copiado en dos entregas aparece dos veces porque son dos despliegues
-//! y el total suma instancias, no nombres distintos (es la cifra que se viene
-//! midiendo en los barridos del proyecto).
-//!
-//! # Tolerancia
-//!
-//! Un robot ilegible se omite de [`Review::rows`] y el barrido sigue: no se pinta
-//! una fila a cero porque "no se pudo leer" no es "esta limpio", y la cabecera solo
-//! cuenta lo analizado. Se prefiere una fila menos a una mentira. El error **de la
-//! db** (abrir o listar) si sube en [`review_conn`], porque ahi no hay otro panorama
-//! que mirar; en [`review_workspace`] se omite esa db y siguen las demas.
-//!
-//! # Hermeticidad
-//!
-//! El motor no decide leer disco: quien llama resuelve el origen de logs y lo pasa
-//! como `(directorio, maximo de ficheros)` o `None`. Sin logs, `vivos` sale a cero
-//! igual que en un pack sin logs; el analisis del codigo no depende del entorno.
+//! La vista es el pack contado, no un resumen paralelo: sale del mismo
+//! `analysis::Workspace`. `vivos` cuenta firmas, no ocurrencias; los totales
+//! suman todas las filas de la foto y un robot en dos entregas suma dos.
+//! Un robot o una db ilegible se omite: una fila menos, nunca una fila a cero.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -60,37 +16,30 @@ use crate::{analysis, db, Result};
 /// Una fila del panorama: un robot de una db y sus contadores.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewRow {
-    /// Nombre del robot tal como lo guarda Studio.
     pub robot: String,
-    /// Etiqueta relativa de la db de la que sale la fila, nunca una ruta absoluta.
+    /// Etiqueta relativa de la db; nunca una ruta absoluta.
     pub db: String,
-    /// Nodos del **ultimo** snapshot, que es el que analiza [`analysis`].
+    /// Nodos del ultimo snapshot, que es el que analiza el pack.
     pub nodes: usize,
-    /// Hallazgos accionables: defecto concreto sobre una linea.
+    /// Hallazgo concreto sobre una linea.
     pub accionables: usize,
-    /// Hallazgos de higiene: afectan al robot entero, no a una linea.
+    /// Hallazgo que afecta al robot entero, no a una linea.
     pub higiene: usize,
-    /// Firmas de error vivas en la version actual y con los parametros intactos.
+    /// Firmas de error vivas en la version actual, con los parametros intactos.
     pub vivos: usize,
 }
 
 /// Foto completa de una db o de un workspace.
-///
-/// `source` es una etiqueta para mostrar, no una ruta: en una sola db es su
-/// etiqueta relativa (`BBRE2\robot_run.db`) y en un workspace dice cuantas dbs se
-/// recorrieron (`workspace (4 dbs)`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Review {
-    /// Origen del panorama, ya etiquetado y sin ruta absoluta.
+    /// Etiqueta a mostrar, sin ruta absoluta.
     pub source: String,
-    /// Dbs recorridas: 1 en una sola db, 0 si no se pudo barrer ninguna.
+    /// Dbs recorridas: solo las que se pudieron barrer.
     pub dbs: usize,
-    /// Una fila por robot analizado, en el orden en que se recorrieron las dbs.
     pub rows: Vec<ReviewRow>,
 }
 
 impl Review {
-    /// Filas de la foto, no nombres distintos: dos despliegues suman dos.
     pub fn total_robots(&self) -> usize {
         self.rows.len()
     }
@@ -103,16 +52,12 @@ impl Review {
         self.rows.iter().map(|row| row.higiene).sum()
     }
 
-    /// Suma de firmas vivas, igual que las cuenta el pack.
     pub fn total_vivos(&self) -> usize {
         self.rows.iter().map(|row| row.vivos).sum()
     }
 
-    /// Orden de la bandeja: primero lo que tiene mas defectos accionables, despues
-    /// lo que tiene mas errores vivos y, a igualdad de los dos, el nombre.
-    ///
-    /// Es una operacion del motor y no del formateador para que la UI y el CLI no
-    /// puedan ordenar distinto: el orden es parte de lo que la vista dice.
+    /// Orden de la bandeja: accionables desc, vivos desc y nombre. Vive aqui para
+    /// que UI y CLI no ordenen distinto.
     pub fn sorted(&mut self) {
         self.rows.sort_by(|a, b| {
             b.accionables
@@ -123,11 +68,8 @@ impl Review {
     }
 }
 
-/// Panorama de una sola db ya abierta.
-///
-/// `label` es la etiqueta relativa que se copia a [`Review::source`] y a cada fila;
-/// el motor no deriva rutas absolutas. `logs` es `(directorio, maximo de ficheros)`
-/// o `None` para un barrido hermetico.
+/// Panorama de una sola db ya abierta. `label` es la etiqueta relativa que se
+/// copia a `source` y a cada fila; `logs` es `(directorio, maximo)` o `None`.
 pub fn review_conn(conn: &Connection, label: &str, logs: Option<(&Path, usize)>) -> Result<Review> {
     Ok(Review {
         source: label.to_string(),
@@ -136,11 +78,8 @@ pub fn review_conn(conn: &Connection, label: &str, logs: Option<(&Path, usize)>)
     })
 }
 
-/// Panorama de un workspace: las dbs ya abiertas y etiquetadas por quien llama.
-///
-/// Misma forma que [`analysis::analyse_with_workspace_at_and_paths`]: el descubrimiento (y el
-/// filtro de `backups/`) es del consumidor. Una db que falle al listarse se omite
-/// para no tumbar el panorama de las demas, igual que un robot ilegible.
+/// Panorama de varias dbs ya abiertas y etiquetadas por quien llama; una que
+/// falle al listarse se omite para no tumbar el resto.
 pub fn review_workspace(
     conns: &[(&Connection, &str)],
     logs: Option<(&Path, usize)>,
@@ -153,7 +92,6 @@ pub fn review_workspace(
                 dbs += 1;
                 rows.extend(db_rows);
             }
-            // Una db ilegible no puede ocultar el panorama de las otras.
             Err(_) => continue,
         }
     }
@@ -164,13 +102,10 @@ pub fn review_workspace(
     })
 }
 
-/// Filas de una db: un robot por nombre, con sus contadores.
 fn rows_of(conn: &Connection, label: &str, logs: Option<(&Path, usize)>) -> Result<Vec<ReviewRow>> {
     let summaries = db::list_robots(conn)?;
 
-    // Una sola carga de hechos para toda la db (issue #18): cada fila analiza su
-    // robot sobre la misma foto en lugar de volver a decodificar todos los
-    // snapshots. El contador de nodos sale de la misma foto, sin otra pasada.
+    // Una sola carga de hechos para toda la db (issue #18).
     let workspace = analysis::Workspace::load(&[(conn, label)])?;
     let nodes: BTreeMap<String, usize> = workspace
         .facts
@@ -182,14 +117,9 @@ fn rows_of(conn: &Connection, label: &str, logs: Option<(&Path, usize)>) -> Resu
     for summary in summaries {
         let analysis = match workspace.analyse(conn, label, &summary.name, logs, &NoPaths) {
             Ok(analysis) => analysis,
-            // Un robot ilegible no puede ocultar el panorama de los demas: se omite
-            // y se sigue. No se pinta una fila a cero porque "no se pudo leer" no es
-            // "esta limpio", y la cabecera solo cuenta lo analizado.
             Err(_) => continue,
         };
         rows.push(ReviewRow {
-            // Si el analisis del robot salio bien, su ultimo snapshot se decodifico
-            // al cargar los hechos, asi que el contador esta siempre presente.
             nodes: nodes.get(&summary.name).copied().unwrap_or_default(),
             accionables: analysis.findings.len(),
             higiene: analysis.higiene.len(),
@@ -201,7 +131,6 @@ fn rows_of(conn: &Connection, label: &str, logs: Option<(&Path, usize)>) -> Resu
     Ok(rows)
 }
 
-/// `1 db` / `N dbs`: la etiqueta la lee una persona, no un parser.
 fn dbs_label(dbs: usize) -> String {
     if dbs == 1 {
         "1 db".to_string()

@@ -1,37 +1,8 @@
-//! Registro historico de problemas: lo que el motor recuerda entre sesiones.
+//! Registro historico de problemas: la memoria que el motor conserva entre sesiones.
 //!
-//! Hoy el motor detecta un defecto en el context pack y el agente lo arregla,
-//! pero ese conocimiento muere con la sesion: a la semana siguiente el mismo
-//! sintoma vuelve a costar el mismo diagnostico, y el arreglo que funciono no
-//! esta escrito en ningun sitio. Este modulo es esa memoria. Guarda tres cosas:
-//!
-//! | Tabla | Que guarda |
-//! |---|---|
-//! | `signatures` | cada firma normalizada (ver [`crate::signature::normalize`]) y cuantas veces se vio |
-//! | `observations` | cada avistamiento: robot, db, version, linea, mensaje e instante |
-//! | `fixes` | como se cerro: version de origen y destino, resumen, detalle y nota |
-//!
-//! # Es el unico sitio donde la herramienta escribe
-//!
-//! `robot.db` se abre siempre en solo lectura ([`crate::db::open_readonly`]) y
-//! nunca se toca: un diagnostico no puede alterar el entorno que diagnostica.
-//! El registro vive en un fichero sqlite propio ([`default_path`]) que se puede
-//! borrar sin perder nada del proyecto, solo el historial.
-//!
-//! # El reloj lo pone quien llama
-//!
-//! [`Observation`] y [`FixRecord`] llevan el instante ya resuelto. El motor no
-//! llama a `SystemTime::now()` a proposito: el runner escribe hora local sin
-//! zona y mezclar husos en el mismo historial desordenaria `first_seen` y
-//! `last_seen`. Quien conoce el reloj (CLI, daemon, MCP) lo inyecta; de paso, el
-//! registro queda reproducible en tests.
-//!
-//! # Idempotencia obligatoria
-//!
-//! El motor va a volver a ver el mismo log en cada barrido. Registrar dos veces
-//! la misma observacion **no** suma: [`Registry::record_observation`] devuelve
-//! `false` y los contadores no se mueven. La identidad de una observacion es
-//! `(firma, robot, version, linea, instante)`.
+//! Es el unico sitio donde la herramienta escribe: `robot.db` se abre siempre en
+//! solo lectura. El reloj lo inyecta quien llama (aqui nunca se lee) y repetir
+//! `(firma, robot, version, linea, instante)` no suma avistamientos.
 //!
 //! ```
 //! use rocketdebug_core::db::parse_date;
@@ -66,28 +37,20 @@ use rusqlite::{params, Connection, TransactionBehavior};
 
 use crate::error::{Error, Result};
 
-/// Nombre del fichero sqlite del registro.
 const FILE_NAME: &str = "problems.db";
 
-/// Carpeta de datos de la herramienta dentro del directorio del usuario.
 const APP_DIR: &str = "rocket_debugger";
 
-/// Variable de entorno que mueve el registro a otro directorio. Util para
-/// separar el historial de una entrega del de la maquina, y para tests.
+/// Variable de entorno que mueve el registro a otro directorio.
 pub const HOME_ENV: &str = "ROCKETDEBUG_HOME";
 
-/// Tope de espera cuando otra conexion tiene la base bloqueada. El daemon y el
-/// CLI pueden escribir a la vez; sin esto, el segundo recibe `database is
-/// locked` y pierde el avistamiento en vez de esperar unos milisegundos.
+/// Espera maxima si otra conexion tiene la base bloqueada.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Formato de los instantes: ISO-8601 de ancho fijo y sin zona.
-///
-/// Ancho fijo para que el orden del texto sea el orden del tiempo: es lo que
-/// permite conservar `first_seen` con `MIN()` en SQL, sin convertir nada.
+/// Instantes ISO-8601 de ancho fijo y sin zona: el orden del texto es el del
+/// tiempo, que es lo que permite conservar `first_seen` con `MIN()` en SQL.
 const TS_FMT: &str = "%Y-%m-%dT%H:%M:%S%.9f";
 
-/// Esquema. Todo con `IF NOT EXISTS` para que abrir dos veces no falle.
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS signatures (
     id          INTEGER PRIMARY KEY,
@@ -135,22 +98,18 @@ CREATE INDEX IF NOT EXISTS fixes_by_signature ON fixes (signature_id);
 /// Un avistamiento concreto de un problema en una ejecucion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observation {
-    /// Firma normalizada: dos variantes del mismo defecto dan la misma cadena.
     pub signature: String,
     pub robot: String,
-    /// Etiqueta relativa de la db de la que salio el robot. Absoluta nunca: el
-    /// registro se comparte y no debe llevar el arbol de directorios de nadie.
+    /// Etiqueta relativa de la db; nunca una ruta absoluta.
     pub db_label: String,
-    /// Id del snapshot que estaba vivo, si se pudo atribuir.
     pub version: Option<i64>,
-    /// Linea del robot (`2`, `2.1`) tal cual la muestra el pack. Es una
-    /// etiqueta, no una direccion: hay lineas repetidas entre ramas.
+    /// Linea del pack (`2`, `2.1`): una etiqueta, no una direccion.
     pub line: String,
     pub message: String,
     pub seen_at: NaiveDateTime,
 }
 
-/// Un arreglo conocido, con lo necesario para reconocer el mismo caso despues.
+/// Un arreglo conocido, lo justo para reconocer el mismo caso despues.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FixRecord {
     pub signature: String,
@@ -158,17 +117,14 @@ pub struct FixRecord {
     /// Version de la que se partia y version arreglada, si se conocen.
     pub from_version: Option<i64>,
     pub to_version: Option<i64>,
-    /// Una linea: que se cambio.
     pub summary: String,
-    /// El porque y el como, para que otro agente no tenga que redescubrirlo.
     pub detail: String,
-    /// Avisos: lo que se probo y no funciono, efectos laterales, dudas.
     pub note: String,
     pub recorded_at: NaiveDateTime,
 }
 
-/// Lo que el registro sabe de una firma, que es lo que se le muestra al agente
-/// antes de diagnosticar: cuantas veces se vio, donde y si ya se cerro.
+/// Lo que el registro sabe de una firma: lo que se le muestra al agente antes de
+/// diagnosticar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureStats {
     pub signature: String,
@@ -180,20 +136,15 @@ pub struct SignatureStats {
     pub fixes: usize,
 }
 
-/// Conexion al fichero sqlite del registro.
 #[derive(Debug)]
 pub struct Registry {
     conn: Connection,
 }
 
 impl Registry {
-    /// Abre el registro, creando el directorio y las tablas si no existen.
-    ///
-    /// Es idempotente: dos aperturas seguidas sobre el mismo fichero dejan el
-    /// mismo esquema y no fallan.
+    /// Abre el registro, creando el directorio y el esquema si no existen.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
-            // El `parent` de un nombre relativo es "" y no hay nada que crear.
             if !dir.as_os_str().is_empty() {
                 std::fs::create_dir_all(dir).map_err(|source| Error::Open {
                     path: path.to_path_buf(),
@@ -208,43 +159,32 @@ impl Registry {
         Self::init(conn)
     }
 
-    /// Registro en memoria. Para tests y para consultas de un solo uso.
     pub fn in_memory() -> Result<Self> {
         Self::init(Connection::open_in_memory()?)
     }
 
     fn init(conn: Connection) -> Result<Self> {
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        // Las tablas declaran `REFERENCES`; sqlite no las aplica si no se pide,
-        // y una observacion huerfana es un error de programacion, no un dato.
+        // Sqlite no aplica las `REFERENCES` si no se pide.
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(SCHEMA)?;
         Ok(Self { conn })
     }
 
-    /// Registra un avistamiento. Devuelve `false` si ya estaba registrado.
-    ///
-    /// El upsert de la firma incrementa `occurrences` y avanza `last_seen`,
-    /// conservando `first_seen` (el primer avistamiento no se reescribe: es el
-    /// dato que dice desde cuando duele). La observacion en si entra una sola
-    /// vez por la identidad `(firma, robot, version, linea, instante)`.
+    /// Registra un avistamiento y devuelve `false` si ya estaba registrado: el
+    /// upsert conserva `first_seen` y no repite el avistamiento.
     pub fn record_observation(&mut self, o: &Observation) -> Result<bool> {
         let seen_at = format_ts(o.seen_at);
         // `IMMEDIATE` toma el bloqueo de escritura al empezar: sin el, dos
-        // procesos que registren el mismo log a la vez podrian colarse entre el
-        // "ya existe?" y el "insert" y contar el avistamiento dos veces.
+        // procesos cuentan el mismo avistamiento dos veces.
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let signature_id = ensure_signature(&tx, &o.signature, &seen_at)?;
 
-        // `version IS ?` compara NULL con NULL; con `=` el resultado seria
-        // siempre falso y una observacion sin version entraria en cada barrido.
-        //
-        // `seen_at` NO es la hora del barrido: quien registra pasa la hora del
-        // snapshot observado (ver `db::latest_created_at`). Si fuera el reloj del
-        // escaneo, dos pasadas de la misma version contarian como dos
-        // avistamientos y el contador dejaria de significar nada.
+        // `version IS ?` compara NULL con NULL; con `=` una observacion sin
+        // version no encontraria su duplicado.
+        // `seen_at` es la hora del snapshot observado, no la del barrido.
         let already: bool = tx.query_row(
             "SELECT EXISTS(
                  SELECT 1 FROM observations
@@ -272,9 +212,8 @@ impl Registry {
                 seen_at
             ],
         )?;
-        // MIN/MAX comparan el texto, y el formato de `seen_at` ordena igual que
-        // el tiempo: el avistamiento viejo no mueve `first_seen` ni el nuevo
-        // retrocede `last_seen` si llegan desordenados.
+        // MIN/MAX comparan el texto, y el formato de `seen_at` ordena como el
+        // tiempo: un avistamiento desordenado no mueve los extremos.
         tx.execute(
             "UPDATE signatures
                 SET occurrences = occurrences + 1,
@@ -287,11 +226,8 @@ impl Registry {
         Ok(true)
     }
 
-    /// Registra un arreglo y devuelve su id.
-    ///
-    /// Un fix puede llegar antes que su primera observacion (se arreglo algo que
-    /// el motor aun no habia visto). La firma se crea con `0` ocurrencias: un
-    /// arreglo no es un avistamiento y no debe inflar el contador.
+    /// Registra un arreglo y devuelve su id. La firma se crea con `0`
+    /// ocurrencias: un fix no es un avistamiento.
     pub fn record_fix(&mut self, f: &FixRecord) -> Result<i64> {
         let recorded_at = format_ts(f.recorded_at);
         let tx = self
@@ -318,16 +254,10 @@ impl Registry {
         Ok(id)
     }
 
-    /// Busca firmas por subcadena en la firma **o** en el nombre de robot, sin
-    /// distinguir mayusculas. `query` vacia devuelve todas; `limit` es un tope
-    /// literal (0 devuelve nada), no un "sin limite".
+    /// Busca por subcadena en la firma o en el robot, sin distinguir mayusculas;
+    /// `query` vacia devuelve todo y `limit` es un tope literal (0, nada).
     ///
-    /// Orden: mas ocurrencias primero; a igualdad, lo visto mas recientemente;
-    /// y la firma alfabeticamente para que el resultado sea estable.
-    ///
-    /// El filtro se hace en Rust a proposito: el `lower()` de sqlite solo pliega
-    /// ASCII, asi que un robot con tilde no encontraria su propia firma. De paso
-    /// el texto del usuario no entra nunca en una sentencia SQL.
+    /// Orden: ocurrencias desc, `last_seen` desc y firma.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SignatureStats>> {
         let needle = query.trim().to_lowercase();
 
@@ -347,9 +277,7 @@ impl Registry {
         })?;
         let firmas = rows.collect::<rusqlite::Result<Vec<_>>>()?;
 
-        // El registro es pequeno (firmas distintas, no lineas de log): tres
-        // recorridos completos son mas baratos y mas simples que una consulta
-        // por firma, que seria N+1.
+        // El filtro va en Rust: el `lower()` de sqlite solo pliega ASCII.
         let mut robots: HashMap<i64, Vec<String>> = HashMap::new();
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT signature_id, robot FROM observations ORDER BY signature_id, robot",
@@ -407,27 +335,12 @@ impl Registry {
     }
 }
 
-/// Ruta por defecto del registro.
-///
-/// Orden de resolucion:
-///
-/// 1. `ROCKETDEBUG_HOME` (directorio) -> `<dir>/problems.db`. Permite separar el
-///    historial de una entrega del de la maquina sin tocar codigo.
-/// 2. Windows: `%LOCALAPPDATA%\rocket_debugger\problems.db`.
-/// 3. Otros: `$HOME/.local/share/rocket_debugger/problems.db`.
-/// 4. Si no existe ninguna de esas variables, el directorio temporal del
-///    sistema. Es el ultimo recurso, y esta documentado: perder el registro por
-///    no tener `LOCALAPPDATA` (un servicio, un contenedor) es peor que
-///    guardarlo en un sitio raro. [`Registry::open`] crea el directorio.
-///
-/// La ruta devuelta no se crea aqui: la crea `open`.
+/// Ruta por defecto: `ROCKETDEBUG_HOME`, el directorio de datos de la plataforma
+/// o, como ultimo recurso, el temporal. No crea nada: la crea [`Registry::open`].
 pub fn default_path() -> PathBuf {
     resolve_path(std::env::var_os(HOME_ENV), platform_base())
 }
 
-/// Compone la ruta final. Se separa de [`default_path`] para poder probar la
-/// resolucion sin mutar el entorno del proceso: los tests corren en paralelo y
-/// `set_var` no es seguro fuera de un unico hilo.
 fn resolve_path(home: Option<OsString>, base: PathBuf) -> PathBuf {
     match home.as_deref().filter(|dir| !dir.is_empty()) {
         Some(dir) => PathBuf::from(dir).join(FILE_NAME),
@@ -454,10 +367,7 @@ fn platform_base() -> PathBuf {
     }
 }
 
-/// Crea la firma si no existe y devuelve su id, sin tocar los contadores.
-///
-/// La primera vez entra con `0` ocurrencias: el avistamiento que la crea es
-/// quien la sube, y un fix sobre una firma desconocida no debe inventar uno.
+/// Crea la firma con `0` ocurrencias si no existia y devuelve su id.
 fn ensure_signature(tx: &Connection, signature: &str, at: &str) -> Result<i64> {
     tx.execute(
         "INSERT INTO signatures (signature, occurrences, first_seen, last_seen)
@@ -473,9 +383,8 @@ fn ensure_signature(tx: &Connection, signature: &str, at: &str) -> Result<i64> {
     Ok(id)
 }
 
-/// Instante -> texto. Se compone a mano en vez de fiarse de los modificadores de
-/// precision de `strftime`: hacen falta siempre 9 digitos para que la
-/// comparacion de textos ordene como el tiempo.
+/// Instante a texto con 9 digitos de fraccion, para que el orden del texto sea
+/// el del tiempo.
 fn format_ts(t: NaiveDateTime) -> String {
     format!(
         "{}.{:09}",
@@ -484,9 +393,6 @@ fn format_ts(t: NaiveDateTime) -> String {
     )
 }
 
-/// Texto -> instante. Tolerante igual que [`crate::db::parse_date`]: un valor
-/// raro en el fichero no debe tumbar una busqueda. Solo se lee lo que escribe
-/// este modulo, pero el fichero es del usuario y puede quedar a medias.
 fn parse_ts(s: &str) -> NaiveDateTime {
     NaiveDateTime::parse_from_str(s, TS_FMT)
         .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f"))
@@ -495,9 +401,6 @@ fn parse_ts(s: &str) -> NaiveDateTime {
         .unwrap_or_default()
 }
 
-/// El fallo de E/S al preparar la carpeta se presenta como error de apertura:
-/// [`crate::error::Error`] no tiene variante de E/S y este modulo no puede
-/// anadirla sin tocar ficheros que no le tocan. El motivo real viaja dentro.
 fn io_error(e: std::io::Error) -> rusqlite::Error {
     rusqlite::Error::SqliteFailure(
         rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
