@@ -1,8 +1,3 @@
-//! Protocolo JSON-RPC: lo que un cliente (DSH) puede dar por hecho.
-//!
-//! Estos tests no abren ninguna db: prueban el sobre del protocolo y la
-//! validacion de argumentos. Los que necesitan datos viven en `tools.rs`.
-
 mod common;
 
 use rocketdebug_mcp::handle_line;
@@ -79,7 +74,6 @@ fn tools_list_devuelve_las_diez_tools_con_schema_valido() {
         );
     }
 
-    // `flow_pack` es la unica que exige robot; `snapshot` es opcional.
     let pack = tools
         .iter()
         .find(|tool| tool["name"] == "flow_pack")

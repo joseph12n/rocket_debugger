@@ -1,9 +1,3 @@
-//! Tools contra una db temporal.
-//!
-//! Ninguno de estos tests toca `C:\Rocketbot`: la db se crea en un directorio
-//! temporal y el entorno que se pasa es `Settings::hermetic()` (sin
-//! `ROCKETBOT_DB` y sin logs), asi que el resultado no cambia segun la maquina.
-
 mod common;
 
 use std::io::Write as _;
@@ -14,7 +8,6 @@ use serde_json::{json, Value};
 
 use common::{call_request, demo_project, is_error, make_db, parse_response, tool_text, TempDir};
 
-/// Ejecuta una `tools/call` y devuelve la respuesta ya parseada.
 fn call(settings: &Settings, id: i64, tool: &str, args: Value) -> Value {
     let linea = call_request(id, tool, args);
     let respuesta = handle_line_with(&linea, settings)
@@ -47,7 +40,6 @@ fn flow_diff_dice_que_cambio_entre_dos_snapshots() {
     assert!(texto.contains("1 cambiado"), "resumen del diff:\n{texto}");
     assert!(texto.contains("~ L1 setVar"), "linea del cambio:\n{texto}");
 
-    // El mismo snapshot contra si mismo no inventa cambios.
     let igual = call(
         &Settings::hermetic(),
         2,
@@ -61,8 +53,6 @@ fn flow_diff_dice_que_cambio_entre_dos_snapshots() {
     );
 }
 
-/// Un proyecto de un solo nodo estable (`id` fijo) con el comando variable: es lo
-/// minimo para que el diff vea `Changed` y no `Added` + `Removed`.
 fn proyecto_con_comando(cmd: &str) -> String {
     format!(
         r#"{{"project":{{"commands":[{{"father":"setVar","command":"{cmd}","group":"system",
@@ -71,10 +61,6 @@ fn proyecto_con_comando(cmd: &str) -> String {
     )
 }
 
-// ---------------------------------------------------------------- registro
-
-/// Settings hermetico con un registro propio: es lo minimo para ejercitar las
-/// tools `problems_*` sin depender de `%LOCALAPPDATA%` ni de `C:\Rocketbot`.
 fn con_registro(dir: &std::path::Path) -> (Settings, std::path::PathBuf) {
     let ruta = dir.join("problems.db");
     let mut settings = Settings::hermetic();
@@ -101,7 +87,6 @@ fn problems_search_encuentra_lo_sembrado_y_cuenta_los_fixes() {
     let tmp = TempDir::new("search");
     let (settings, ruta) = con_registro(tmp.path());
 
-    // Se siembra el registro por la puerta del motor, no por SQL a mano.
     let mut registro = Registry::open(&ruta).expect("registro");
     let firma = "NameError:name:{var}:not_defined";
     for robot in ["orq", "hijo"] {
@@ -143,7 +128,6 @@ fn problems_search_encuentra_lo_sembrado_y_cuenta_los_fixes() {
     assert!(texto.contains("1 fixes"), "{texto}");
     assert!(texto.contains("hijo") && texto.contains("orq"), "{texto}");
 
-    // Busqueda por robot y busqueda vacia.
     let por_robot = call(&settings, 2, "problems_search", json!({"query": "hijo"}));
     assert!(
         tool_text(&por_robot).contains(firma),
@@ -182,7 +166,6 @@ fn problems_record_sin_logs_no_inventa_observaciones() {
     assert!(texto.contains("0 errores vistos"), "{texto}");
     assert!(texto.contains("0 observaciones nuevas"), "{texto}");
 
-    // El registro se creo y la busqueda ya no falla por falta de fichero.
     let buscado = call(&settings, 2, "problems_search", json!({}));
     assert!(!is_error(&buscado), "{buscado}");
     assert!(tool_text(&buscado).contains("sin coincidencias"));
@@ -224,7 +207,6 @@ fn problems_fix_guarda_el_diff_entre_dos_versiones() {
         "el resumen sale del diff:\n{texto}"
     );
 
-    // Y queda consultable.
     let buscado = call(
         &settings,
         2,
@@ -369,9 +351,6 @@ fn un_robot_inexistente_es_error_de_negocio_y_el_servidor_sigue() {
         "y decir que db se consulto:\n{texto}"
     );
 
-    // La linea siguiente se sigue atendiendo: el fallo no envenena el servidor.
-    // No se fija el numero de tools a proposito: lo que se prueba aqui es que el
-    // servidor sigue vivo, no el catalogo (para eso esta el test del catalogo).
     let linea = common::request(2, "tools/list", json!({}));
     let siguiente = parse_response(
         &handle_line_with(&linea, &Settings::hermetic()).expect("tools/list responde"),
@@ -464,13 +443,6 @@ fn robot_errors_devuelve_la_seccion_del_pack_con_logs() {
     );
 }
 
-/// El binario de verdad: `main` lee lineas, despacha y escribe.
-///
-/// Es el unico test que arranca un proceso, y comprueba justo lo que el
-/// despachador no puede probar: que un fallo de negocio no mata el servidor, que
-/// la sesion sigue atendiendo la linea siguiente, que stdout lleva solo una
-/// respuesta por peticion y que `ROCKETBOT_DB` se usa cuando la peticion no trae
-/// `db`. El entorno del hijo es la db temporal: no toca `C:\Rocketbot`.
 #[test]
 fn el_proceso_sobrevive_a_un_robot_inexistente_y_sigue_hablando() {
     let tmp = TempDir::new("stdio");
@@ -482,7 +454,6 @@ fn el_proceso_sobrevive_a_un_robot_inexistente_y_sigue_hablando() {
     );
 
     let mut hijo = Command::new(env!("CARGO_BIN_EXE_rocketdebug-mcp"))
-        // Sin `db` en las peticiones: la ruta tiene que salir de aqui.
         .env("ROCKETBOT_DB", &db)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -504,7 +475,7 @@ fn el_proceso_sobrevive_a_un_robot_inexistente_y_sigue_hablando() {
         for linea in peticiones {
             writeln!(entrada, "{linea}").expect("escribo una peticion");
         }
-    } // Al soltar stdin, el hijo ve EOF y termina.
+    }
 
     let salida = hijo.wait_with_output().expect("espero al hijo");
     assert!(
@@ -541,8 +512,6 @@ fn el_proceso_sobrevive_a_un_robot_inexistente_y_sigue_hablando() {
         "el proceso sigue atendiendo despues del fallo: {listado}"
     );
 }
-
-// ---------------------------------------------------------------- UI
 
 #[test]
 fn ui_render_devuelve_un_enlace_codificado() {

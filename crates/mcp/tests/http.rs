@@ -1,10 +1,3 @@
-//! Transporte HTTP: lo que un cliente (la app o el agente) puede dar por hecho.
-//!
-//! Cada test arranca un `serve` real sobre `127.0.0.1:0` (el SO elige el puerto)
-//! y habla por `TcpStream`. Nada sale a la red ni toca `C:\Rocketbot`: el entorno
-//! es [`Settings::hermetic`] y, cuando hace falta una db, es la temporal de
-//! `common`.
-
 mod common;
 
 use std::io::{Read, Write};
@@ -16,14 +9,9 @@ use serde_json::json;
 
 use common::{call_request, demo_project, make_db, parse_response, TempDir};
 
-/// Peticion sin cuerpo, tal cual la manda un cliente HTTP/1.1.
 const GET_HEALTH: &[u8] = b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
 const GET_UNKNOWN: &[u8] = b"GET /otra HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
 
-/// Arranca el servidor en un puerto que asigna el SO y devuelve ese puerto.
-///
-/// El hilo se queda vivo: `serve` no tiene parada ordenada porque su unico final
-/// es un error fatal del listener. El proceso de test lo termina con el.
 fn start(settings: Settings) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("ligo un puerto efimero");
     let port = listener.local_addr().expect("direccion local").port();
@@ -33,7 +21,6 @@ fn start(settings: Settings) -> u16 {
     port
 }
 
-/// Respuesta HTTP ya separada en estado, cabeceras y cuerpo.
 #[derive(Debug)]
 struct Response {
     status: u16,
@@ -83,7 +70,6 @@ fn parse(raw: &[u8]) -> Response {
     }
 }
 
-/// Manda los trozos por una conexion y lee la respuesta hasta el cierre.
 fn exchange(port: u16, pieces: &[&[u8]]) -> Response {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("conecto al servidor");
     stream
@@ -96,18 +82,14 @@ fn exchange(port: u16, pieces: &[&[u8]]) -> Response {
     for piece in pieces {
         stream.write_all(piece).expect("escribo el trozo");
         stream.flush().expect("vacio el buffer");
-        // Un respiro entre trozos: persigue que el servidor haga lecturas
-        // separadas y no una sola coalescida, que es lo que ejercita el test.
         std::thread::sleep(Duration::from_millis(5));
     }
 
     let mut raw = Vec::new();
-    // El servidor cierra al responder (`Connection: close`): leer hasta EOF.
     stream.read_to_end(&mut raw).expect("leo hasta el cierre");
     parse(&raw)
 }
 
-/// Peticion completa con `Content-Length` y el cuerpo pegado detras.
 fn request(method: &str, path: &str, body: &str) -> Vec<u8> {
     let mut bytes = format!(
         "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
@@ -155,8 +137,6 @@ fn initialize_por_http_contesta_lo_mismo_que_stdio() {
         env!("CARGO_PKG_VERSION")
     );
 
-    // El cuerpo es exactamente lo que devuelve el despacho comun: si el
-    // transporte duplicara el despacho, este assert se rompe.
     assert_eq!(
         response.body,
         handle_line_with(&line, &settings).expect("initialize responde")
@@ -198,8 +178,6 @@ fn un_metodo_o_una_ruta_que_no_toca_dan_405_y_404() {
 fn un_cuerpo_de_mas_de_un_mib_da_413() {
     let port = start(Settings::hermetic());
 
-    // Solo la cabecera: el servidor tiene que rechazar por la longitud
-    // declarada, no quedarse leyendo un cuerpo que no cabe en memoria.
     let head = format!(
         "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n",
         MAX_BODY_BYTES + 1
@@ -238,8 +216,6 @@ fn un_cuerpo_troceado_y_con_acentos_se_atiende_igual() {
     .to_string();
     let request = request("POST", "/mcp", &line);
 
-    // Cortes a mitad de la cabecera, a mitad del JSON y a mitad de un caracter
-    // UTF-8 de dos bytes: el servidor no puede decodificar hasta tenerlos todos.
     let inside_char = request
         .iter()
         .position(|byte| *byte == 0xC3)
@@ -265,8 +241,6 @@ fn un_cuerpo_troceado_y_con_acentos_se_atiende_igual() {
 
 #[test]
 fn una_tool_por_http_usa_el_entorno_del_servidor() {
-    // La db la resuelve el servidor al arrancar, no el cliente en cada mensaje:
-    // el agente pide la tool y la fachada lee la db que se le dio al servir.
     let tmp = TempDir::new("http-db");
     let project = demo_project();
     let db = make_db(
@@ -295,9 +269,6 @@ fn una_tool_por_http_usa_el_entorno_del_servidor() {
     assert!(text.contains("demo"), "el listado dice el robot:\n{text}");
 }
 
-// ---------------------------------------------------------------- UI
-
-/// Servidor con una db temporal de un robot (`demo`).
 fn start_ui(nombre: &str) -> (TempDir, u16) {
     let tmp = TempDir::new(nombre);
     let db = make_db(
@@ -338,7 +309,6 @@ fn la_raiz_sirve_la_pagina_de_la_ui() {
         "la CSP no puede permitir scripts inline"
     );
 
-    // Y los assets se sirven con su tipo: sin esto el navegador no ejecuta el JS.
     let js = exchange(port, &[b"GET /app.js HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"]);
     assert_eq!(js.status, 200);
     assert_eq!(
@@ -377,7 +347,6 @@ fn api_pack_devuelve_el_markdown_y_exige_robot() {
     assert!(tipo.starts_with("text/plain"), "content-type: {tipo}");
     assert!(response.body.contains("# demo"), "{}", response.body);
 
-    // Sin `robot` es culpa del cliente (400), no un 500.
     let sin = exchange(port, &[GET_PACK_SIN_ROBOT]);
     assert_eq!(sin.status, 400, "{}", sin.body);
 }

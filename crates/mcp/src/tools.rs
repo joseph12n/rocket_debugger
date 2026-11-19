@@ -1,10 +1,3 @@
-//! Las tools de la fachada y su despacho.
-//!
-//! Todas responden `{"content":[{"type":"text","text":"..."}],"isError":bool}`:
-//! un fallo de negocio es `isError: true` con el mensaje del motor ya redactado,
-//! para que el agente lo lea y decida, en vez de un error de protocolo que su
-//! cliente pueda tratar como caida del servidor.
-
 use std::fmt::Write as _;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -36,7 +29,6 @@ const MAX_ERRORS_IN_TEXT: usize = 10;
 #[derive(Debug, Clone)]
 pub struct ToolOutput {
     pub text: String,
-    /// `true` = fallo de negocio: no es error de protocolo.
     pub is_error: bool,
 }
 
@@ -63,14 +55,12 @@ impl ToolOutput {
     }
 }
 
-/// Fallos que si son de protocolo.
 #[derive(Debug, Clone)]
 pub enum CallError {
     InvalidParams(String),
     Internal(String),
 }
 
-/// Catalogo de tools para `tools/list`; el `inputSchema` es JSON Schema de objeto.
 pub fn descriptors() -> Value {
     json!({
         "tools": [
@@ -272,8 +262,6 @@ fn db_property() -> Value {
     })
 }
 
-/// Despacha una tool por nombre.
-/// `catch_unwind` convierte un panic del motor en `-32603` sin perder la sesion.
 pub fn call(name: &str, arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
     match catch_unwind(AssertUnwindSafe(|| dispatch(name, arguments, settings))) {
         Ok(result) => result,
@@ -301,7 +289,6 @@ fn dispatch(name: &str, arguments: &Value, settings: &Settings) -> Result<ToolOu
     }
 }
 
-/// `list_robots`: que hay en la db; texto, no JSON.
 fn list_robots(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
     let args = Args::new(arguments)?;
     let db_path = resolve_db(args.opt_str("db")?, settings);
@@ -328,7 +315,6 @@ fn flow_pack(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallE
     }
 }
 
-/// `flow_diff`: que cambio entre dos snapshots.
 fn flow_diff(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
     let args = Args::new(arguments)?;
     let robot = args.required_str("robot")?;
@@ -356,7 +342,6 @@ fn diff_markdown(db_path: &Path, robot: &str, from: i64, to: i64) -> Result<Stri
     ))
 }
 
-/// Nodos de un snapshot, con su propia conexion para no arrastrar `rusqlite`.
 fn nodes_of(
     db_path: &Path,
     robot: &str,
@@ -381,7 +366,6 @@ fn sin_broker() -> String {
         .to_string()
 }
 
-/// Comprueba que el robot existe **antes** de ocupar un turno de la cola.
 fn ensure_robot(db_path: &Path, robot: &str) -> Result<(), Error> {
     let conn = db::open_readonly(db_path)?;
     let robots = db::list_robots(&conn)?;
@@ -392,7 +376,6 @@ fn ensure_robot(db_path: &Path, robot: &str) -> Result<(), Error> {
     }
 }
 
-/// `run_robot`: el agente pide, el broker serializa.
 fn run_robot(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
     let args = Args::new(arguments)?;
     let robot = args.required_str("robot")?;
@@ -425,7 +408,6 @@ fn run_robot(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallE
     }
 }
 
-/// `run_status`: la cola visible mientras un `run_robot` esta bloqueado.
 fn run_status(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
     let _ = Args::new(arguments)?;
     let Some(exec_settings) = &settings.exec else {
@@ -521,8 +503,6 @@ fn verdict_label(verdict: Verdict) -> &'static str {
     }
 }
 
-/// Ultimas lineas utiles de la salida del runner, ya enmascaradas.
-/// Tipico: el aviso de licencia explica por que un `exit_code 0` no ejecuto nada.
 fn output_hint(report: &RunReport) -> Option<String> {
     let source = if report.stderr_tail.trim().is_empty() {
         &report.stdout_tail
@@ -617,7 +597,6 @@ fn abrir_registro(settings: &Settings) -> Result<rocketdebug_core::registry::Reg
         .map_err(|e| format!("no pude abrir el registro {}: {e}", path.display()))
 }
 
-/// Hora del sello de una observacion: `chrono` va sin `clock`, el reloj lo pone quien llama.
 fn ahora() -> chrono::NaiveDateTime {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -669,8 +648,6 @@ fn problems_search(arguments: &Value, settings: &Settings) -> Result<ToolOutput,
     }
 }
 
-/// `problems_record`: guardar lo que el motor ve ahora.
-/// Es la unica tool que escribe, y escribe el registro, nunca `robot.db`.
 fn problems_record(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
     let args = Args::new(arguments)?;
     let robot = args.required_str("robot")?;
@@ -703,7 +680,6 @@ fn problems_record(arguments: &Value, settings: &Settings) -> Result<ToolOutput,
             }
         };
 
-    // Hora del snapshot observado, no del barrido: dos pasadas no son dos avistamientos.
     let visto_en = db::latest_created_at(&conn, &robot)
         .ok()
         .flatten()
@@ -712,7 +688,6 @@ fn problems_record(arguments: &Value, settings: &Settings) -> Result<ToolOutput,
     let mut nuevas = 0usize;
     let mut omitidas = 0usize;
     let mut fallos: Vec<String> = Vec::new();
-    // El ruido del motor no se registra: no es defecto del robot.
     for item in analysis
         .errors
         .live
@@ -722,7 +697,6 @@ fn problems_record(arguments: &Value, settings: &Settings) -> Result<ToolOutput,
         .chain(analysis.errors.platform.iter())
     {
         vistas += 1;
-        // Los mensajes de `log_message` los escribe el robot: no son firmas de defecto.
         if item.command == "log_message" {
             omitidas += 1;
             continue;
@@ -813,7 +787,6 @@ fn problems_fix(arguments: &Value, settings: &Settings) -> Result<ToolOutput, Ca
     }
 }
 
-/// URL base de la UI, de `ROCKETDEBUG_UI_URL`; por defecto `http://127.0.0.1:8765`.
 fn ui_base() -> String {
     std::env::var("ROCKETDEBUG_UI_URL")
         .ok()
@@ -822,7 +795,6 @@ fn ui_base() -> String {
         .unwrap_or_else(|| "http://127.0.0.1:8765".to_string())
 }
 
-/// `%xx` de todo lo que no sea incondicionalmente seguro en una URL.
 fn percent_encode(texto: &str) -> String {
     let mut out = String::with_capacity(texto.len());
     for byte in texto.as_bytes() {
@@ -836,7 +808,6 @@ fn percent_encode(texto: &str) -> String {
     out
 }
 
-/// `ui_render`: el enlace para que el humano mire lo que el agente esta viendo.
 fn ui_render(arguments: &Value) -> Result<ToolOutput, CallError> {
     let args = Args::new(arguments)?;
     let robot = args.required_str("robot")?;
@@ -872,8 +843,6 @@ fn ui_render(arguments: &Value) -> Result<ToolOutput, CallError> {
     Ok(ToolOutput::ok(o))
 }
 
-/// `robot_errors`: solo la seccion de errores del pack.
-/// Se pide al render estructurado, no recortando el markdown: el formato vive en un solo sitio.
 fn robot_errors(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
     let args = Args::new(arguments)?;
     let robot = args.required_str("robot")?;
@@ -892,8 +861,6 @@ fn robot_errors(arguments: &Value, settings: &Settings) -> Result<ToolOutput, Ca
     }
 }
 
-/// Lee los argumentos de una tool.
-/// `Null` se acepta como `{}`; un valor que no sea objeto es error de argumentos.
 struct Args<'a> {
     map: Option<&'a Map<String, Value>>,
 }
@@ -950,8 +917,6 @@ impl<'a> Args<'a> {
     }
 }
 
-/// Prioridad de la db: argumento, `ROCKETBOT_DB`, Studio local.
-/// Un `db` vacio o de espacios se trata como ausente.
 fn resolve_db(arg: Option<String>, settings: &Settings) -> PathBuf {
     match arg.filter(|path| !path.trim().is_empty()) {
         Some(path) => PathBuf::from(path),
@@ -992,7 +957,6 @@ fn robots_text(db_path: &Path) -> Result<String, Error> {
     Ok(out.trim_end().to_string())
 }
 
-/// Render del pack; la seccion de errores solo se llena si hay logs.
 pub(crate) fn pack_markdown(
     db_path: &Path,
     robot: &str,
@@ -1002,7 +966,6 @@ pub(crate) fn pack_markdown(
     Ok(build_pack(db_path, robot, snapshot, settings)?.render_markdown())
 }
 
-/// Pack ya ensamblado para las tools que necesitan una seccion y no el markdown.
 fn build_pack(
     db_path: &Path,
     robot: &str,
@@ -1026,8 +989,6 @@ fn build_pack(
     )
 }
 
-/// Texto de `robot_errors`: la seccion del pack, o por que no hay seccion.
-/// Sin logs no es lo mismo que sin errores: no hay evidencia.
 fn errors_text(
     section: Option<String>,
     robot: &str,
@@ -1055,13 +1016,10 @@ fn errors_text(
     }
 }
 
-/// Etiqueta de la db sin ruta absoluta; el calculo vive en el motor.
 pub(crate) fn db_label(path: &Path) -> String {
     db::label(path)
 }
 
-/// Mensaje de negocio: el del motor y, detras, la db que se consulto.
-/// Sin la db, "robot no encontrado" no dice donde se busco.
 pub(crate) fn describe_failure(source: &Error, db_path: &Path) -> String {
     format!("{source}\ndb: {} (solo lectura)", db_path.display())
 }
@@ -1076,7 +1034,6 @@ mod tests {
             db_label(Path::new(r"C:\Users\josep\proyecto\entrega\robot_run.db")),
             "entrega\\robot_run.db"
         );
-        // La misma ruta en forma posix: el resultado no depende del host.
         assert_eq!(
             db_label(Path::new("/home/josep/proyecto/entrega/robot_run.db")),
             "entrega\\robot_run.db"

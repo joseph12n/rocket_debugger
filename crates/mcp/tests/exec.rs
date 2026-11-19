@@ -1,8 +1,3 @@
-//! Tests de `run_robot` y `run_status` por el protocolo MCP.
-//!
-//! El runner es un doble que escribe logs sinteticos: no se lanza Rocketbot. La
-//! ejecucion real contra BBRE2 vive al final, marcada `#[ignore]`.
-
 mod common;
 
 use std::path::{Path, PathBuf};
@@ -26,8 +21,6 @@ fn call(settings: &Settings, id: i64, tool: &str, args: Value) -> Value {
     parse_response(&respuesta)
 }
 
-/// Runner falso: cada ejecucion crea su directorio de logs y escribe (o no) una
-/// peticion del robot y, opcionalmente, un error.
 struct FixturesRunner {
     base: PathBuf,
     studio: Vec<u32>,
@@ -132,8 +125,6 @@ fn run_robot_verifica_eventos_y_atribuye_errores() {
     assert!(texto.contains("- L2 setVar [vivo v1]"), "{texto}");
     assert!(texto.contains("NameError"), "{texto}");
 
-    // El pack lee los mismos logs: los errores nuevos aparecen atribuidos al
-    // snapshot vivo, sin volver a ejecutar nada.
     let pack = call(&settings, 2, "flow_pack", json!({"robot": ROBOT, "db": db}));
     assert!(!is_error(&pack), "{pack}");
     let pack_text = tool_text(&pack);
@@ -208,19 +199,6 @@ fn run_status_muestra_el_broker_libre_y_la_ultima_ejecucion() {
     assert!(texto.contains("ok"), "{texto}");
 }
 
-/// Ejecucion real contra BBRE2. Requiere:
-///
-/// - `ROCKETBOT_EXE` apuntando a `rocketbot.exe` (o la ruta estandar),
-/// - **licencia de produccion**: con la licencia Studio Develop el CLI responde
-///   `Does not have a production license` y sale con 0 sin ejecutar; el broker lo
-///   reporta como `NoEvents` (ver `C:\rocketbot_bots\MEMORIA.md`),
-/// - **Studio cerrado**,
-/// - `C:\rocketbot_bots\BBRE2\robot_run.db` (o `ROCKETDEBUG_REAL_DB`).
-///
-/// `ML_00_Preparacion` es el robot mas barato de BBRE2 (12 nodos, sin navegador)
-/// y basta para demostrar que el broker ejecuta, ve eventos y deja el log que el
-/// pack lee. No se afirma que el robot salga limpio: de hecho sus rutas
-/// migradas son el caso de #26.
 #[test]
 #[ignore = "requiere licencia de produccion, Studio cerrado y BBRE2 real"]
 fn ejecucion_real_contra_bbre2() {
@@ -237,8 +215,6 @@ fn ejecucion_real_contra_bbre2() {
         "no encuentro {db_path}: define ROCKETDEBUG_REAL_DB"
     );
 
-    // `Settings::from_env` resuelve el broker una sola vez; se le da el ejecutable
-    // por entorno para no depender de que este en `C:\Rocketbot`.
     std::env::set_var("ROCKETBOT_EXE", &exe);
     let settings = Settings::from_env();
     assert!(
@@ -276,8 +252,6 @@ fn ejecucion_real_contra_bbre2() {
     assert!(!is_error(&pack), "{pack}");
     let pack_text = tool_text(&pack);
     if texto.contains("## Errores") {
-        // El caso util para #26/#27: la ejecucion fallo y el pack tiene que ver
-        // esos errores nuevos atribuidos al snapshot vivo.
         assert!(
             pack_text.contains("## Errores"),
             "el pack no ve los errores de la ejecucion:\n{pack_text}"
