@@ -1,10 +1,3 @@
-//! Broker de ejecucion: lanza `rocketbot.exe`, serializa las ejecuciones y no se
-//! fia del `exit_code`.
-//!
-//! Con Studio abierto o sin licencia de produccion el runner puede devolver 0 sin
-//! ejecutar: el resultado exige eventos del robot. Una ejecucion a la vez (FIFO
-//! con mutex+condvar), deteccion con `tasklist` y timeout con kill tree.
-
 use std::collections::VecDeque;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -21,38 +14,30 @@ use crate::db;
 use crate::logs;
 use crate::signature;
 
-/// Valor por defecto; en una instalacion portatil hay que apuntar `ROCKETBOT_EXE` al ejecutable real.
 pub const DEFAULT_EXE: &str = r"C:\Rocketbot\rocketbot.exe";
 
 pub const DEFAULT_TIMEOUT_SECS: u64 = 180;
 
-/// Timeout minimo y maximo aceptados por la fachada.
 pub const MIN_TIMEOUT_SECS: u64 = 5;
 pub const MAX_TIMEOUT_SECS: u64 = 900;
 
-/// Convierte segundos de peticion a un timeout valido, acotando a los limites.
 pub fn timeout_from_secs(secs: i64) -> Duration {
     let secs = secs.clamp(MIN_TIMEOUT_SECS as i64, MAX_TIMEOUT_SECS as i64);
     Duration::from_secs(secs as u64)
 }
 
-/// Directorios de ejecucion que se conservan: los logs son evidencia, pero un daemon no puede crecer sin limite.
 pub const KEEP_RUN_DIRS: usize = 20;
 
-/// Un bucle que falla 500 veces es un error con 500 ocurrencias, no 500 lineas.
 pub const MAX_REPORT_ERRORS: usize = 50;
 
-/// Bytes de stdout/stderr que se conservan por ejecucion.
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
 const FALLBACK_LOG_FILES: usize = 20;
 
 const RUN_LOG_FILES: usize = 64;
 
-/// Windows redondea el arranque a milisegundos y el log trae microsegundos: una entrada del primer comando puede parecer anterior.
 const CLOCK_SLACK_SECS: i64 = 2;
 
-/// Es un enum y no un trait para que los tests no dependan del `tasklist` de la maquina.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StudioProbe {
     System,
@@ -75,12 +60,7 @@ impl ExecConfig {
         }
     }
 
-    /// Linea de comandos que se le pasa al runner.
-    ///
-    /// `--log=` va con `=` (la version 2026.10.26 revienta con `--log <ruta>`); no
-    /// se pasa `--nodebug` porque no esta probado que conserve el log de fichero.
     pub fn command_spec(&self, db: &Path, robot: &str, log_dir: &Path) -> CommandSpec {
-        // Las rutas se absolutizan: el hijo corre con cwd en la db y una ruta relativa se resolveria contra si misma.
         let db = absolute(db);
         let log_dir = absolute(log_dir);
         CommandSpec {
@@ -99,7 +79,6 @@ impl ExecConfig {
     }
 }
 
-/// Programa, argumentos y cwd, separados del lanzamiento para poder probar la linea sin lanzar Rocketbot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandSpec {
     pub program: PathBuf,
@@ -108,7 +87,6 @@ pub struct CommandSpec {
 }
 
 impl CommandSpec {
-    /// Representacion para el informe; el enmascarado de rutas es del render, no de aqui.
     pub fn display(&self) -> String {
         let mut out = format!("\"{}\"", self.program.display());
         for arg in &self.args {
@@ -123,7 +101,6 @@ impl CommandSpec {
 pub struct RunRequest {
     pub robot: String,
     pub db: PathBuf,
-    /// Tope de tiempo de **ejecucion**, no de espera en cola.
     pub timeout: Duration,
 }
 
@@ -137,13 +114,11 @@ impl RunRequest {
     }
 }
 
-/// Hecho bruto del lanzamiento; la verificacion de eventos y la atribucion son del [`Broker`].
 #[derive(Debug, Clone)]
 pub struct RunOutcome {
     pub exit_code: Option<i32>,
     pub timed_out: bool,
     pub duration: Duration,
-    /// Hora local del arranque, comparable con las horas del log.
     pub started_at: NaiveDateTime,
     pub log_dir: PathBuf,
     pub log_fallback: Option<PathBuf>,
@@ -172,9 +147,7 @@ impl RunOutcome {
     }
 }
 
-/// Quien ejecuta un robot: el broker pone la serializacion y las garantias, el runner el proceso.
 pub trait Runner: Send + Sync {
-    /// PIDs de `rocketbot.exe` ya en ejecucion. Vacio = se puede lanzar.
     fn studio_open(&self) -> Vec<u32> {
         Vec::new()
     }
@@ -252,7 +225,6 @@ impl Runner for ProcessRunner {
                     if Instant::now() >= deadline {
                         timed_out = true;
                         kill_tree(child.id());
-                        // El arbol ya recibio la senal: `wait` no debe colgarse; si falla, el codigo es desconocido.
                         break child.wait().ok().and_then(|status| status.code());
                     }
                     std::thread::sleep(Duration::from_millis(50));
@@ -289,7 +261,6 @@ impl Runner for ProcessRunner {
     }
 }
 
-/// Por que una ejecucion no cuenta como exitosa.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunFailure {
     StudioOpen(Vec<u32>),
@@ -300,7 +271,6 @@ pub enum RunFailure {
 }
 
 impl RunFailure {
-    /// Explicacion para el agente, junto al dato, para que CLI y MCP no inventen dos redacciones.
     pub fn explain(&self) -> String {
         match self {
             Self::StudioOpen(pids) => {
@@ -338,7 +308,6 @@ impl RunFailure {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunErrorItem {
-    /// Linea de Studio en el snapshot atribuido. Vacia si el nodo no existe alli.
     pub line: String,
     pub command: String,
     pub message: String,
@@ -348,18 +317,15 @@ pub struct RunErrorItem {
     pub occurrences: usize,
 }
 
-/// Informe completo de una ejecucion. Es el contrato del broker con la fachada.
 #[derive(Debug, Clone)]
 pub struct RunReport {
     pub robot: String,
-    /// Etiqueta relativa de la db (`BBRE2\robot_run.db`), sin ruta absoluta.
     pub db_label: String,
     pub ok: bool,
     pub failure: Option<RunFailure>,
     pub exit_code: Option<i32>,
     pub timed_out: bool,
     pub duration_ms: u64,
-    /// Tiempo esperando turno en la cola.
     pub queue_wait_ms: u64,
     pub events: usize,
     pub errors: Vec<RunErrorItem>,
@@ -425,8 +391,6 @@ struct State {
     last: Option<BrokerLast>,
 }
 
-/// Serializa las ejecuciones del workspace: el candado y la cola son de proceso, no
-/// de peticion. Cada peticion espera su turno, visible en [`status`].
 pub struct Broker {
     runner: Arc<dyn Runner>,
     state: Mutex<State>,
@@ -450,7 +414,6 @@ impl Broker {
         }
     }
 
-    /// Foto del broker ahora mismo. No bloquea a la ejecucion en curso.
     pub fn status(&self) -> BrokerStatus {
         let state = self.lock();
         let now = Instant::now();
@@ -473,8 +436,6 @@ impl Broker {
         }
     }
 
-    /// Encola y ejecuta; bloquea hasta que le toca el turno y termina.
-    /// La comprobacion de Studio se repite antes de lanzar (pudo abrirse esperando).
     pub fn execute(&self, request: RunRequest) -> RunReport {
         let db_label = db::label(&request.db);
         let queued_at = Instant::now();
@@ -511,7 +472,6 @@ impl Broker {
             });
         }
 
-        // El `Drop` de `Slot` libera el turno si el runner entra en panico: un bug no puede bloquear el broker.
         let slot = Slot { broker: self };
         let queue_wait_ms = elapsed(&Instant::now(), queued_at);
 
@@ -583,7 +543,6 @@ impl Broker {
                     None => (None, None, errors),
                 }
             }
-            // La db puede desaparecer durante la ejecucion: el hecho bruto se conserva, solo falta la atribucion.
             Err(_) => (None, None, Vec::new()),
         };
 
@@ -628,7 +587,6 @@ impl Broker {
     }
 }
 
-/// Libera el turno aunque el runner entre en panico.
 struct Slot<'a> {
     broker: &'a Broker,
 }
@@ -672,7 +630,6 @@ pub struct CollectedEvents {
     pub files: Vec<PathBuf>,
 }
 
-/// Lee los eventos del robot de esta ejecucion; sin eventos no hay prueba de que ejecutara.
 pub fn collect_events(outcome: &RunOutcome, robot: &str) -> CollectedEvents {
     let since = outcome.started_at - chrono::Duration::seconds(CLOCK_SLACK_SECS);
 
@@ -728,7 +685,6 @@ fn collect_from_file(path: &Path, robot: &str, since: NaiveDateTime) -> Collecte
     out
 }
 
-/// Atribuye los errores de la ejecucion al snapshot vivo de cada instante.
 fn attribute_run_errors(
     conn: &rusqlite::Connection,
     robot: &str,
@@ -764,7 +720,6 @@ fn attribute_run_errors(
             .find(|item| item.signature == raw.signature && item.line == line)
         {
             item.occurrences += 1;
-            // La version maxima: si la firma se repitio en dos versiones, la ultima es la unica que puede seguir viva.
             if attribution.version > item.version {
                 item.version = attribution.version;
                 item.verdict = attribution.verdict;
@@ -785,7 +740,6 @@ fn attribute_run_errors(
     out
 }
 
-/// Primera linea del mensaje, acotada: la traza de Python no es el defecto.
 fn first_line(message: &str) -> String {
     let first = message.lines().next().unwrap_or("").trim();
     let mut out: String = first.chars().take(160).collect();
@@ -795,7 +749,6 @@ fn first_line(message: &str) -> String {
     out
 }
 
-/// Directorio de ejecucion nuevo; el nombre empieza por la fecha para que ordenar por nombre ordene por antiguedad.
 pub fn new_run_dir(base: &Path, robot: &str) -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let stamp = now_local().format("%Y%m%d-%H%M%S");
@@ -807,8 +760,6 @@ pub fn new_run_dir(base: &Path, robot: &str) -> PathBuf {
     ))
 }
 
-/// Borra los directorios de ejecucion mas viejos, conservando `keep`.
-/// Best-effort: un fichero abierto en Windows no se puede borrar y eso no puede tumbar una ejecucion.
 pub fn prune_run_dirs(base: &Path, keep: usize) -> usize {
     let root = base.join("rocketdebug-runs");
     let Ok(entries) = std::fs::read_dir(&root) else {
@@ -832,7 +783,6 @@ pub fn prune_run_dirs(base: &Path, keep: usize) -> usize {
     removed
 }
 
-/// Nombre de fichero seguro: solo ASCII alfanumerico, `-` y `_`.
 fn slug(text: &str) -> String {
     let mut out = String::new();
     for ch in text.chars() {
@@ -853,7 +803,6 @@ fn slug(text: &str) -> String {
     }
 }
 
-/// Nombre exacto del proceso, aislado para probar la deteccion sin `tasklist`.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn is_rocketbot_process(name: &str) -> bool {
     name.trim_matches('"')
@@ -861,7 +810,6 @@ fn is_rocketbot_process(name: &str) -> bool {
         .eq_ignore_ascii_case("rocketbot.exe")
 }
 
-/// La linea localizada de "No tasks..." no empieza por el nombre y se ignora sola; probada en todas las plataformas.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn parse_tasklist(output: &str) -> Vec<u32> {
     let mut pids = Vec::new();
@@ -890,14 +838,12 @@ fn rocketbot_pids() -> Vec<u32> {
         .output();
     match output {
         Ok(output) => parse_tasklist(&String::from_utf8_lossy(&output.stdout)),
-        // Si `tasklist` falla no se inventa deteccion: la verificacion de eventos sigue siendo la red de seguridad.
         Err(_) => Vec::new(),
     }
 }
 
 #[cfg(not(windows))]
 fn rocketbot_pids() -> Vec<u32> {
-    // Studio solo corre en Windows; en otros hosts no hay nada que detectar.
     Vec::new()
 }
 
@@ -924,7 +870,6 @@ fn kill_tree(pid: u32) {
     }
 }
 
-/// Absolutiza contra el cwd; `canonicalize` resolveria enlaces y exigiria que el fichero exista.
 fn absolute(path: &Path) -> PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();
@@ -936,7 +881,6 @@ fn absolute(path: &Path) -> PathBuf {
 
 fn spawn_reader(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<String> {
     std::thread::spawn(move || {
-        // Se drena hasta EOF aunque solo se conserve la cola: si el pipe se llena, el hijo se bloquea y muere por timeout.
         let mut tail: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 8192];
         loop {
@@ -957,7 +901,6 @@ fn spawn_reader(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle
     })
 }
 
-/// Resuelve el `Log path: ...` del CLI contra el cwd y el directorio del ejecutable.
 fn reported_log_path(stdout: &str, cwd: &Path, exe: &Path) -> Option<PathBuf> {
     let line = stdout
         .lines()
@@ -982,7 +925,6 @@ fn reported_log_path(stdout: &str, cwd: &Path, exe: &Path) -> Option<PathBuf> {
     Some(from_cwd)
 }
 
-/// `SYSTEMTIME` de Win32: `repr(C)` con los siete campos `WORD`.
 #[cfg(windows)]
 #[repr(C)]
 struct WinSystemTime {
@@ -996,15 +938,12 @@ struct WinSystemTime {
     milliseconds: u16,
 }
 
-// `GetLocalTime` con enlazado explicito: el CI de Windows usa MSVC y no conviene fiarse de `kernel32` por defecto.
 #[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {
     fn GetLocalTime(system_time: *mut WinSystemTime);
 }
 
-/// Hora local: `chrono` va sin la feature `clock` en el workspace y los logs de
-/// Rocketbot estan en hora local. En Windows se pregunta con `GetLocalTime`; en el resto, UTC.
 #[cfg(windows)]
 fn now_local() -> NaiveDateTime {
     let mut time = WinSystemTime {
@@ -1017,8 +956,6 @@ fn now_local() -> NaiveDateTime {
         second: 0,
         milliseconds: 0,
     };
-    // SAFETY: `GetLocalTime` solo escribe en el puntero; la estructura es
-    // `repr(C)` y tiene exactamente los siete campos `WORD` que espera Win32.
     unsafe { GetLocalTime(&mut time) };
     let text = format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
@@ -1068,9 +1005,6 @@ mod tests {
 
     #[test]
     fn una_db_relativa_se_absolutiza_antes_de_lanzar() {
-        // El hijo corre con cwd en el directorio de la db; si la ruta llegara
-        // relativa, `-db=BBRE2\robot.db` se resolveria contra `BBRE2` y abriria
-        // `BBRE2\BBRE2\robot.db`.
         let cwd = std::env::current_dir().expect("cwd");
         let relative = Path::new("BBRE2").join("robot.db");
         let config = ExecConfig::new(PathBuf::from("rocketbot.exe"), cwd.join("logs"));
@@ -1138,8 +1072,6 @@ mod tests {
         std::fs::create_dir_all(&exe_dir).expect("exe dir");
         std::fs::write(cwd.join("logs").join("261118").join("a.log"), "x").expect("log en cwd");
 
-        // Rocketbot es Windows y anuncia la ruta con `\`; en el resto de hosts
-        // el test usa el separador de la plataforma para probar la resolucion.
         let sep = std::path::MAIN_SEPARATOR;
         let stdout = format!("banner\nLog path:  logs{sep}261118{sep}a.log\nfin\n");
         let found = reported_log_path(&stdout, &cwd, &exe_dir.join("rocketbot.exe"))
@@ -1163,16 +1095,12 @@ mod tests {
 
     #[test]
     fn el_timeout_no_se_elige_por_debajo_del_minimo() {
-        // La fachada valida el argumento, pero el motor repite la regla: un
-        // consumidor que la llame directo tampoco puede poner 0.
         assert_eq!(timeout_from_secs(0).as_secs(), MIN_TIMEOUT_SECS);
         assert_eq!(timeout_from_secs(-7).as_secs(), MIN_TIMEOUT_SECS);
     }
 
     #[test]
     fn el_reader_drena_todo_y_conserva_la_cola() {
-        // Si el lector dejara de leer al llegar al tope, un robot hablador
-        // bloquearia el pipe y la ejecucion moriria por timeout.
         let mut data = vec![b'a'; MAX_OUTPUT_BYTES];
         data.extend_from_slice(b"TAIL");
         let texto = spawn_reader(std::io::Cursor::new(data))

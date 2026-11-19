@@ -1,12 +1,3 @@
-//! Parseo de los logs de ejecucion de Rocketbot.
-//!
-//! La linea de error no nombra el nodo que fallo: se hereda la ultima
-//! `request:` vista, como pista y no como certeza.
-//!
-//! ```text
-//! 2026-11-17 12:43:47.586814 - rocketbot - INFO - request: ML_06_Legacy : line 1 - rpasystem : log_message  id: 24c9916d-469e-4bbc-85ee-392feee643a7 - INFO - INICIO subrobot
-//! ```
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -14,48 +5,33 @@ use std::time::SystemTime;
 
 use chrono::NaiveDateTime;
 
-/// Separador de campo: la fecha no lleva espacios, asi que el primer " - " cierra el timestamp.
 const SEP: &str = " - ";
 
-/// Prefijo del bloque de peticion dentro del mensaje.
 const REQUEST: &str = "request:";
 
-/// Directorio de logs del Studio local.
-/// Es la unica ruta del entorno que conoce el motor: los demas reciben rutas.
 pub const DEFAULT_LOGS_DIR: &str = r"C:\Rocketbot\logs";
 
-/// Peticion de ejecucion tal como la escribe el runner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestRef {
     pub robot: String,
-    /// Etiqueta de linea de Studio (`2.10`); no es unica con Try/Catch.
-    /// La direccion fiable es [`Self::cmd_id`].
     pub line: String,
     pub module: String,
     pub command: String,
-    /// UUID del nodo (`tree::FlatNode::id`); vacio en comandos internos sin `id:`.
     pub cmd_id: String,
     pub option: String,
-    /// Parametros crudos de Rocketbot: recortarlos es decision del render.
     pub payload: String,
 }
 
-/// Una entrada del log: una cabecera ya interpretada.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogEntry {
-    /// Instante con microsegundos; ata el error al snapshot de codigo vivo.
     pub timestamp: NaiveDateTime,
     pub source: String,
-    /// Nivel (`INFO`, `ERROR`...); puede venir vacio (`robot_message` lo omite).
     pub level: String,
-    /// Mensaje completo; conserva el bloque de peticion si lo traia.
     pub message: String,
-    /// Peticion propia o heredada; `None` en lineas que no son de ningun nodo.
     pub request: Option<RequestRef>,
 }
 
 impl LogEntry {
-    /// Nivel de error o mensaje que empieza por `EXCEPTION`: las dos formas de fallo.
     pub fn is_error(&self) -> bool {
         let level = self.level.trim();
         let nivel_malo = ["ERROR", "EXCEPTION", "FATAL"]
@@ -70,19 +46,7 @@ impl LogEntry {
     }
 }
 
-/// Parsea una linea con cabecera. Devuelve `None` si no lo es.
-///
-/// ```
-/// use rocketdebug_core::logs::parse_line;
-///
-/// let linea = "2026-11-17 12:43:47.586814 - rocketbot - INFO - request: ML_06_Legacy : line 1 - rpasystem : log_message  id: 24c9916d-469e-4bbc-85ee-392feee643a7 - INFO - INICIO subrobot";
-/// let entrada = parse_line(linea).expect("es una cabecera");
-/// let peticion = entrada.request.expect("trae bloque de peticion");
-/// assert_eq!(peticion.command, "log_message");
-/// assert_eq!(peticion.line, "1");
-/// ```
 pub fn parse_line(line: &str) -> Option<LogEntry> {
-    // Un BOM UTF-8 no es whitespace: sin quitarlo se pierde la primera cabecera.
     let text = line
         .trim_start_matches('\u{feff}')
         .trim_start()
@@ -98,7 +62,6 @@ pub fn parse_line(line: &str) -> Option<LogEntry> {
     let level = campos.next()?.trim();
     let mensaje = campos.next().unwrap_or("");
 
-    // Se parsea con los espacios finales intactos: un payload vacio se confunde con un `-`.
     let request = parse_request(mensaje);
 
     Some(LogEntry {
@@ -110,7 +73,6 @@ pub fn parse_line(line: &str) -> Option<LogEntry> {
     })
 }
 
-/// Parsea un log completo.
 pub fn parse_text(text: &str) -> Vec<LogEntry> {
     let mut out: Vec<LogEntry> = Vec::new();
     let mut ultima_peticion: Option<usize> = None;
@@ -143,8 +105,6 @@ pub fn parse_text(text: &str) -> Vec<LogEntry> {
     out
 }
 
-/// Entradas de `robot` por referencia, sin distinguir mayusculas.
-/// Solo las lineas con `request`: reclamar el ruido del motor por cercania es un falso positivo.
 pub fn of_robot<'a>(entries: &'a [LogEntry], robot: &str) -> impl Iterator<Item = &'a LogEntry> {
     let buscado = robot.trim().to_lowercase();
     entries.iter().filter(move |e| {
@@ -154,13 +114,10 @@ pub fn of_robot<'a>(entries: &'a [LogEntry], robot: &str) -> impl Iterator<Item 
     })
 }
 
-/// [`of_robot`] con las entradas ya clonadas.
 pub fn for_robot(entries: &[LogEntry], robot: &str) -> Vec<LogEntry> {
     of_robot(entries, robot).cloned().collect()
 }
 
-/// Ficheros `*.log` bajo `dir`, recursivo, del mas nuevo al mas viejo, maximo `max`.
-/// Un directorio ilegible devuelve vacio: "no hay logs" no es un error del robot.
 pub fn recent_files(dir: &Path, max: usize) -> Vec<PathBuf> {
     if max == 0 {
         return Vec::new();
@@ -173,7 +130,6 @@ pub fn recent_files(dir: &Path, max: usize) -> Vec<PathBuf> {
             continue;
         };
         for entrada in entradas.flatten() {
-            // `file_type` no sigue enlaces: tratarlos como directorio abriria un bucle.
             let Ok(tipo) = entrada.file_type() else {
                 continue;
             };
@@ -192,7 +148,6 @@ pub fn recent_files(dir: &Path, max: usize) -> Vec<PathBuf> {
             if !es_log {
                 continue;
             }
-            // Sin fecha legible se usa epoch: queda al final del orden, no desaparece.
             let modificado = entrada
                 .metadata()
                 .and_then(|m| m.modified())
@@ -209,20 +164,15 @@ pub fn recent_files(dir: &Path, max: usize) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Contenido de un log decodificado con perdida, o `None` si no se puede leer.
-/// La decodificacion ocurre en el borde para que el parser trabaje sobre `&str`.
 pub fn read_text(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Tope de ficheros cacheados (64): acota la memoria de un proceso de vida larga.
 const CACHE_MAX_ENTRIES: usize = 64;
 
-/// Cache de proceso: el candado protege el mapa, no el parseo.
 static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
 
-/// Identidad de una version: ni la ruta sola ni el `mtime` solo la fijan.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CacheKey {
     path: PathBuf,
@@ -231,7 +181,6 @@ struct CacheKey {
 }
 
 impl CacheKey {
-    /// Clave de la version actual; `None` si no hay metadata fiable.
     fn of(path: &Path) -> Option<Self> {
         let meta = std::fs::metadata(path).ok()?;
         Some(Self {
@@ -242,10 +191,8 @@ impl CacheKey {
     }
 }
 
-/// Una entrada del cache y cuando se uso por ultima vez.
 struct Cached {
     entries: Arc<[LogEntry]>,
-    /// Reloj del ultimo uso: decide el desalojo, no la fecha de insercion.
     used: u64,
 }
 
@@ -257,7 +204,6 @@ struct Cache {
 }
 
 impl Cache {
-    /// Busca la version exacta del fichero y anota el acierto.
     fn lookup(&mut self, key: &CacheKey) -> Option<Arc<[LogEntry]>> {
         self.tick += 1;
         let tick = self.tick;
@@ -268,9 +214,7 @@ impl Cache {
         Some(entries)
     }
 
-    /// Guarda una version y, si el cache esta lleno, desaloja la menos usada.
     fn insert(&mut self, key: CacheKey, entries: Arc<[LogEntry]>) {
-        // Reinsertar una clave existente no desaloja: otra hebra puede reinsertarla.
         if self.files.len() >= CACHE_MAX_ENTRIES && !self.files.contains_key(&key) {
             let menos_usada = self
                 .files
@@ -292,8 +236,6 @@ impl Cache {
     }
 }
 
-/// Entradas de un fichero, cacheadas por `(ruta, mtime, tamano)`; lista compartida.
-/// Un fichero ilegible devuelve `None` y no se cachea: el fallo puede ser transitorio.
 pub fn parse_file_cached(path: &Path) -> Option<Arc<[LogEntry]>> {
     let Some(key) = CacheKey::of(path) else {
         return read_text(path).map(|text| parse_text(&text).into());
@@ -308,17 +250,14 @@ pub fn parse_file_cached(path: &Path) -> Option<Arc<[LogEntry]>> {
     Some(entries)
 }
 
-/// Vacia el cache y reinicia el contador de aciertos.
 pub fn clear_cache() {
     with_cache(|cache| *cache = Cache::default());
 }
 
-/// `(ficheros vivos, aciertos)` del cache.
 pub fn cache_stats() -> (usize, usize) {
     with_cache(|cache| (cache.files.len(), cache.hits))
 }
 
-/// Acceso al cache recuperando el candado envenenado.
 fn with_cache<T>(f: impl FnOnce(&mut Cache) -> T) -> T {
     let mut guard = CACHE
         .get_or_init(Default::default)
@@ -327,7 +266,6 @@ fn with_cache<T>(f: impl FnOnce(&mut Cache) -> T) -> T {
     f(&mut guard)
 }
 
-/// Turno para los tests del cache: [`cache_stats`] es global al proceso.
 #[cfg(test)]
 pub(crate) fn cache_test_guard() -> std::sync::MutexGuard<'static, ()> {
     static TURNO: Mutex<()> = Mutex::new(());
@@ -336,12 +274,10 @@ pub(crate) fn cache_test_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Cabecera estricta: la fecha tiene que ser real, sin degradar a epoch.
 fn parse_timestamp(raw: &str) -> Option<NaiveDateTime> {
     NaiveDateTime::parse_from_str(raw.trim(), "%Y-%m-%d %H:%M:%S%.f").ok()
 }
 
-/// Interpreta el bloque `request:`; cualquier desviacion devuelve `None`.
 fn parse_request(message: &str) -> Option<RequestRef> {
     let message = message.trim_start();
     let prefijo = message.get(..REQUEST.len())?;
@@ -382,14 +318,12 @@ fn parse_request(message: &str) -> Option<RequestRef> {
     })
 }
 
-/// `line` de Studio: digitos separados por puntos.
 fn is_line_label(line: &str) -> bool {
     !line.is_empty()
         && line.bytes().all(|b| b.is_ascii_digit() || b == b'.')
         && line.bytes().any(|b| b.is_ascii_digit())
 }
 
-/// Separa comando, `cmd_id` y resto; `id:` puede faltar en comandos internos.
 fn split_command_id(rest: &str) -> (String, String, &str) {
     let bytes = rest.as_bytes();
     let mut search = 0;
@@ -403,7 +337,6 @@ fn split_command_id(rest: &str) -> (String, String, &str) {
             let id_part = rest[after..].trim_start();
             let id_end = id_part.find(char::is_whitespace).unwrap_or(id_part.len());
             let raw_id = &id_part[..id_end];
-            // Un `-` en vez de UUID es un id vacio, no un identificador.
             let cmd_id = if raw_id == "-" { "" } else { raw_id };
             return (command, cmd_id.to_string(), &id_part[id_end..]);
         }
@@ -416,7 +349,6 @@ fn split_command_id(rest: &str) -> (String, String, &str) {
     }
 }
 
-/// Campos que siguen al comando (o al `cmd_id`): `<opcion> - <payload>`.
 fn tail_fields(tail: &str) -> (String, String) {
     let Some(at) = tail.find("- ") else {
         return (String::new(), String::new());
@@ -439,9 +371,6 @@ fn tail_fields(tail: &str) -> (String, String) {
 mod tests {
     use super::*;
 
-    /// Muestra sintetica que copia las formas reales medidas en
-    /// `C:\Rocketbot\logs\261117`: 21 cabeceras, dos lineas de traza y los
-    /// defectos tipicos (NameError del robot, zdev, getbot, datatransform).
     const MUESTRA: &str = include_str!("../../../fixtures/logs/sample.log");
 
     fn entradas() -> Vec<LogEntry> {
@@ -483,7 +412,6 @@ mod tests {
         assert!(parse_line("  File \"<string>\", line 91, in run").is_none());
         assert!(parse_line("").is_none());
         assert!(parse_line("2026-11-17 12:43:47 - solo fecha y fuente").is_none());
-        // fecha invalida: no se inventa una entrada en 1970
         assert!(parse_line("2026-13-99 12:43:47.000000 - rocketbot - INFO - hola").is_none());
     }
 
@@ -493,7 +421,6 @@ mod tests {
             .expect("tolera CRLF");
         assert_eq!(e.message, "hola");
         assert_eq!(e.timestamp.to_string(), "2026-11-17 12:43:47");
-        // BOM UTF-8 al inicio del fichero.
         let con_bom = parse_line("\u{feff}2026-11-17 12:43:47.000000 - rocketbot - INFO - hola")
             .expect("tolera BOM");
         assert_eq!(con_bom.message, "hola");
@@ -501,7 +428,6 @@ mod tests {
 
     #[test]
     fn peticion_sin_id_se_acepta() {
-        // Forma real de los comandos internos: `logic :break -  - `.
         let e = parse_line(
             "2026-11-17 12:49:27.100400 - rocketbot - INFO - request: ML_06_Legacy : line 1.1.1 - logic :break -  - ",
         )
@@ -514,8 +440,6 @@ mod tests {
         assert_eq!(p.option, "");
         assert_eq!(p.payload, "");
 
-        // La misma linea con el espacio final recortado no debe producir un
-        // campo `option == "-"`.
         let recortada = parse_line(
             "2026-11-17 12:49:27.100400 - rocketbot - INFO - request: ML_06_Legacy : line 1.1.1 - logic :break -  -",
         )
@@ -581,7 +505,6 @@ mod tests {
         assert!(name_error
             .message
             .contains("File \"<string>\", line 91, in run"));
-        // La traza no genera entradas propias: solo hay 20 cabeceras.
         assert!(!entradas.iter().any(|e| e.message.starts_with("Traceback")));
     }
 
@@ -594,7 +517,6 @@ mod tests {
             .request
             .as_ref()
             .is_some_and(|r| r.robot == "ML_06_Legacy")));
-        // El contador de bucle no esta asociado a ningun nodo y no se reclama.
         assert!(!de_ml.iter().any(|e| e.message.starts_with("For count")));
 
         assert_eq!(for_robot(&entradas, "MCP_SELFTEST").len(), 1);
@@ -603,8 +525,6 @@ mod tests {
 
     #[test]
     fn tolera_bytes_no_utf8_ya_decodificados() {
-        // Un log real pasa por `from_utf8_lossy`: acentos en Windows-1252 y bytes
-        // sueltos llegan como `U+FFFD`, y el parseo no puede romperse por ello.
         let crudo: &[u8] = b"2026-11-17 12:43:47.000000 - rocketbot - INFO - mensaje con acento \xf1 y \xff roto\n2026-11-17 12:43:48.000000 - zdev - ERROR - EXCEPTION IN (<string> zdev, L_1375 \"\"): Error: Incorrect padding\n";
         let texto = String::from_utf8_lossy(crudo);
         let entradas = parse_text(&texto);
@@ -622,8 +542,6 @@ mod tests {
         assert!(parse_text("basura sin fecha\nmas basura").is_empty());
     }
 
-    /// Fija la fecha de modificacion: el orden de `recent_files` no puede
-    /// depender de la resolucion del reloj ni del orden de escritura.
     fn fechar(path: &Path, segundos: u64) {
         use std::time::{Duration, UNIX_EPOCH};
 
@@ -647,7 +565,6 @@ mod tests {
             std::fs::write(p, b"2026-11-17 12:43:47.000000 - rocketbot - INFO - hola\n")
                 .expect("escribo el log");
         }
-        // Un fichero que no es `*.log` no es evidencia: no se lista.
         std::fs::write(dia.join("notas.txt"), b"x").expect("escribo notas");
         fechar(&viejo, 10);
         fechar(&medio, 20);
@@ -670,7 +587,6 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         assert!(recent_files(&tmp.path().join("no_existe"), 10).is_empty());
         assert!(recent_files(tmp.path(), 0).is_empty());
-        // Un directorio vacio tampoco es un error.
         assert!(recent_files(tmp.path(), 10).is_empty());
     }
 
@@ -694,8 +610,6 @@ mod tests {
         assert!(read_text(&tmp.path().join("no_existe.log")).is_none());
     }
 
-    /// Cabecera valida de una peticion del robot: la forma minima que pasa por
-    /// [`parse_line`] sin depender de ningun fichero del entorno.
     fn linea(robot: &str, mensaje: &str) -> String {
         format!(
             "2026-11-17 12:43:47.586814 - rocketbot - INFO - request: {robot} : line 1 - rpasystem \
@@ -742,7 +656,6 @@ mod tests {
         let primera = parse_file_cached(&path).expect("leo el log");
         assert_eq!(primera.len(), 1);
 
-        // El runner sigue escribiendo: el tamano cambia y la clave ya no vale.
         texto.push_str(&linea("alfa", "dos"));
         std::fs::write(&path, &texto).expect("anado una linea");
 
@@ -765,8 +678,6 @@ mod tests {
         std::fs::write(&path, linea("alfa", "uno")).expect("escribo el log");
         let primera = parse_file_cached(&path).expect("leo el log");
 
-        // Mismo contenido y mismo tamano: solo cambia la fecha. Sin el `mtime` en
-        // la clave, este fichero se serviria del cache para siempre.
         fechar(&path, 42);
         let segunda = parse_file_cached(&path).expect("leo el log");
         assert_eq!(segunda.len(), 1);
@@ -779,7 +690,6 @@ mod tests {
     #[test]
     fn clear_cache_deja_el_cache_vacio() {
         let _turno = cache_test_guard();
-        // Otro test pudo dejar entradas: la medida empieza siempre del mismo sitio.
         clear_cache();
 
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -794,7 +704,6 @@ mod tests {
         clear_cache();
         assert_eq!(cache_stats(), (0, 0), "sin entradas y sin aciertos");
 
-        // Y sigue funcionando despues: el fichero se vuelve a parsear.
         let otra_vez = parse_file_cached(&path).expect("leo el log");
         assert_eq!(otra_vez.len(), 1);
         assert_eq!(cache_stats(), (1, 0));
@@ -813,7 +722,6 @@ mod tests {
             std::fs::write(&path, linea("alfa", "hola")).expect("escribo el log");
             rutas.push(path);
         }
-        // Al primero no se vuelve a tocar: es el candidato al desalojo.
         for path in &rutas {
             parseadas.push(parse_file_cached(path).expect("leo el log"));
         }
@@ -823,13 +731,11 @@ mod tests {
             "el cache no puede crecer por encima del tope"
         );
 
-        // El primero salio del cache: se reparsea en vez de reutilizarse.
         let readmitido = parse_file_cached(&rutas[0]).expect("leo el log");
         assert!(
             !Arc::ptr_eq(&parseadas[0], &readmitido),
             "se desaloja la entrada usada menos recientemente"
         );
-        // Y el ultimo, que si se acaba de usar, sigue dentro.
         let ultimo = parse_file_cached(&rutas[CACHE_MAX_ENTRIES]).expect("leo el log");
         assert!(
             Arc::ptr_eq(&parseadas[CACHE_MAX_ENTRIES], &ultimo),
@@ -852,7 +758,6 @@ mod tests {
             "un fallo de lectura no entra al cache"
         );
 
-        // Si el fichero aparece despues, se lee: el fallo no se memorizo.
         std::fs::write(&path, linea("alfa", "hola")).expect("escribo el log");
         let entradas = parse_file_cached(&path).expect("ahora si se lee");
         assert_eq!(entradas.len(), 1);

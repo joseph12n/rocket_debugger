@@ -1,16 +1,7 @@
-//! Redaccion de secretos antes de entregar un context pack.
-//!
-//! Orden de reglas: cifrado > nombre sensible > ruta. En parametros y hallazgos
-//! solo se enmascara el tramo del usuario (`%USERPROFILE%`, `~/`); los correos
-//! quedan como `j***@dominio`. La redaccion se aplica al construir el pack, no
-//! en el render: todos los consumidores salen del mismo dato limpio.
-
 use crate::pathscan;
 
-/// Firma de Fernet: Rocketbot cifra asi lo que guarda en `project.vars`.
 const FERNET_PREFIX: &str = "gAAAAA";
 
-/// Un token Fernet util ronda el centenar de caracteres; por debajo es texto casual.
 const MIN_ENCRYPTED_LEN: usize = 40;
 
 const SENSITIVE_TERMS: [&str; 14] = [
@@ -30,22 +21,17 @@ const SENSITIVE_TERMS: [&str; 14] = [
     "auth",
 ];
 
-/// Marcador de un valor que llega cifrado.
 pub const ENCRYPTED_MARK: &str = "(valor cifrado)";
 
-/// Marcador de un valor oculto por el nombre de su variable.
 pub const HIDDEN_MARK: &str = "(oculto)";
 
-/// Marcador de un valor que es una ruta absoluta del equipo del usuario.
 pub const PATH_MARK: &str = "(ruta)";
 
-/// Detecta un blob Fernet plausible, sin validarlo de verdad.
 pub fn is_encrypted(value: &str) -> bool {
     let v = value.trim();
     if v.len() < MIN_ENCRYPTED_LEN || !v.starts_with(FERNET_PREFIX) {
         return false;
     }
-    // Se aceptan los dos alfabetos base64: el objetivo es no dejar pasar el blob.
     v.bytes().all(is_base64_byte)
 }
 
@@ -53,7 +39,6 @@ fn is_base64_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'-' | b'_' | b'=')
 }
 
-/// El nombre declara una credencial, sin distinguir mayusculas ni separadores.
 pub fn is_sensitive_name(name: &str) -> bool {
     let lower = name.trim().to_lowercase();
     if lower.is_empty() {
@@ -69,8 +54,6 @@ fn name_matches(lower: &str, flat: &str, term: &str) -> bool {
     if lower.split(is_separator).any(|token| token == term) {
         return true;
     }
-    // La subcadena puede marcar de mas (`compass` contiene `pass`): ocultar un
-    // valor inocuo cuesta menos que publicar una credencial.
     flat.contains(strip_separators(term).as_str())
 }
 
@@ -82,12 +65,10 @@ fn strip_separators(s: &str) -> String {
     s.chars().filter(|c| !is_separator(*c)).collect()
 }
 
-/// Raices POSIX que en la practica solo aparecen como ruta absoluta.
 const POSIX_ROOTS: [&str; 6] = ["/home/", "/Users/", "/var/", "/tmp/", "/etc/", "/opt/"];
 
 const UNC_PREFIX: &str = r"\\";
 
-/// `true` si el valor lleva una ruta absoluta; URLs y rutas relativas quedan fuera.
 pub fn is_absolute_path(value: &str) -> bool {
     let v = value.trim();
     if v.is_empty() {
@@ -97,7 +78,6 @@ pub fn is_absolute_path(value: &str) -> bool {
     has_windows_drive(v, &urls) || has_unc(v) || has_posix_root(v, &urls)
 }
 
-/// Unidad Windows (`C:\`, `C:/`), si no continua un esquema ni cae en una URL.
 fn has_windows_drive(text: &str, urls: &[(usize, usize)]) -> bool {
     text.as_bytes().windows(3).enumerate().any(|(i, w)| {
         w[0].is_ascii_alphabetic()
@@ -108,7 +88,6 @@ fn has_windows_drive(text: &str, urls: &[(usize, usize)]) -> bool {
     })
 }
 
-/// UNC (`\\servidor\recurso`), al inicio o embebida; un `\\` suelto es un escape.
 fn has_unc(text: &str) -> bool {
     if text.starts_with(UNC_PREFIX) {
         return true;
@@ -124,7 +103,6 @@ fn has_unc(text: &str) -> bool {
     })
 }
 
-/// Raiz POSIX conocida que abre token: en `carpeta/home/x` es relativa.
 fn has_posix_root(text: &str, urls: &[(usize, usize)]) -> bool {
     POSIX_ROOTS.iter().any(|root| {
         text.match_indices(root)
@@ -141,9 +119,6 @@ struct MaskedPrefix {
     mark: &'static str,
 }
 
-/// Sustituye el tramo del usuario de las rutas absolutas por un marcador estable.
-///
-/// Es idempotente y no toca URLs ni texto normal.
 pub fn mask_user_paths(text: &str) -> String {
     let urls = pathscan::url_spans(text);
     let mut out: Option<String> = None;
@@ -173,14 +148,10 @@ pub fn mask_user_paths(text: &str) -> String {
     }
 }
 
-/// Patron de ruta con usuario que empieza en `at`; Windows primero.
 fn masked_prefix_at(text: &str, at: usize) -> Option<MaskedPrefix> {
     windows_users_at(text, at).or_else(|| posix_home_at(text, at))
 }
 
-/// Enmascara correos conservando la primera letra local y el dominio (`j***@ejemplo.com`).
-///
-/// Es idempotente y no toca un `@` sin forma de correo.
 pub fn mask_emails(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = String::new();
@@ -228,7 +199,6 @@ fn is_email_domain(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')
 }
 
-/// Dominio con al menos un punto y una extension alfabetica de 2+ letras.
 fn is_valid_email_domain(domain: &str) -> bool {
     if domain.len() > 253 || domain.contains("..") {
         return false;
@@ -253,7 +223,6 @@ fn is_valid_email_domain(domain: &str) -> bool {
     tld.len() >= 2 && tld.bytes().all(|byte| byte.is_ascii_alphabetic())
 }
 
-/// `C:\Users\<x>` / `C:/Users/<x>`, tambien con las barras escapadas de un JSON.
 fn windows_users_at(text: &str, at: usize) -> Option<MaskedPrefix> {
     let bytes = text.as_bytes();
     if !bytes.get(at).is_some_and(u8::is_ascii_alphabetic)
@@ -283,7 +252,6 @@ fn windows_users_at(text: &str, at: usize) -> Option<MaskedPrefix> {
     })
 }
 
-/// `\home\<x>`, `/home/<x>`, `\Users\<x>` y `/Users/<x>`: la marca es `~/`.
 fn posix_home_at(text: &str, at: usize) -> Option<MaskedPrefix> {
     let bytes = text.as_bytes();
     if !bytes.get(at).is_some_and(|c| is_sep(*c)) || !opens_home_token(text, at) {
@@ -315,7 +283,6 @@ fn posix_home_at(text: &str, at: usize) -> Option<MaskedPrefix> {
 
 const HOME_MARK_WITH_SEP: &str = "~/";
 
-/// Apertura de token para una raiz POSIX: no tras `:`, `~` ni `%` (unidad, marca, escape).
 fn opens_home_token(text: &str, at: usize) -> bool {
     let prev = text[..at].chars().next_back();
     prev.is_none() || prev.is_some_and(|c| !is_word_char(c) && !matches!(c, ':' | '~' | '%'))
@@ -329,15 +296,11 @@ fn is_sep(b: u8) -> bool {
     matches!(b, b'\\' | b'/')
 }
 
-/// Compara sin distinguir mayusculas.
 fn starts_with_ic(text: &str, at: usize, needle: &str) -> bool {
     text.get(at..at + needle.len())
         .is_some_and(|s| s.eq_ignore_ascii_case(needle))
 }
 
-/// Fin del tramo del usuario: el separador, la comilla de cierre o el final.
-///
-/// No se corta en el espacio (`John Doe`, issue #18); `None` si no hay caracter visible.
 fn user_end(text: &str, start: usize) -> Option<usize> {
     let mut end = start;
     let mut visible = false;
@@ -364,12 +327,10 @@ fn user_end(text: &str, start: usize) -> Option<usize> {
     visible.then_some(end)
 }
 
-/// Caracter que cierra el tramo del usuario; el apostrofo se decide en [`user_end`].
 fn is_user_stop(c: char) -> bool {
     matches!(c, '/' | '\\' | '"' | '\n' | '\r')
 }
 
-/// Valor listo para el pack; `None` cuando no hay nada que mostrar.
 pub fn redacted_value(name: &str, value: &str) -> Option<String> {
     if value.trim().is_empty() {
         return None;
@@ -390,8 +351,6 @@ pub fn redacted_value(name: &str, value: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Token Fernet con la forma exacta que Rocketbot deja en `project.vars`
-    /// (URL-safe base64, empieza por `gAAAAA`).
     const CIFRADO: &str = "gAAAAABq7LyRAghP1xNXRUIBkRfDi6ioMMqj_-oPnZ5xvkmSw_Jb1B41VjB_\
                           0Yq-KLSS9s_mV8pv3cJ8R2Q==";
 
@@ -445,8 +404,6 @@ mod tests {
 
     #[test]
     fn no_redacta_nombres_del_flujo() {
-        // Un falso positivo aqui rompe la comprension del robot: el agente deja de
-        // ver a quien apunta la peticion o cuanto vale un contador.
         for name in ["user", "usuario", "url", "saludo", "contador", "fallas", ""] {
             assert!(!is_sensitive_name(name), "no deberia ser sensible: {name}");
         }
@@ -492,7 +449,6 @@ mod tests {
     #[test]
     fn detecta_las_rutas_absolutas_del_usuario() {
         for value in [
-            // El hallazgo real de `reporteMercadolibre`.
             "C:/Users/josep/Downloads/perfil_chrome",
             r"C:\Users\josep\Downloads\perfil_chrome",
             r"C:\Users\josep\x",
@@ -508,9 +464,7 @@ mod tests {
         ] {
             assert!(is_absolute_path(value), "deberia ser ruta: {value}");
         }
-        // Una expresion puede empezar por la ruta y seguir con mas codigo.
         assert!(is_absolute_path(r#""C:/Users/josep/a" + fecha"#));
-        // UNC embebida tras otro texto.
         assert!(is_absolute_path(r"copia en \\srv\share\datos"));
     }
 
@@ -521,12 +475,9 @@ mod tests {
             "http://ejemplo.test/api",
             "https://x",
             "ftp://host/x",
-            // Contiene `C:/`, pero dentro de un esquema: no es una ruta.
             "file:///C:/Users/josep/x",
-            // El prefijo POSIX aparece, pero la ruta es relativa.
             "carpeta/sub/x.txt",
             "carpeta/home/x.txt",
-            // Una URL puede llevar `/home/` sin ser un path del disco.
             "https://ejemplo.test/home/usuario",
             "reporte_ml.xlsx",
             "operador1",
@@ -566,8 +517,6 @@ mod tests {
 
     #[test]
     fn el_nombre_sensible_gana_a_la_ruta() {
-        // El orden de las reglas es el contrato: con `(ruta)` el pack diria que
-        // la credencial es una ruta, y eso es informacion de mas.
         assert_eq!(
             redacted_value("db_password", "C:/Users/josep/x").as_deref(),
             Some("(oculto)")
@@ -604,17 +553,12 @@ mod tests {
             r"%USERPROFILE%\Downloads\perfil_chrome",
             "el separador original se conserva"
         );
-        // La unidad no tiene por que ser C, y la carpeta no distingue mayusculas.
         assert_eq!(mask_user_paths(r"D:\USERS\Josep\x"), r"%USERPROFILE%\x");
-        // Embebida en una expresion: todo lo que rodea la ruta se conserva.
         assert_eq!(
             mask_user_paths(r#""C:/Users/josep/x" + fecha"#),
             r#""%USERPROFILE%/x" + fecha"#
         );
-        // Sin cola no se inventa un separador que no estaba.
         assert_eq!(mask_user_paths("C:/Users/josep"), "%USERPROFILE%");
-        // Los parametros JSON llegan con las barras escapadas (`tree::params_text`
-        // re-serializa el objeto); el usuario se enmascara igual.
         assert_eq!(
             mask_user_paths(r#""C:\\Users\\josep\\reporte.xlsx""#),
             r#""%USERPROFILE%\\reporte.xlsx""#
@@ -623,9 +567,6 @@ mod tests {
 
     #[test]
     fn enmascara_el_usuario_con_espacios() {
-        // Issue #18: la cuenta de Windows y la de macOS llevan espacios, y el
-        // corte en el primero dejaba `%USERPROFILE% Doe\...` con medio nombre
-        // publicado. El tramo termina en el separador de la ruta, no en el espacio.
         assert_eq!(
             mask_user_paths("C:/Users/John Doe/proyectos/x.txt"),
             "%USERPROFILE%/proyectos/x.txt"
@@ -640,21 +581,15 @@ mod tests {
             mask_user_paths("/Users/John Doe/Documents/x"),
             "~/Documents/x"
         );
-        // Sin cola, el tramo llega al final de la cadena.
         assert_eq!(mask_user_paths("C:/Users/John Doe"), "%USERPROFILE%");
         assert_eq!(mask_user_paths("/home/juan perez"), "~");
-        // La comilla cierra el parametro, no el nombre: el espacio de dentro del
-        // tramo no puede confundirse con el final del valor.
         assert_eq!(
             mask_user_paths(r#""C:/Users/John Doe/x" + fecha"#),
             r#""%USERPROFILE%/x" + fecha"#
         );
-        // El apostrofo forma parte del nombre: cortar en el dejaba `s/x` a la
-        // vista (issue #18).
         assert_eq!(mask_user_paths("C:/Users/O'Brien/x"), "%USERPROFILE%/x");
         assert_eq!(mask_user_paths("/home/O'Brien/x"), "~/x");
         assert_eq!(mask_user_paths("C:/Users/John'/x"), "%USERPROFILE%/x");
-        // Con espacio detras si es la comilla de cierre de un parametro.
         assert_eq!(
             mask_user_paths("C:/Users/John' + fecha"),
             "%USERPROFILE%' + fecha"
@@ -665,18 +600,11 @@ mod tests {
             con_apostrofo,
             "enmascarar dos veces no cambia el resultado"
         );
-        // Un tramo sin nada visible sigue sin enmascararse: `C:/Users/ ` es texto
-        // roto, no un usuario en blanco.
         for roto in ["C:/Users/", "C:/Users/ /x", "/home//x"] {
             assert_eq!(mask_user_paths(roto), roto, "se invento un usuario: {roto}");
         }
     }
 
-    /// Un texto normal con espacios se queda quieto: sin un patron de ruta no hay
-    /// tramo de usuario que esconder, y enmascarar de mas cambiaria el parametro
-    /// que el agente usa para entender el flujo.
-    /// El correo de un envio es dato personal; el dominio se conserva para que el
-    /// agente sepa a que proveedor apunta sin ver la direccion completa.
     #[test]
     fn enmascara_correos_y_conserva_el_dominio() {
         assert_eq!(
@@ -687,7 +615,6 @@ mod tests {
             mask_emails("to=<ana@b.co>, cc=<luis@sub.dominio.org>"),
             "to=<a***@b.co>, cc=<l***@sub.dominio.org>"
         );
-        // La marca ya no vuelve a casar: no se enmascara dos veces.
         assert_eq!(mask_emails("j***@ejemplo.com"), "j***@ejemplo.com");
     }
 
@@ -741,9 +668,7 @@ mod tests {
         assert_eq!(mask_user_paths("/Users/josep/Documents/x"), "~/Documents/x");
         assert_eq!(mask_user_paths(r"\Users\josep\Documents"), "~/Documents");
         assert_eq!(mask_user_paths("/home/josep"), "~");
-        // Solo el primer tramo: una carpeta `home` de dentro no es el home.
         assert_eq!(mask_user_paths("/home/josep/home/otro"), "~/home/otro");
-        // Un nombre de usuario no tiene por que ser ASCII.
         assert_eq!(mask_user_paths("/home/josé/x"), "~/x");
     }
 
@@ -761,15 +686,11 @@ mod tests {
             "https://ejemplo.com/Users/algo",
             "https://ejemplo.com/home/usuario",
             "https://ejemplo.test/api",
-            // Una URL `file:` tambien es una direccion, aunque lleve una ruta.
             "file:///C:/Users/josep/x",
-            // Aunque la URL lleve un nombre con espacios, sigue siendo una
-            // direccion: el tramo de usuario de dentro no se enmascara.
             "https://ejemplo.test/Users/John Doe",
         ] {
             assert_eq!(mask_user_paths(url), url, "se toco una URL: {url}");
         }
-        // La URL se queda; la ruta que va al lado si se enmascara.
         assert_eq!(
             mask_user_paths("mira https://ejemplo.com/Users/algo y C:/Users/josep/x"),
             "mira https://ejemplo.com/Users/algo y %USERPROFILE%/x"
@@ -818,7 +739,6 @@ mod tests {
             "https://ejemplo.com/Users/algo",
             r#""C:/Users/josep/a" + "C:\Users\josep\b""#,
             r#""C:\\Users\\josep\\x""#,
-            // Un nombre con espacios tampoco puede volver a enmascararse.
             "C:/Users/John Doe/proyectos/x.txt",
             r"C:\Users\Jane Roe\AppData\x",
             "/home/juan perez/x",

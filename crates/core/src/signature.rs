@@ -1,20 +1,11 @@
-//! Normalizacion de mensajes de error en firmas estables.
-//!
-//! La firma ignora los valores variables (nombres, hashes, rutas, puertos, horas)
-//! y es idempotente: el mismo defecto da el mismo texto entre ejecuciones.
-
 const UNDEFINED_NAME: &str = "name:{var}:not_defined";
 
-/// Cabecera de la traza de Python: a partir de ahi el mensaje no describe el defecto.
 const TRACEBACK: &str = "Traceback (most recent call last):";
 
-/// Modulos de la plataforma que fallan por defecto propio, no por el robot.
 const MODULE_DEFECTS: [&str; 4] = ["datatransform", "getbot", "getbot_service", "zdev"];
 
-/// 32 es el tamano de un MD5: por debajo, cualquier numero largo se confundiria con un hash.
 const HASH_MIN: usize = 32;
 
-/// De quien es el fallo: la UI agrupa por esto y mezclar ruido del motor con defectos del robot la deja en rojo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     Robot,
@@ -22,22 +13,7 @@ pub enum ErrorKind {
     Module,
 }
 
-/// Firma estable: dos ejecuciones del mismo defecto dan el mismo texto aunque cambien variable, linea, ruta, puerto o hash.
-///
-/// ```
-/// use rocketdebug_core::signature::normalize;
-///
-/// assert_eq!(
-///     normalize("NameError: name 'contador' is not defined"),
-///     "NameError:name:{var}:not_defined"
-/// );
-/// assert_eq!(
-///     normalize("EXCEPTION IN (<string> Rocketbot, L_1375 \"\"): Error: Incorrect padding"),
-///     "EXCEPTION IN (<string> Rocketbot, L_? \"\"): Error:Incorrect padding"
-/// );
-/// ```
 pub fn normalize(message: &str) -> String {
-    // Una traza de Python no describe el defecto: cambia con la version instalada y rompe la agrupacion entre ejecuciones.
     let sin_traza = match message.find(TRACEBACK) {
         Some(at) => &message[..at],
         None => message,
@@ -52,7 +28,6 @@ pub fn normalize(message: &str) -> String {
     collapse_ws(&s)
 }
 
-/// Ruido conocido del motor (zdev base64, getbot IndexError): no se arregla desde el robot y envenena el informe.
 pub fn is_engine_noise(message: &str) -> bool {
     let lower = message.to_lowercase();
     match exception_module(message) {
@@ -72,7 +47,6 @@ pub fn is_engine_noise(message: &str) -> bool {
     }
 }
 
-/// Un modulo de plataforma es Module aunque ademas sea ruido conocido; EngineNoise solo para ruido sin modulo concreto.
 pub fn classify(message: &str) -> ErrorKind {
     let en_modulo_defectuoso = exception_module(message).is_some_and(|module| {
         MODULE_DEFECTS
@@ -88,10 +62,8 @@ pub fn classify(message: &str) -> ErrorKind {
     ErrorKind::Robot
 }
 
-/// El modulo del `<string> X` del runner: unico dato para decidir si el fallo es del robot o de la plataforma.
 fn exception_module(message: &str) -> Option<&str> {
     const MARK: &str = "<string>";
-    // `to_ascii_lowercase` conserva longitud y fronteras de caracter: el indice vale sobre el original.
     let lower = message.to_ascii_lowercase();
     let at = lower.find(MARK)?;
     let rest = message.get(at + MARK.len()..)?.trim_start();
@@ -104,7 +76,6 @@ fn exception_module(message: &str) -> Option<&str> {
     }
 }
 
-/// Espacios multiples (y saltos de linea) a uno solo, sin extremos.
 fn collapse_ws(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut pendiente = false;
@@ -134,12 +105,10 @@ fn is_path_byte(b: u8) -> bool {
         )
 }
 
-/// Impide que un `/` inicie ruta: `http://host/x` no se parte y `foo/bar` no cuenta.
 fn is_posix_path_blocker(b: u8) -> bool {
     is_word_byte(b) || matches!(b, b'-' | b'.' | b'/' | b'\\' | b':' | b'$')
 }
 
-/// Sustituye rutas absolutas por `<path>`; se corta en el primer espacio (decision consciente).
 fn mask_paths(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
@@ -163,7 +132,6 @@ fn mask_paths(s: &str) -> String {
     out
 }
 
-/// `X:\...` o `X:/...`: ruta absoluta de Windows.
 fn windows_path_end(s: &str, i: usize) -> Option<usize> {
     let bytes = s.as_bytes();
     let b = *bytes.get(i)?;
@@ -180,7 +148,6 @@ fn windows_path_end(s: &str, i: usize) -> Option<usize> {
     Some(scan_path(s, i + 2))
 }
 
-/// `\\servidor\recurso`: ruta UNC.
 fn unc_path_end(s: &str, i: usize) -> Option<usize> {
     let bytes = s.as_bytes();
     if bytes.get(i) != Some(&b'\\') || bytes.get(i + 1) != Some(&b'\\') {
@@ -192,7 +159,6 @@ fn unc_path_end(s: &str, i: usize) -> Option<usize> {
     Some(scan_path(s, i + 2))
 }
 
-/// Ruta absoluta POSIX; el primer caracter tras `/` debe ser de nombre de fichero.
 fn posix_path_end(s: &str, i: usize) -> Option<usize> {
     let bytes = s.as_bytes();
     if bytes.get(i) != Some(&b'/') {
@@ -217,7 +183,6 @@ fn scan_path(s: &str, start: usize) -> usize {
     i
 }
 
-/// `L_123` -> `L_?`, exigiendo inicio de palabra para no tocar nombres como `ML_06_Legacy`.
 fn mask_line_numbers(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
@@ -244,7 +209,6 @@ fn mask_line_numbers(s: &str) -> String {
     out
 }
 
-/// Tiras hexadecimales de 32+ caracteres (MD5, SHA1, SHA256...) -> `<hash>`.
 fn mask_hashes(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
@@ -271,7 +235,6 @@ fn mask_hashes(s: &str) -> String {
     out
 }
 
-/// Puerto en `host:8080` -> `host:<port>` y en `port 8080` -> `port <port>`; `12:43:47` es una hora.
 fn mask_ports(s: &str) -> String {
     let s = mask_colon_ports(s);
     mask_labelled_ports(&s)
@@ -368,7 +331,6 @@ fn starts_with_ci(s: &str, at: usize, needle: &str) -> bool {
         .is_some_and(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
-/// `name 'contador' is not defined` -> `name:{var}:not_defined`.
 fn compact_undefined_name(s: &str) -> String {
     const PHRASE: &str = " is not defined";
     const HEAD: &str = "name ";
@@ -410,7 +372,6 @@ fn compact_undefined_name(s: &str) -> String {
     out
 }
 
-/// Quita el espacio tras `Error:` / `Exception:`: la firma no depende de como formatee Python.
 fn compact_error_colon(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut comiendo = false;
@@ -469,7 +430,6 @@ mod tests {
 
     #[test]
     fn firma_ignora_lineas_que_no_son_de_traza() {
-        // Un `ML_06_Legacy` no es una linea `L_n` y no se debe tocar.
         assert_eq!(
             normalize("INICIO subrobot ML_06_Legacy"),
             "INICIO subrobot ML_06_Legacy"
@@ -485,7 +445,6 @@ mod tests {
         assert!(win.contains("<path>"), "{win}");
         assert!(!win.contains("rocketbot_bots"), "{win}");
         assert!(posix.starts_with("<path> "), "{posix}");
-        // Dos rutas distintas del mismo error dan la misma firma.
         assert_eq!(
             normalize("/home/a/robot.py roto"),
             normalize("/home/b/robot.py roto")
@@ -510,7 +469,6 @@ mod tests {
         assert!(md5.contains("<hash>"), "{md5}");
         assert!(sha256.contains("<hash>"), "{sha256}");
         assert!(!md5.contains("0123456789"));
-        // Una tira corta no es un hash.
         assert_eq!(normalize("id deadbeef"), "id deadbeef");
     }
 
@@ -536,7 +494,6 @@ mod tests {
             normalize("no pude abrir el puerto: 3000"),
             "no pude abrir el puerto: <port>"
         );
-        // 12:43:47 es una hora, no un puerto.
         assert_eq!(
             normalize("error a las 12:43:47.586814"),
             "error a las 12:43:47.586814"
@@ -565,7 +522,6 @@ mod tests {
 
     #[test]
     fn ruido_de_motor_conocido() {
-        // Formas reales del entorno: zdev rompiendo base64 y getbot sin subrobot.
         assert!(is_engine_noise(
             r#"EXCEPTION IN (<string> zdev, L_1375 ""): Error: Incorrect padding"#
         ));
@@ -578,15 +534,12 @@ mod tests {
         assert!(is_engine_noise(
             r#"EXCEPTION IN (<string> getbot, L_1704 ""): IndexError: list index out of range"#
         ));
-        // Error del robot: no es ruido.
         assert!(!is_engine_noise(
             r#"EXCEPTION IN (<string> Rocketbot, L_91 ""): NameError: name 'contador' is not defined"#
         ));
-        // Defecto de datatransform: es de la plataforma, pero no ruido transitorio.
         assert!(!is_engine_noise(
             r#"EXCEPTION IN (<string> datatransform, L_212 ""): AttributeError: 'NoneType' object has no attribute 'get'"#
         ));
-        // Sin marcador de modulo, el propio texto delata el ruido del base64.
         assert!(is_engine_noise("Error: Incorrect padding"));
     }
 
@@ -602,7 +555,6 @@ mod tests {
             let msg = format!(r#"EXCEPTION IN (<string> {modulo}, L_1 ""): KeyError: 'x'"#);
             assert_eq!(classify(&msg), ErrorKind::Module, "modulo {modulo}");
         }
-        // El ruido sin modulo conocido se queda en ruido de motor.
         assert_eq!(classify("Error: Incorrect padding"), ErrorKind::EngineNoise);
     }
 

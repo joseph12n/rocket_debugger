@@ -1,9 +1,3 @@
-//! Render del context pack y contabilidad de tokens.
-//!
-//! Markdown, no JSON: cada seccion del render es una card de la UI futura.
-//! Presupuesto: ~2,5k tokens por robot, 5+5 hallazgos, params a 100 y mensajes a
-//! 140. Un tope que recorta declara el total real en cabecera y linea de cierre.
-
 use std::fmt::Write as _;
 
 use crate::analysis::ErrorItem;
@@ -13,26 +7,21 @@ use crate::pack::Pack;
 use crate::redact;
 use crate::rules::{Finding, Severity};
 
-/// Se cortan los parametros largos: un `execJs` de 2 KB aporta el inicio, no el final.
 pub const PARAM_MAX: usize = 100;
 pub const VAR_MAX: usize = 60;
 
-/// Tope de la descripcion; pasa por [`field`] porque puede citar la carpeta de trabajo (issue #18).
 const DESCRIPTION_MAX: usize = 200;
 
-/// Contrato listado por seccion: el resto se consulta en el pack del subrobot.
 pub const CONTRACT_MAX: usize = 8;
 
 pub const CONTRACT_VARS_MAX: usize = 6;
 
-/// Medido en BBRE2: seis filas ensenan los errores que duelen; el resto se cuenta.
 pub const ERRORS_LIVE_MAX: usize = 6;
 pub const ERRORS_PAYLOAD_MAX: usize = 3;
 pub const ERRORS_GROUP_MAX: usize = 3;
 
 const ERROR_MESSAGE_SHOW: usize = 120;
 
-/// Cinco por seccion: lo que se lee de verdad; el resto se cuenta en cabecera y cierre.
 pub const MAX_PER_SECTION: usize = 5;
 
 const FINDING_MESSAGE_MAX: usize = 140;
@@ -56,7 +45,6 @@ impl Sizing {
     }
 }
 
-/// Estimacion a ~3,7 caracteres por token para JSON/codigo; error tipico +-15%.
 pub fn estimate_tokens(s: &str) -> usize {
     (s.chars().count() as f64 / 3.7).ceil() as usize
 }
@@ -75,13 +63,10 @@ fn clip(s: &str, max: usize) -> String {
 }
 
 fn field(s: &str, max: usize) -> String {
-    // La politica de redaccion (rutas y correos) vive solo aqui: enmascarar antes
-    // de recortar; si no, un corte dentro del nombre o del correo se escaparia (issue #16).
     let masked = redact::mask_user_paths(&one_line(s));
     clip(&redact::mask_emails(&masked), max)
 }
 
-/// Cubo con tope: si se recorta se dice ("5 de 23"); el silencio hacia creer que era el total.
 fn render_bucket(o: &mut String, title: &str, findings: &[Finding]) {
     if findings.is_empty() {
         return;
@@ -129,7 +114,6 @@ fn render_bucket(o: &mut String, title: &str, findings: &[Finding]) {
     let _ = writeln!(o);
 }
 
-/// Lista acotada (`a, b, c (+3 mas)`); la vacia se pinta `(nada)` para no parecer un error de formato.
 fn vars_preview(vars: &[String]) -> String {
     if vars.is_empty() {
         return "(nada)".to_string();
@@ -222,13 +206,11 @@ impl Pack {
         o
     }
 
-    /// Accionables e higiene separados: compiten por el mismo cupo y no valen lo mismo; la seccion vacia se omite.
     fn render_findings(&self, o: &mut String) {
         render_bucket(o, "Hallazgos", &self.analysis.findings);
         render_bucket(o, "Higiene", &self.analysis.higiene);
     }
 
-    /// Contrato implicito de execRocketBotDB: lo que provee el padre, lo que espera el hijo y lo que el grafo no resolvio.
     fn render_contracts(&self, o: &mut String) {
         let analysis = &self.analysis;
         let sin_resolver =
@@ -285,7 +267,6 @@ impl Pack {
         let _ = writeln!(o);
     }
 
-    /// Errores atribuidos al snapshot vivo; se acota por cubos y filas y el resto se cuenta.
     fn render_errors(&self, o: &mut String) {
         let errors = &self.analysis.errors;
         if errors.is_empty() {
@@ -340,7 +321,6 @@ impl Pack {
         let _ = writeln!(o);
     }
 
-    /// Seccion de errores como documento independiente: el formato vive en un solo sitio y la tool no depende del orden.
     pub fn render_errors_section(&self) -> Option<String> {
         let mut out = String::new();
         self.render_errors(&mut out);
@@ -360,7 +340,6 @@ impl Pack {
     }
 }
 
-/// Lo que el hijo lee y nadie le provee: es el `NameError` de la proxima ejecucion.
 fn missing_line(o: &mut String, contract: &Contract) {
     if contract.missing.is_empty() {
         return;
@@ -372,7 +351,6 @@ fn missing_line(o: &mut String, contract: &Contract) {
     );
 }
 
-/// Diff entre dos snapshots listo para un agente; los params pasan por [`field`] y salen enmascarados.
 pub fn render_changes(changes: &[NodeChange]) -> String {
     let mut o = String::with_capacity(1024);
     let _ = writeln!(o, "{}", diff::summarize(changes));
@@ -423,7 +401,6 @@ fn error_line(item: &ErrorItem) -> String {
     )
 }
 
-/// Modulo de plataforma tal como lo nombra el runner: `EXCEPTION IN (<string> X, ...)`.
 fn module_of(message: &str) -> Option<&str> {
     const MARK: &str = "<string>";
     let at = message.find(MARK)?;
@@ -437,7 +414,6 @@ fn module_of(message: &str) -> Option<&str> {
     }
 }
 
-/// Con que se nombra un error de plataforma: el modulo si el mensaje lo delata.
 fn platform_source(item: &ErrorItem) -> &str {
     match module_of(&item.message) {
         Some(module) => module,
@@ -446,7 +422,6 @@ fn platform_source(item: &ErrorItem) -> &str {
     }
 }
 
-/// `setVar(x3), raise_exception(x3), module(x3) ...`: cuenta ocurrencias, no firmas, y declara el recorte.
 fn tally_preview(items: &[ErrorItem], clave: impl Fn(&ErrorItem) -> &str) -> String {
     let mut cuenta: Vec<(&str, usize)> = Vec::new();
     for item in items {
@@ -494,10 +469,6 @@ mod tests {
         assert_eq!(clip("código", 3), "cód...");
     }
 
-    /// El tope tiene que avisar de lo que deja fuera: el silencio hacia creer que
-    /// lo mostrado era todo (issue #13). Se prueba el cubo directamente porque
-    /// montar un `Pack` con siete hallazgos reales exigiria un robot de siete
-    /// colisiones, y lo que se valida aqui es el formato del aviso.
     #[test]
     fn el_tope_avisa_de_los_hallazgos_que_quedan_fuera() {
         let hallazgo = |i: usize| Finding {
@@ -525,22 +496,17 @@ mod tests {
             "falta la linea de cierre:\n{o}"
         );
 
-        // Sin recorte no se inventa un aviso.
         let pocos: Vec<Finding> = (0..2).map(hallazgo).collect();
         let mut o2 = String::new();
         render_bucket(&mut o2, "Hallazgos", &pocos);
         assert!(o2.contains("## Hallazgos (2:"), "{o2}");
         assert!(!o2.contains("mas"), "sin recorte no hay aviso:\n{o2}");
 
-        // Un cubo vacio no pinta seccion: ensenaria a saltarsela.
         let mut o3 = String::new();
         render_bucket(&mut o3, "Higiene", &[]);
         assert!(o3.is_empty(), "{o3}");
     }
 
-    /// El diff pasa por el mismo enmascarado que el resto del render: `diff`
-    /// devuelve los params crudos a proposito, y la politica de redaccion vive en
-    /// `field`. Sin esto, comparar dos versiones publicaria el nombre de usuario.
     #[test]
     fn el_render_enmascara_un_correo() {
         assert_eq!(
@@ -609,7 +575,6 @@ mod tests {
         );
     }
 
-    /// Pack minimo sin db: el render solo necesita la estructura ya ensamblada.
     fn pack_con(
         flow: Vec<crate::tree::FlatNode>,
         findings: Vec<Finding>,
@@ -643,8 +608,6 @@ mod tests {
         }
     }
 
-    /// Una llamada que el grafo no pudo resolver es un fallo latente: en runtime
-    /// aparece como "robot no encontrado" en esa linea. No se puede callar.
     #[test]
     fn la_seccion_de_errores_se_renderiza_sola() {
         let error = ErrorItem {
@@ -706,9 +669,6 @@ mod tests {
         );
     }
 
-    /// Issue #16: el nombre del usuario no puede salir por ninguno de los tres
-    /// puntos de salida (parametros del flujo, mensaje de hallazgo y mensaje de
-    /// error), pero la ruta util tiene que seguir ahi.
     #[test]
     fn el_render_enmascara_el_usuario_y_conserva_la_ruta_util() {
         let flow = vec![crate::tree::FlatNode {
@@ -755,7 +715,6 @@ mod tests {
             "ruta Windows sin enmascarar:\n{md}"
         );
 
-        // La ruta sigue siendo util: se conserva la cola, incluida la carpeta.
         assert!(
             md.contains("%USERPROFILE%/OneDrive/Documentos/mercadolibre_"),
             "se perdio la cola del parametro:\n{md}"
@@ -770,8 +729,6 @@ mod tests {
         );
     }
 
-    /// El enmascarado va antes del recorte: si no, un corte dentro del nombre
-    /// dejaria medio nombre fuera del patron y se publicaria igual.
     #[test]
     fn el_recorte_no_deja_medio_nombre_de_usuario() {
         let recortado = field("C:/Users/josep/OneDrive/Documentos", 20);
