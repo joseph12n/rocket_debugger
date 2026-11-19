@@ -1,47 +1,28 @@
-//! Protocolo JSON-RPC 2.0 delimitado por lineas.
+//! Protocolo JSON-RPC 2.0 delimitado por lineas: un documento JSON por linea.
 //!
-//! El transporte es stdio y el framing es "un documento JSON por linea": no hay
-//! `Content-Length` como en LSP porque el cliente MCP por stdio ya escribe
-//! lineas, y un prefijo de longitud solo anade una forma de desincronizarse.
-//!
-//! # Que se responde y que no
-//!
-//! - Una **notificacion** (sin `id`) no se responde nunca, aunque este mal
-//!   formada: lo exige JSON-RPC y responderla descoloca a los clientes que
-//!   emparejan respuesta con peticion por `id`.
-//! - Un fallo **del protocolo** (JSON roto, metodo inexistente, argumentos
-//!   invalidos, bug interno) sale como objeto `error` con el codigo estandar.
-//! - Un fallo **del negocio** (robot inexistente, db ilegible) no es error de
-//!   protocolo: viaja dentro del resultado de la tool con `isError: true`,
-//!   porque el agente tiene que poder leerlo y decidir que hace.
+//! Invariante: una notificacion (sin `id`) no se responde nunca, aunque este mal
+//! formada; responderla descoloca a los clientes que emparejan por `id`. Un fallo
+//! de negocio no es error de protocolo: viaja como `isError` en el resultado.
 
 use serde_json::{json, Map, Value};
 
 use crate::tools::{self, CallError};
 use crate::Settings;
 
-/// Version de JSON-RPC que se emite en cada mensaje.
 pub const JSONRPC_VERSION: &str = "2.0";
 
-/// Version del protocolo MCP que anuncia esta fachada.
-///
-/// Se fija en vez de negociarse: el cliente que no la entiende tiene que fallar
-/// en el `initialize` y no a mitad de una sesion.
+/// Version MCP fija: el cliente incompatible falla en `initialize`, no a mitad de sesion.
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
 
-// Codigos estandar de JSON-RPC 2.0. Se nombran para que el sitio que los emite
-// diga *por que* responde lo que responde.
+// Codigos estandar de JSON-RPC 2.0.
 pub const PARSE_ERROR: i64 = -32700;
 pub const INVALID_REQUEST: i64 = -32600;
 pub const METHOD_NOT_FOUND: i64 = -32601;
 pub const INVALID_PARAMS: i64 = -32602;
 pub const INTERNAL_ERROR: i64 = -32603;
 
-/// Respuesta de ultimo recurso si `serde_json` no puede serializar un `Value`.
-///
-/// Hoy no ocurre (todo `Value` serializa), pero dejar al cliente sin respuesta
-/// lo deja colgado esperando; un error interno explicito es preferible. Hay un
-/// test que comprueba que este literal sigue siendo un JSON-RPC valido.
+/// Respuesta de ultimo recurso si `serde_json` no puede serializar un `Value`:
+/// dejar al cliente sin respuesta lo deja colgado.
 const FALLBACK_INTERNAL: &str = concat!(
     r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"#,
     r#""message":"fallo interno: no pude serializar la respuesta"}}"#
@@ -49,23 +30,17 @@ const FALLBACK_INTERNAL: &str = concat!(
 
 /// Una linea del cliente ya interpretada.
 enum Line {
-    /// Linea vacia: no es un mensaje y no merece respuesta.
     Ignore,
-    /// Error de protocolo detectado antes de despachar; se responde con su `id`.
     Invalid { id: Value, error: ProtocolError },
-    /// Peticion (con `id`) o notificacion (sin el).
     Request(Request),
 }
 
 struct Request {
-    /// `None` = notificacion: no lleva respuesta.
     id: Option<Value>,
     method: String,
-    /// `Null` cuando la peticion no trae `params`.
     params: Value,
 }
 
-/// Error que se devuelve al cliente en el objeto `error`.
 #[derive(Debug, Clone)]
 struct ProtocolError {
     code: i64,
@@ -87,9 +62,7 @@ pub fn handle(line: &str, settings: &Settings) -> Option<String> {
         Line::Ignore => None,
         Line::Invalid { id, error } => Some(error_response(&id, &error)),
         Line::Request(request) => {
-            // Toda notificacion se corta aqui, incluida `notifications/initialized`
-            // (es el acuse del cliente, no una peticion). El `?` sobre el `Option`
-            // es la forma mas corta de decir "no hay respuesta".
+            // Toda notificacion se corta aqui, incluidas las mal formadas: no hay respuesta.
             let id = request.id.as_ref()?;
             Some(match dispatch(&request, settings) {
                 Ok(result) => result_response(id, result),
@@ -100,8 +73,7 @@ pub fn handle(line: &str, settings: &Settings) -> Option<String> {
 }
 
 fn parse(line: &str) -> Line {
-    // El framing por lineas puede dejar CR de Windows: JSON no admite blancos
-    // fuera del documento, pero el cliente si los manda.
+    // El cliente de Windows puede dejar CR; JSON no lo admite fuera del documento.
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return Line::Ignore;
@@ -131,8 +103,7 @@ fn parse(line: &str) -> Line {
             return Line::Ignore;
         }
         return Line::Invalid {
-            // Si el cliente mando `id`, se le responde con el suyo: un error de
-            // protocolo tambien tiene que poder emparejarse con su peticion.
+            // Se responde con el `id` del cliente: el error tambien tiene que emparejarse.
             id: id.unwrap_or(Value::Null),
             error: ProtocolError::new(INVALID_REQUEST, "falta `method` en la peticion"),
         };
@@ -160,8 +131,6 @@ fn dispatch(request: &Request, settings: &Settings) -> Result<Value, ProtocolErr
             Ok(json!({}))
         }
         "tools/call" => call_tool(&request.params, settings),
-        // Con `id` no deberia llegar nunca (es una notificacion), pero si llega
-        // se acusa con un resultado vacio: no es un metodo desconocido.
         "notifications/initialized" => Ok(json!({})),
         unknown => Err(ProtocolError::new(
             METHOD_NOT_FOUND,
@@ -194,8 +163,7 @@ fn call_tool(params: &Value, settings: &Settings) -> Result<Value, ProtocolError
             "falta `name` en tools/call",
         ));
     };
-    // `arguments` ausente equivale a `{}`: las tools validan sus propios
-    // argumentos y un objeto vacio es un error legible de argumentos requeridos.
+    // `arguments` ausente equivale a `{}`: cada tool valida sus propios argumentos.
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
 
     tools::call(name, &arguments, settings)
@@ -203,11 +171,8 @@ fn call_tool(params: &Value, settings: &Settings) -> Result<Value, ProtocolError
         .map_err(tool_error)
 }
 
-/// Traduccion de un fallo de la tool al codigo JSON-RPC que le corresponde.
-///
-/// Un argumento mal formado es problema del cliente (`-32602`); una tool que se
-/// rompe (panic del motor) es problema nuestro (`-32603`). El error de negocio
-/// no pasa por aqui: viaja como `isError` dentro del resultado.
+/// Un argumento mal formado es `-32602`; una tool que se rompe es `-32603`.
+/// El error de negocio no pasa por aqui: viaja como `isError`.
 fn tool_error(error: CallError) -> ProtocolError {
     match error {
         CallError::InvalidParams(message) => ProtocolError::new(INVALID_PARAMS, message),
@@ -215,10 +180,7 @@ fn tool_error(error: CallError) -> ProtocolError {
     }
 }
 
-/// `params` puede faltar (`Null`) o ser objeto; cualquier otra cosa es invalida.
-///
-/// Devuelve el objeto para el metodo que necesita mirarlo (`tools/call`) y
-/// `None` para los que solo lo validan.
+/// `params` puede faltar (`Null`) o ser objeto; cualquier otra cosa es `-32602`.
 fn params_object(params: &Value) -> Result<Option<&Map<String, Value>>, ProtocolError> {
     match params {
         Value::Null => Ok(None),
@@ -246,7 +208,6 @@ fn error_response(id: &Value, error: &ProtocolError) -> String {
     }))
 }
 
-/// Serializa la respuesta; si ni eso funciona devuelve el error interno literal.
 fn encode(message: Value) -> String {
     serde_json::to_string(&message).unwrap_or_else(|_| FALLBACK_INTERNAL.to_string())
 }

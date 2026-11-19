@@ -1,16 +1,9 @@
-//! Servidor MCP de `rocket_debugger`.
+//! Servidor MCP de `rocket_debugger`: stdio (el cliente arranca el proceso) o
+//! `--http <PUERTO>` / `ROCKETDEBUG_MCP_HTTP` (la app escucha en `127.0.0.1`).
 //!
-//! Dos transportes, el mismo despacho:
-//!
-//! - **sin argumentos, stdio**: lee una linea, la despacha y escribe la
-//!   respuesta. Es lo que usa DSH: el cliente arranca el proceso.
-//! - **`--http <PUERTO>`** (o `ROCKETDEBUG_MCP_HTTP`): la app es el servidor de
-//!   una sola instancia y el agente se conecta a `127.0.0.1:<PUERTO>/mcp`.
-//!
-//! `main` solo hace E/S; toda la logica (y los tests) vive en la libreria.
-//!
-//! stdout es **solo protocolo**: cualquier diagnostico va a stderr, porque una
-//! linea suelta en stdout rompe la sesion del cliente por stdio.
+//! stdout es solo protocolo: cualquier diagnostico va a stderr, porque una linea
+//! suelta en stdout rompe la sesion del cliente por stdio. `main` solo hace E/S;
+//! toda la logica vive en la libreria.
 
 use std::io::{self, BufRead, Write};
 use std::net::{SocketAddr, TcpListener};
@@ -18,10 +11,8 @@ use std::process::ExitCode;
 
 use rocketdebug_mcp::{handle_line_with, serve, Settings};
 
-/// Variable de entorno equivalente a `--http`.
 const HTTP_ENV: &str = "ROCKETDEBUG_MCP_HTTP";
 
-/// Ayuda. Va a stderr porque stdout es del protocolo.
 const USAGE: &str = "\
 uso: rocketdebug-mcp [--http <PUERTO>]
 
@@ -31,7 +22,6 @@ uso: rocketdebug-mcp [--http <PUERTO>]
 
 ROCKETDEBUG_MCP_HTTP=<PUERTO> equivale a --http cuando no se pasa el flag.";
 
-/// Como se ha pedido arrancar el servidor.
 enum Mode {
     Stdio,
     Http(u16),
@@ -39,8 +29,6 @@ enum Mode {
 }
 
 fn main() -> ExitCode {
-    // El entorno se resuelve una vez: la db de la sesion no cambia a mitad de
-    // conversacion aunque alguien toque ROCKETBOT_DB por debajo.
     let settings = Settings::from_env();
 
     match parse_mode() {
@@ -58,10 +46,8 @@ fn main() -> ExitCode {
     }
 }
 
-/// Que transporte pide la linea de comandos, si pide alguno.
-///
-/// El flag manda sobre la variable de entorno: lo explicito de la invocacion no
-/// puede quedar pisado por una variable que quedo puesta de una prueba anterior.
+/// Transporte pedido en la linea de comandos.
+/// El flag manda sobre la variable de entorno: lo explicito no queda pisado.
 fn parse_mode() -> Result<Mode, String> {
     let mut requested: Option<String> = None;
     let mut args = std::env::args().skip(1);
@@ -91,7 +77,6 @@ fn parse_mode() -> Result<Mode, String> {
     }
 }
 
-/// Puerto de escucha, con un mensaje que diga que se esperaba.
 fn parse_port(value: &str) -> Result<u16, String> {
     value.trim().parse::<u16>().map_err(|_| {
         format!("`{value}` no es un puerto valido: tiene que ser un numero entre 0 y 65535")
@@ -99,10 +84,7 @@ fn parse_port(value: &str) -> Result<u16, String> {
 }
 
 /// Levanta el transporte HTTP local.
-///
-/// El bind se hace **aqui** y solo a `127.0.0.1`: el motor lee `robot.db` sin
-/// autenticacion, asi que escuchar en `0.0.0.0` seria repartir el disco del
-/// usuario por la red local.
+/// Bind solo a `127.0.0.1`: el motor lee `robot.db` sin autenticacion.
 fn serve_http(port: u16, settings: Settings) -> ExitCode {
     let address = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = match TcpListener::bind(address) {
@@ -116,8 +98,7 @@ fn serve_http(port: u16, settings: Settings) -> ExitCode {
         }
     };
 
-    // Se anuncia la direccion real, no la pedida: con `--http 0` el SO elige el
-    // puerto y, si no se dice cual, nadie sabria donde conectar.
+    // Se anuncia la direccion real: con `--http 0` el SO elige el puerto.
     let local = listener.local_addr().unwrap_or(address);
     eprintln!(
         "rocket_debugger MCP v{} | http://{local}/mcp | db {} (solo lectura)",
@@ -151,9 +132,7 @@ fn serve_stdio(settings: &Settings) -> ExitCode {
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
-    // Sin EOF no hay otra senal de parada: el cliente cierra stdin y el bucle
-    // termina. Un `write` roto (cliente ido) tambien corta en vez de girar en
-    // vacio.
+    // Sin EOF no hay otra senal de parada; un `write` roto (cliente ido) tambien corta.
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         let Some(response) = handle_line_with(&line, settings) else {
