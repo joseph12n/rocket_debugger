@@ -31,6 +31,10 @@ panel miente sobre que esta roto.
 
 ## Uso
 
+Binarios listos: cada build de `main` deja un artifact `rocketdebug-windows` en la pestana
+Actions, y cada tag `v*` publica un Release con los dos ejecutables. Compilar desde fuente
+solo si vas a cambiar codigo.
+
 ```bash
 cargo run -p rocketdebug-cli -- list
 cargo run -p rocketdebug-cli -- pack ML_06_Legacy --db "C:\rocketbot_bots\certificaciones\BBRE2\robot_run.db"
@@ -51,10 +55,10 @@ y su padre; se pueden fijar con `ROCKETDEBUG_LOCAL_ROOTS` (varias, separadas por
 ## Arquitectura
 
 ```
-robot.db (N dbs) â”€â”€â”
-logs/*.log â”€â”€â”€â”€â”€â”€â”€â”€â”¤â†’ motor â”€â”€â”¬â†’ render markdown (el context pack)
-catalogo comandos â”€â”˜          â”œâ†’ daemon local (HTTP/WS)
-                              â””â†’ fachada MCP (intenciones, no datos)
+robot.db (N dbs) ──┐
+logs/*.log ────────┼──▶ motor ──┬──▶ render markdown (el context pack)
+catalogo comandos ─┘           ├──▶ daemon local (HTTP/WS)
+                               └──▶ fachada MCP (intenciones, no datos)
 ```
 
 Detalle en [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -78,7 +82,7 @@ Este equipo no tiene MSVC. El proyecto compila con el toolchain GNU y un GCC por
 
 ```powershell
 rustup toolchain install stable-x86_64-pc-windows-gnu
-# aÃ±adir el bin de mingw64 al PATH
+# anadir el bin de mingw64 al PATH
 cargo +stable-x86_64-pc-windows-gnu build
 ```
 
@@ -86,8 +90,8 @@ En CI (Linux) se usa el toolchain por defecto.
 
 ## Calidad y PRs
 
-Cada cambio sube como PR: el CI (fmt, clippy `-D warnings`, tests en Linux y build
-release en Windows) y SonarCloud son la senal de calidad, no la revision local a ojo.
+Cada cambio sube como PR: el CI (fmt, clippy `-D warnings`, tests en Linux y en Windows,
+build release en Windows) y SonarCloud son la senal de calidad, no la revision local a ojo.
 Antes de subir, el gate local replica lo que exige CI:
 
 ```powershell

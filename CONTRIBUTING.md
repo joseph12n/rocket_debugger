@@ -93,6 +93,17 @@ lefthook install
 
 `--no-verify` no se usa. Si un hook falla, se arregla la causa.
 
+## Versiones
+
+Al etiquetar `v*` y subir el tag, `release.yml` compila, pasa la suite y publica un Release de
+GitHub con los dos ejecutables de Windows. El tag va firmado como los commits. Ademas, cada
+build de `main` deja un artifact descargable en la pestana Actions.
+
+```powershell
+git tag -a v0.1.0 -m "v0.1.0"
+git push origin v0.1.0
+```
+
 ## Ciclo de trabajo
 
 Orden: rama -> cambios -> gate -> `pr.ps1` -> CI y Sonar -> merge (tope->base si hay cadena).
