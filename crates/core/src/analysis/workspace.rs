@@ -1,9 +1,3 @@
-//! Carga de los hechos del workspace y analisis por robot sobre esa foto.
-//!
-//! Invariantes: dedupe por `(nombre, hash)` conservando la primera aparicion; el
-//! snapshot pedido fija solo el robot analizado, los demas aportan su ultimo
-//! guardado; las llamadas sin destino llevan linea y no se repiten.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -19,16 +13,10 @@ use crate::tree;
 
 use super::{errors_for, Analysis, ErrorReport};
 
-/// Hechos del ultimo snapshot de cada robot de cada db, deduplicados por
-/// `(nombre, hash)`: una copia identica conserva la primera aparicion y sus
-/// etiquetas van a [`RobotFacts::also_in`]; distinto nombre o contenido, dos hechos.
 pub fn load_workspace(dbs: &[(&Connection, &str)]) -> Result<Vec<RobotFacts>> {
     load_workspace_of(dbs, None)
 }
 
-/// [`load_workspace`] con una db y un robot que el consumidor exige: en esa db no
-/// puede faltar ([`Error::RobotNotFound`]) ni fallar al decodificar; en las demas
-/// un robot ilegible solo se omite.
 pub(super) fn load_workspace_of(
     dbs: &[(&Connection, &str)],
     target: Option<Target>,
@@ -67,20 +55,13 @@ pub(super) fn load_workspace_of(
     Ok(facts)
 }
 
-/// Robot del workspace cuyos hechos el consumidor exige y, si se indica, el
-/// snapshot exacto del que deben salir: el snapshot es propiedad del robot
-/// analizado, no de la db ni del workspace.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Target<'a> {
     pub(super) db_label: &'a str,
     pub(super) robot: &'a str,
-    /// `Some(id)` fija el snapshot; `None` acepta el ultimo.
     pub(super) snapshot: Option<i64>,
 }
 
-/// Hechos de una db, con el hash del contenido que usa el dedupe. El snapshot es
-/// el ultimo de cada robot, salvo el robot exigido: si [`Target::snapshot`] trae
-/// un id, sus hechos salen de esa fila.
 fn load_db_facts(
     conn: &Connection,
     db_label: &str,
@@ -91,8 +72,6 @@ fn load_db_facts(
     for summary in db::list_robots(conn)? {
         let required = target.is_some_and(|t| t.robot == summary.name.as_str());
         let pinned = target.filter(|_| required).and_then(|t| t.snapshot);
-        // Solo se decodifica la version necesaria: cargar el historial era
-        // O(versiones) por pasada (issue #18).
         let snap = match pinned {
             Some(id) => match db::load_snapshot(conn, &summary.name, id) {
                 Ok(snap) => snap,
@@ -128,7 +107,6 @@ fn load_db_facts(
     Ok(out)
 }
 
-/// Variables del panel del robot (`project.vars`), sin nombres vacios ni repetidos.
 fn declared_of(root: &Value) -> BTreeSet<String> {
     let Some(arr) = root.get("vars").and_then(Value::as_array) else {
         return BTreeSet::new();
@@ -141,14 +119,10 @@ fn declared_of(root: &Value) -> BTreeSet<String> {
         .collect()
 }
 
-/// `blake3` del base64 tal cual esta en `bots`: es lo que se copia entre dbs y no
-/// depende de como se re-serialice el JSON.
 fn content_hash(raw_b64: &str) -> String {
     blake3::hash(raw_b64.as_bytes()).to_hex().to_string()
 }
 
-/// Hechos del workspace ya cargados, con los derivados comunes calculados una
-/// sola vez; `facts` es publico porque la bandeja cuenta nodos sin decodificar.
 pub struct Workspace {
     pub facts: Vec<RobotFacts>,
     edges: Vec<Edge>,
@@ -157,13 +131,11 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// Carga y deduplica los hechos de todas las dbs, sin analizar ningun robot.
     pub fn load(conns: &[(&Connection, &str)]) -> Result<Self> {
         let facts = load_workspace_of(conns, None)?;
         Ok(Self::from_facts(facts))
     }
 
-    /// Derivados comunes del conjunto de hechos: aristas, contratos y muertas.
     pub(super) fn from_facts(facts: Vec<RobotFacts>) -> Self {
         let edges = graph::build_edges(&facts);
         let contracts = graph::contracts(&facts, &edges);
@@ -177,7 +149,6 @@ impl Workspace {
         }
     }
 
-    /// Analiza un robot sobre esta foto. `conn` solo se usa para leer sus logs.
     pub fn analyse(
         &self,
         conn: &Connection,
@@ -190,7 +161,6 @@ impl Workspace {
     }
 }
 
-/// Analiza un robot reutilizando los hechos y derivados de [`Workspace`].
 fn analyse_loaded(
     workspace: &Workspace,
     conn: &Connection,
@@ -199,7 +169,6 @@ fn analyse_loaded(
     logs: Option<(&Path, usize)>,
     path_probe: &dyn PathProbe,
 ) -> Result<Analysis> {
-    // Un homonimo de otra db es otro hecho: se busca el que vive en la db pedida.
     let this = workspace
         .facts
         .iter()
@@ -209,7 +178,6 @@ fn analyse_loaded(
     let unused_declared = workspace.unused.get(robot).cloned().unwrap_or_default();
 
     let collisions = tree::collisions(&this.nodes);
-    // `usize::MAX`: el render decide el tope por seccion y avisa de lo que queda fuera.
     let (mut findings, higiene) = rules::evaluate_split(
         &this.nodes,
         &collisions,
@@ -218,8 +186,6 @@ fn analyse_loaded(
         usize::MAX,
     );
 
-    // `RUTA_MIGRADA` necesita el disco: solo se evalua con probe, y despues se
-    // restablece el orden por severidad.
     if path_probe.enabled() {
         let line_hints = variable_lines(this, &workspace.facts, &workspace.edges);
         findings.extend(paths::findings(
@@ -231,8 +197,6 @@ fn analyse_loaded(
         findings.sort_by_key(|finding| std::cmp::Reverse(finding.severity));
     }
 
-    // Los contratos se recalculan sobre las aristas de este hecho: las de un
-    // homologo con contenido distinto no son suyas.
     let own_edges: Vec<Edge> = workspace
         .edges
         .iter()
@@ -248,7 +212,6 @@ fn analyse_loaded(
         .collect();
     let contracts_in = graph::contracts(&workspace.facts, &inbound_edges);
 
-    // Los logs se leen despues de resolver el robot: manda el error de robot ausente.
     let errors = match logs {
         Some((dir, max_files)) => errors_for(conn, robot, dir, max_files)?,
         None => ErrorReport::default(),
@@ -266,11 +229,6 @@ fn analyse_loaded(
     })
 }
 
-/// Primera linea donde se usa cada variable, mirando tambien los subrobots.
-///
-/// Si solo la usa un hijo, la linea util es la de la llamada `execRocketBotDB`
-/// que lleva al hijo. El hijo se resuelve con la misma regla que el grafo
-/// (`lives_in`), asi que un homologo de otra db no aporta linea.
 fn variable_lines(
     this: &RobotFacts,
     facts: &[RobotFacts],
@@ -290,7 +248,6 @@ fn variable_lines(
         }
     }
 
-    // La primera llamada que use la variable es la que se queda.
     for edge in edges
         .iter()
         .filter(|edge| edge.parent == this.name && this.lives_in(&edge.parent_db))
@@ -317,9 +274,6 @@ fn variable_lines(
     out
 }
 
-/// Aristas ambiguas del robot, ya formateadas y sin repetir: un hijo homologo en
-/// dos dbs ajenas genera una arista por db. El filtro es por hecho (`db` o copia),
-/// no solo por nombre.
 fn ambiguous_calls(edges: &[Edge], this: &RobotFacts) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for edge in edges {
@@ -334,7 +288,6 @@ fn ambiguous_calls(edges: &[Edge], this: &RobotFacts) -> Vec<String> {
     out
 }
 
-/// Llamadas sin destino del robot, con linea y sin repetir; solo las de este hecho.
 fn missing_call_labels(calls: &[graph::MissingCall], this: &RobotFacts) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for call in calls {
@@ -444,7 +397,6 @@ mod tests {
         let edges = vec![
             edge("orq", "comun", "A", false),
             edge("orq", "fantasma", "B", true),
-            // Mismo hijo homologo en dos dbs: una sola mencion para el agente.
             edge("orq", "fantasma", "C", true),
             edge("otro", "fantasma", "B", true),
         ];
@@ -459,8 +411,6 @@ mod tests {
 
     #[test]
     fn las_aristas_de_un_homonimo_de_otra_db_no_son_de_este_robot() {
-        // `orq` existe en A y en B con contenido distinto: son dos hechos. Las
-        // llamadas del de B no pueden aparecer en el analisis del de A.
         let mut edges = vec![edge("orq", "fantasma", "B", true)];
         edges[0].parent_db = "B".to_string();
         edges.push(edge("orq", "comun", "C", true));
@@ -489,7 +439,6 @@ mod tests {
                 line: "4".to_string(),
                 child: "no_existe".to_string(),
             },
-            // Misma linea repetida (Try/Catch comparten numeracion): un aviso.
             graph::MissingCall {
                 parent: "orq".to_string(),
                 parent_db: "A".to_string(),

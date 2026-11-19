@@ -1,14 +1,5 @@
-//! Primitivas del escaneo de rutas absolutas en texto libre.
-//!
-//! Una copia para `rules`, `paths` y `redact`, cada uno con su politica. Los
-//! indices son offsets de **byte**: hay que respetar `is_char_boundary`.
-
-/// Separador de esquema: lo que sigue a `://` es una direccion, no el disco.
 const URL_SEP: &str = "://";
 
-/// Tramos que ocupa cada URL (`esquema://resto`) dentro del texto.
-///
-/// En `file:///C:/x` el `C:/` cae dentro del tramo y no es una ruta del usuario.
 pub fn url_spans(text: &str) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     let mut from = 0;
@@ -25,28 +16,23 @@ pub fn url_spans(text: &str) -> Vec<(usize, usize)> {
             .find(|(_, c)| is_url_stop(*c))
             .map_or(text.len(), |(i, _)| body + i);
         spans.push((start, end));
-        // `body` garantiza avance aunque la URL se corte justo tras `://`.
         from = end.max(body);
     }
     spans
 }
 
-/// `true` si la posicion cae dentro de alguno de los tramos (fin exclusivo).
 pub fn inside_any(spans: &[(usize, usize)], at: usize) -> bool {
     spans.iter().any(|&(start, end)| (start..end).contains(&at))
 }
 
-/// Caracteres de un esquema (`https`, `file`, `git+ssh`).
 fn is_scheme_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')
 }
 
-/// `https:` -> la `s` no es una unidad porque la precede otra letra del esquema.
 pub fn continues_scheme(text: &str, at: usize) -> bool {
     text[..at].chars().next_back().is_some_and(is_scheme_char)
 }
 
-/// `true` si la posicion cae dentro de un token que ya abrio un esquema (`://`).
 pub fn inside_url_token(text: &str, at: usize) -> bool {
     let start = text[..at]
         .char_indices()
@@ -62,8 +48,6 @@ pub fn inside_url_token(text: &str, at: usize) -> bool {
     text[start..at].contains(URL_SEP)
 }
 
-/// `true` si la posicion abre token (la anterior no es parte de una palabra):
-/// en `carpeta/home/x` la ruta es relativa y no es una raiz POSIX.
 pub fn opens_token(text: &str, at: usize) -> bool {
     text[..at].chars().next_back().map_or(true, |c| {
         !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))

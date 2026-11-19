@@ -1,12 +1,7 @@
-//! Diff estructural entre dos snapshots del mismo robot (`v26` -> `v27`).
-//! Empareja por `id` y, si se repite, por ocurrencia. Un nodo con los mismos
-//! `params` y `cmd` no aparece aunque cambie de `line`: renumerar no es un cambio.
-
 use std::collections::{HashMap, VecDeque};
 
 use crate::tree::FlatNode;
 
-/// Relacion de un nodo con la version anterior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeKind {
     Added,
@@ -14,7 +9,6 @@ pub enum ChangeKind {
     Changed,
 }
 
-/// Un nodo que aparece, desaparece o cambia entre dos snapshots.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeChange {
     pub kind: ChangeKind,
@@ -25,38 +19,6 @@ pub struct NodeChange {
     pub after: Option<String>,
 }
 
-/// Compara dos snapshots ya aplanados y devuelve que nodos cambiaron.
-/// ```
-/// use rocketdebug_core::diff::{diff_nodes, summarize, ChangeKind};
-/// use rocketdebug_core::tree::flatten;
-/// use serde_json::json;
-///
-/// // v26: el nodo que fallaba (`{contador} < 10`) no tenia inicializacion.
-/// let v26 = flatten(&[json!({"father": "trycatch", "line": 2, "id": "t",
-///     "children": [
-///         json!({"father": "log_message", "line": "2.1", "id": "log", "command": "Paso"}),
-///         json!({"father": "evaluateIf", "line": "2.2", "id": "contador",
-///                "command": "{contador} < 10"}),
-///     ]})]);
-///
-/// // v27: el fix anade un nodo *antes*; el nodo que fallaba no se toco, solo se
-/// // renumero su linea.
-/// let v27 = flatten(&[json!({"father": "trycatch", "line": 2, "id": "t",
-///     "children": [
-///         json!({"father": "log_message", "line": "2.1", "id": "log", "command": "Paso"}),
-///         json!({"father": "setVar", "line": "2.2", "id": "init", "command": "contador = 0"}),
-///         json!({"father": "evaluateIf", "line": "2.3", "id": "contador",
-///                "command": "{contador} < 10"}),
-///     ]})]);
-///
-/// let cambios = diff_nodes(&v26, &v27);
-/// assert_eq!(cambios.len(), 1, "solo se anadio la inicializacion");
-/// assert_eq!(cambios[0].kind, ChangeKind::Added);
-/// assert_eq!(cambios[0].id, "init");
-/// assert_eq!(cambios[0].before, None);
-/// assert_eq!(cambios[0].after.as_deref(), Some("contador = 0"));
-/// assert_eq!(summarize(&cambios), "1 anadido");
-/// ```
 pub fn diff_nodes(before: &[FlatNode], after: &[FlatNode]) -> Vec<NodeChange> {
     let mut pendientes: HashMap<&str, VecDeque<usize>> = HashMap::new();
     for (i, node) in before.iter().enumerate() {
@@ -117,7 +79,6 @@ fn removido(node: &FlatNode) -> NodeChange {
     }
 }
 
-/// Resumen de una linea para la cabecera del diff.
 pub fn summarize(changes: &[NodeChange]) -> String {
     if changes.is_empty() {
         return "sin cambios".to_string();
@@ -144,9 +105,6 @@ mod tests {
     use super::*;
     use crate::tree::Branch;
 
-    /// Nodo de una version, con los campos que el diff no mira a su valor por
-    /// defecto: asi un test que cambia solo la rama o la etiqueta no puede pasar
-    /// por accidente.
     fn nodo(id: &str, line: &str, cmd: &str, params: &str) -> FlatNode {
         FlatNode {
             line: line.to_string(),
@@ -218,8 +176,6 @@ mod tests {
 
     #[test]
     fn renumeracion_sin_cambio_de_params_no_es_un_cambio() {
-        // Insertar un nodo antes renumera todo lo que sigue: eso no es tocar
-        // esos nodos. Si contara, cada diff seria una lista de ruido.
         let before = vec![
             nodo("a", "2.1", "log_message", "inicio"),
             nodo("b", "2.2", "setVar", "{res} = 1"),
@@ -238,10 +194,6 @@ mod tests {
 
     #[test]
     fn el_fix_que_inserta_un_nodo_antes_solo_muestra_un_added() {
-        // Caso real (`ML_06_Legacy`, v26 -> v27): el fix anadio un nodo *antes*
-        // del que fallaba. El nodo del error conserva id, comando y parametros y
-        // solo cambia de linea, asi que el diff tiene que mostrar un unico
-        // cambio: el nodo nuevo. Si mostrara cinco, el fix seria invisible.
         let v26 = vec![
             nodo("log", "2.1", "log_message", "Paso Legacy..."),
             nodo("guarda", "2.2", "savexlsx", "guardar_filas()"),
@@ -261,8 +213,6 @@ mod tests {
 
     #[test]
     fn mismo_params_con_otro_cmd_es_un_cambio() {
-        // El usuario cambio de comando en el mismo nodo: los parametros no
-        // bastan para decidir que no paso nada.
         let before = vec![nodo("n", "1.1", "log_message", "reporte_final()")];
         let after = vec![nodo("n", "1.1", "raise_exception", "reporte_final()")];
 
@@ -300,8 +250,6 @@ mod tests {
             "misma entrada, misma salida: el orden no sale de un mapa"
         );
 
-        // `after` en su orden (b, z, a) y luego los retirados en el orden de
-        // `before` (y, x, w), no al reves ni por id.
         assert_eq!(
             kinds(&primera),
             vec![
@@ -357,10 +305,6 @@ mod tests {
 
     #[test]
     fn ids_repetidos_se_emparejan_por_ocurrencia_y_no_se_pierde_ninguno() {
-        // No deberia pasar (Studio genera un UUID por nodo), pero si pasara, un
-        // mapa ingenuo `id -> nodo` se quedaria con una sola ocurrencia y
-        // perderia nodos. Se empareja la k-esima con la k-esima; lo que sobra a
-        // un lado sale como `Added` / `Removed`.
         let dos_iguales = vec![
             nodo("dup", "1.1", "log_message", "primera"),
             nodo("dup", "1.2", "log_message", "segunda"),
@@ -379,7 +323,6 @@ mod tests {
         assert_eq!(cambios[0].before.as_deref(), Some("segunda"));
         assert_eq!(cambios[0].after.as_deref(), Some("segunda-cambiada"));
 
-        // Sobra una ocurrencia en `after`: es un nodo anadido, no se descarta.
         let sobra_en_to = diff_nodes(
             &[nodo("dup", "1.1", "log_message", "uno")],
             &[
@@ -390,7 +333,6 @@ mod tests {
         assert_eq!(kinds(&sobra_en_to), vec![(ChangeKind::Added, "dup")]);
         assert_eq!(sobra_en_to[0].after.as_deref(), Some("dos"));
 
-        // Y al reves: sobra una en `before` y se informa como retirada.
         let sobra_en_from = diff_nodes(
             &[
                 nodo("dup", "1.1", "log_message", "uno"),
@@ -405,9 +347,6 @@ mod tests {
 
     #[test]
     fn un_cambio_en_la_rama_o_en_la_etiqueta_no_es_un_cambio() {
-        // `branch`/`depth`/`desc` son derivados o etiquetas: el diff solo mira
-        // `params` y `cmd`. Fijado en un test para que nadie lo cambie sin
-        // querer, porque decide cuantas entradas tiene el diff.
         let before = vec![nodo("n", "2.1", "setVar", "{res} = 1")];
         let mut after = before.clone();
         after[0].branch = Branch::Else;

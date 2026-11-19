@@ -1,17 +1,7 @@
-//! Atribucion de cada error al snapshot de codigo vivo en su instante.
-//! El log no registra la version ejecutada, pero `bots` guarda un `created_at`
-//! por guardado: un error pertenece al ultimo snapshot con `created_at <= t`,
-//! no al ultimo guardado.
-//!
-//! ```text
-//! snapshot_vivo(t) = argmax { created_at <= t }
-//! ```
-
 use std::collections::BTreeMap;
 
 use chrono::NaiveDateTime;
 
-/// Nodo del snapshot; la clave es el `cmd_id`: `line` no es unica entre ramas de un Try/Catch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeRef {
     pub line: String,
@@ -25,8 +15,6 @@ pub struct SnapshotView {
     pub nodes: BTreeMap<String, NodeRef>,
 }
 
-/// Un error agregado del log, listo para atribuir.
-/// Solo `timestamp`, `cmd_id` y `payload` entran en el veredicto.
 #[derive(Debug, Clone)]
 pub struct RawError {
     pub timestamp: NaiveDateTime,
@@ -38,7 +26,6 @@ pub struct RawError {
     pub signature: String,
 }
 
-/// Veredicto de la atribucion: que relacion tiene el error con el codigo actual.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Vivo,
@@ -56,52 +43,6 @@ pub struct Attribution {
     pub signature: String,
 }
 
-/// Atribuye cada error al snapshot vivo en su instante y decide si sigue vivo.
-/// ```
-/// use std::collections::BTreeMap;
-///
-/// use rocketdebug_core::attribution::{attribute, NodeRef, RawError, SnapshotView, Verdict};
-/// use rocketdebug_core::db::parse_date;
-///
-/// fn version(id: i64, created_at: &str) -> SnapshotView {
-///     let mut nodes = BTreeMap::new();
-///     nodes.insert(
-///         "uuid-del-nodo".to_string(),
-///         NodeRef {
-///             line: "2.10".to_string(),
-///             params: "{contador} < 10".to_string(),
-///         },
-///     );
-///     SnapshotView {
-///         id,
-///         created_at: parse_date(created_at),
-///         nodes,
-///     }
-/// }
-///
-/// let snapshots = [
-///     version(25, "2026-11-17 12:47:10"),
-///     version(29, "2026-11-17 12:59:37"),
-/// ];
-/// let error = RawError {
-///     timestamp: parse_date("2026-11-17 12:49:22"),
-///     cmd_id: "uuid-del-nodo".to_string(),
-///     command: "evaluateIf".to_string(),
-///     payload: "{contador} < 10".to_string(),
-///     message: "NameError: name 'contador' is not defined".to_string(),
-///     occurrences: 1,
-///     signature: "NameError:name:{var}:not_defined".to_string(),
-/// };
-///
-/// let atribuciones = attribute(&[error], &snapshots);
-/// assert_eq!(atribuciones.len(), 1);
-/// // A las 12:49:22 corria v25, no la version actual: el error es historico
-/// // aunque el nodo siga existiendo con los mismos parametros.
-/// assert_eq!(atribuciones[0].verdict, Verdict::Historico);
-/// assert_eq!(atribuciones[0].version, Some(25));
-/// assert_eq!(atribuciones[0].line.as_deref(), Some("2.10"));
-/// assert!(!atribuciones[0].en_version_actual);
-/// ```
 pub fn attribute(errors: &[RawError], snapshots: &[SnapshotView]) -> Vec<Attribution> {
     let latest = latest_of(snapshots);
     errors
@@ -162,7 +103,6 @@ fn desconocido(error: &RawError) -> Attribution {
     }
 }
 
-/// Snapshot vivo en `t`: el ultimo guardado con `created_at <= t` (el mismo segundo ya cuenta).
 fn live_at(snapshots: &[SnapshotView], t: NaiveDateTime) -> Option<&SnapshotView> {
     snapshots
         .iter()
@@ -170,7 +110,6 @@ fn live_at(snapshots: &[SnapshotView], t: NaiveDateTime) -> Option<&SnapshotView
         .max_by_key(|s| (s.created_at, s.id))
 }
 
-/// Ultimo guardado: el empate de `created_at` lo rompe el `id` mayor.
 fn latest_of(snapshots: &[SnapshotView]) -> Option<&SnapshotView> {
     snapshots.iter().max_by_key(|s| (s.created_at, s.id))
 }
@@ -179,8 +118,6 @@ fn existe_en_alguna(snapshots: &[SnapshotView], cmd_id: &str) -> bool {
     snapshots.iter().any(|s| s.nodes.contains_key(cmd_id))
 }
 
-/// Compara payload y params colapsando solo espacios: normalizar mas esconderia
-/// el cambio a detectar. Con un lado vacio no hay cambio.
 fn mismos_params(payload: &str, params: &str) -> bool {
     let payload = collapse_ws(payload);
     let params = collapse_ws(params);
@@ -196,13 +133,9 @@ mod tests {
     use super::*;
     use crate::db::parse_date;
 
-    /// Linea y parametros del nodo que reventaba en `ML_06_Legacy`: el
-    /// `evaluateIf` que consultaba `contador` antes de inicializarlo.
     const LINEA_CONTADOR: &str = "2.10";
     const PARAMS_CONTADOR: &str = "{contador} < 10";
 
-    /// Firma del `NameError` del caso real, tal como la produce
-    /// `signature::normalize`.
     const FIRMA_CONTADOR: &str = "NameError:name:{var}:not_defined";
 
     fn snapshot(id: i64, fecha: &str, nodos: &[(&str, &str, &str)]) -> SnapshotView {
@@ -224,12 +157,6 @@ mod tests {
         }
     }
 
-    /// Los cinco guardados medidos el 2026-11-17 en `ML_06_Legacy`.
-    ///
-    /// El nodo que fallaba conserva `id`, linea y parametros en las cinco
-    /// versiones: el fix consistio en anadir un nodo antes (de ahi que crezca el
-    /// numero de nodos, 31 -> 36 en las mediciones). Esa es exactamente la trampa
-    /// que hace que comparar contra el snapshot actual no detecte nada.
     fn historial() -> Vec<SnapshotView> {
         let log = ("id-log", "2.1", "Paso Legacy...");
         let init = ("id-init", "2.6", "contador = 0");
@@ -338,8 +265,6 @@ mod tests {
 
     #[test]
     fn la_misma_firma_se_atribuye_por_separado() {
-        // La firma agrupa el defecto, no la version: dos errores con la misma
-        // firma pueden estar en versiones distintas y hay que decidirlo uno a uno.
         let historico = error_contador("2026-11-17 12:49:22");
         let mut actual = error_contador("2026-11-17 13:00:00");
         actual.cmd_id = "id-finanzas".to_string();
@@ -358,8 +283,6 @@ mod tests {
 
     #[test]
     fn en_una_version_pasada_el_payload_no_cambia_el_veredicto() {
-        // Regla 4 antes que regla 5: que los parametros difieran no revive un
-        // error de una version que ya no corria.
         let mut e = error_contador("2026-11-17 12:49:22");
         e.payload = "{contador} < 3".to_string();
         assert_eq!(attribute(&[e], &historial())[0].verdict, Verdict::Historico);
@@ -382,7 +305,6 @@ mod tests {
             "sin payload no se puede afirmar que los parametros cambiaron"
         );
 
-        // Y al reves: un nodo sin parametros (`trycatch`, `logic`) tampoco cambia.
         let desnudo = snapshot(40, "2026-11-17 13:10:00", &[("id-sin-params", "1", "")]);
         let mut e = error_contador("2026-11-17 13:20:00");
         e.cmd_id = "id-sin-params".to_string();
@@ -392,7 +314,6 @@ mod tests {
 
     #[test]
     fn el_instante_del_guardado_ya_es_la_version_nueva() {
-        // 12:50:24 es el `created_at` de v26: el intervalo de v25 ya cerro.
         let out = attribute(&[error_contador("2026-11-17 12:50:24")], &historial());
         assert_eq!(out[0].version, Some(26));
         assert_eq!(out[0].verdict, Verdict::Historico);
@@ -437,8 +358,6 @@ mod tests {
 
     #[test]
     fn un_nodo_retirado_de_la_version_actual_es_historico() {
-        // El error cae en la version actual, pero el nodo ya no esta en ella: se
-        // conserva la version que corria y no se inventa una linea.
         let snaps = [
             snapshot(
                 25,

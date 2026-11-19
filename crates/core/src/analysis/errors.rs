@@ -1,8 +1,3 @@
-//! Informe de errores del robot clasificados por lo que se puede hacer con
-//! ellos: vivos, payload cambiado, historicos, modulo de plataforma y ruido.
-//!
-//! Invariante: `ERROR_MESSAGE_MAX` acota el mensaje a su primera linea.
-
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -15,27 +10,18 @@ use crate::logs;
 use crate::signature::{self, ErrorKind};
 use crate::tree;
 
-/// Tope del mensaje en caracteres; el mensaje se queda en su primera linea.
 pub const ERROR_MESSAGE_MAX: usize = 160;
 
-/// Un error del log agrupado por firma.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ErrorItem {
-    /// Linea de Studio en la version donde ocurrio; vacia si el nodo no existia.
     pub line: String,
     pub command: String,
-    /// Primera linea del mensaje, acotada a [`ERROR_MESSAGE_MAX`].
     pub message: String,
     pub occurrences: usize,
-    /// Firma estable (`signature::normalize`): clave de agrupacion.
     pub signature: String,
-    /// `bots.id` vivo en el instante del error, si se pudo atribuir.
     pub version: Option<i64>,
 }
 
-/// Errores del robot repartidos por lo que se puede hacer con ellos.
-/// `live` y `payload_changed` son accionables hoy; `historical` solo es evidencia
-/// de un defecto ya corregido. `platform` y `noise` son fallos de Rocketbot.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ErrorReport {
     pub live: Vec<ErrorItem>,
@@ -46,12 +32,10 @@ pub struct ErrorReport {
 }
 
 impl ErrorReport {
-    /// Sin nada que contar: el render omite la seccion entera.
     pub fn is_empty(&self) -> bool {
         self.total() == 0
     }
 
-    /// Firmas distintas en el informe, no ocurrencias.
     pub fn total(&self) -> usize {
         self.live.len()
             + self.payload_changed.len()
@@ -61,8 +45,6 @@ impl ErrorReport {
     }
 }
 
-/// Lee los logs del directorio y devuelve los errores del robot clasificados.
-/// Un directorio sin logs da un informe vacio, no un error.
 pub fn errors_for(
     conn: &Connection,
     robot: &str,
@@ -79,7 +61,6 @@ pub fn errors_for(
     let mut raws: Vec<RawError> = Vec::with_capacity(entries.len());
     let mut por_mensaje: Vec<Option<Bucket>> = Vec::with_capacity(entries.len());
     for entry in &entries {
-        // `for_robot` ya exige peticion; el `let else` evita un error sin nodo.
         let Some(request) = entry.request.as_ref() else {
             continue;
         };
@@ -104,7 +85,6 @@ pub fn errors_for(
             .entry(raw.signature.clone())
             .and_modify(|item| {
                 item.occurrences += raw.occurrences;
-                // La primera linea que se pudo ubicar es la que el agente mira.
                 if item.line.is_empty() {
                     if let Some(line) = &atr.line {
                         item.line = line.clone();
@@ -132,15 +112,12 @@ pub fn errors_for(
     })
 }
 
-/// Snapshots del robot reducidos a `cmd_id -> nodo`, para la atribucion.
-/// Compartido con el broker de ejecucion para no dar lineas distintas.
 pub(crate) fn snapshot_views(conn: &Connection, robot: &str) -> Result<Vec<SnapshotView>> {
     let mut out = Vec::new();
     for snap in db::load_snapshots(conn, robot)? {
         let root = db::project_root(&snap.project);
         let nodes = tree::flatten(db::commands_of(root))
             .into_iter()
-            // Sin `id` el nodo no es direccionable y no puede cruzar con el log.
             .filter(|n| !n.id.is_empty())
             .map(|n| {
                 (
@@ -161,8 +138,6 @@ pub(crate) fn snapshot_views(conn: &Connection, robot: &str) -> Result<Vec<Snaps
     Ok(out)
 }
 
-/// Cubo de clasificacion de un error.
-/// El orden del `enum` es el de la cabecera del render y el indice de los cubos.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Bucket {
     Live = 0,
@@ -173,13 +148,10 @@ pub(super) enum Bucket {
 }
 
 impl Bucket {
-    /// Indice en la tabla de cubos: unica traduccion de "cubo" a "posicion".
     fn index(self) -> usize {
         self as usize
     }
 
-    /// Veredicto de la atribucion -> cubo del informe.
-    /// [`Verdict::Desconocido`] va con los historicos: no es accionable hoy.
     pub(super) fn from_verdict(verdict: Verdict) -> Self {
         match verdict {
             Verdict::Vivo => Bucket::Live,
@@ -189,9 +161,7 @@ impl Bucket {
     }
 }
 
-/// Cubo decidible solo con el texto del error; `None` si hay que mirar el veredicto.
 pub(super) fn bucket_of(message: &str) -> Option<Bucket> {
-    // Ruido primero: `zdev` y `getbot` tambien son modulos, pero no son del robot.
     if signature::is_engine_noise(message) {
         return Some(Bucket::Noise);
     }
@@ -201,12 +171,9 @@ pub(super) fn bucket_of(message: &str) -> Option<Bucket> {
     None
 }
 
-/// Entradas de error del robot, en orden cronologico.
-/// Reutiliza el cache de ficheros parseados y filtra por referencia.
 fn robot_errors(robot: &str, logs_dir: &Path, max_files: usize) -> Vec<logs::LogEntry> {
     let mut out = Vec::new();
     for path in logs::recent_files(logs_dir, max_files) {
-        // Un log ilegible se omite: es evidencia que falta, no un fallo del pack.
         let Some(entries) = logs::parse_file_cached(&path) else {
             continue;
         };
@@ -216,13 +183,10 @@ fn robot_errors(robot: &str, logs_dir: &Path, max_files: usize) -> Vec<logs::Log
                 .cloned(),
         );
     }
-    // "La primera ocurrencia" solo vale en orden cronologico; la ordenacion es
-    // estable y conserva el orden del runner para el mismo instante.
     out.sort_by_key(|e| e.timestamp);
     out
 }
 
-/// Primera linea del mensaje, acotada: la traza de Python no es parte del defecto.
 pub(super) fn short_message(message: &str) -> String {
     let first = message.lines().next().unwrap_or("").trim();
     let mut out: String = first.chars().take(ERROR_MESSAGE_MAX).collect();
@@ -239,7 +203,6 @@ pub(super) fn max_version(a: Option<i64>, b: Option<i64>) -> Option<i64> {
     }
 }
 
-/// Mas repetidos primero; el desempate por firma mantiene el render estable.
 fn sorted(cubo: BTreeMap<String, ErrorItem>) -> Vec<ErrorItem> {
     let mut out: Vec<ErrorItem> = cubo.into_values().collect();
     out.sort_by(|a, b| {
@@ -272,8 +235,6 @@ mod tests {
         assert_eq!(recortado.chars().count(), ERROR_MESSAGE_MAX + 1);
         assert!(recortado.ends_with('…'));
 
-        // Recortar por bytes partiria un caracter de dos y dejaria el pack con
-        // texto invalido.
         let unicode = "ñ".repeat(ERROR_MESSAGE_MAX + 1);
         let recortado = short_message(&unicode);
         assert_eq!(recortado.chars().count(), ERROR_MESSAGE_MAX + 1);
@@ -297,17 +258,14 @@ mod tests {
 
     #[test]
     fn el_cubo_por_mensaje_separa_ruido_y_plataforma() {
-        // Ruido de motor: no se arregla desde el robot.
         assert_eq!(
             bucket_of(r#"EXCEPTION IN (<string> zdev, L_1375 ""): Error: Incorrect padding"#),
             Some(Bucket::Noise)
         );
-        // Defecto de un modulo de la plataforma: no es ruido transitorio.
         assert_eq!(
             bucket_of(r#"EXCEPTION IN (<string> datatransform, L_212 ""): AttributeError: x"#),
             Some(Bucket::Platform)
         );
-        // Error del robot: hay que atribuirlo antes de colocarlo.
         assert_eq!(
             bucket_of(r#"EXCEPTION IN (<string> Rocketbot, L_91 ""): NameError: name 'x'"#),
             None
@@ -323,8 +281,6 @@ mod tests {
         assert_eq!(max_version(Some(29), Some(25)), Some(29));
     }
 
-    /// Db minima con un snapshot por robot: `errors_for` atribuye cada error al
-    /// snapshot vivo, y sin snapshots no habria a que atribuirlo.
     fn db_con_robots(dir: &Path, robots: &[&str]) -> Connection {
         use base64::Engine as _;
 
@@ -339,8 +295,6 @@ mod tests {
         )
         .expect("creo la tabla bots");
         for (index, robot) in robots.iter().enumerate() {
-            // El `id` del nodo tiene que coincidir con el `cmd_id` del log: es la
-            // unica union fiable entre ejecucion y codigo.
             let project = serde_json::json!({
                 "project": {
                     "commands": [{
@@ -366,8 +320,6 @@ mod tests {
         conn
     }
 
-    /// Log con una peticion del robot y un error que la hereda, como los escribe el
-    /// runner: la linea de error no dice de que nodo es.
     fn log_de(robot: &str) -> String {
         format!(
             "2026-11-17 12:43:47.586814 - rocketbot - INFO - request: {robot} : line 1 - rpasystem \
@@ -377,9 +329,6 @@ mod tests {
         )
     }
 
-    /// El cache no puede cambiar el informe: dos robots sobre el mismo directorio
-    /// dan lo mismo que daban sin cache, y el segundo reaprovecha el parseo del
-    /// primero.
     #[test]
     fn dos_robots_sobre_los_mismos_logs_conservan_el_informe_y_aprovechan_el_cache() {
         let _turno = logs::cache_test_guard();
@@ -394,7 +343,6 @@ mod tests {
                 .expect("escribo el log");
         }
 
-        // Primera pasada: dos ficheros parseados, ningun acierto.
         let alfa = errors_for(&conn, "alfa", &logs_dir, 20).expect("informe de alfa");
         assert_eq!(
             alfa.live.len(),
@@ -407,7 +355,6 @@ mod tests {
             "un fichero cacheado por fichero leido"
         );
 
-        // Segundo robot, mismos ficheros: ni una lectura nueva.
         let beta = errors_for(&conn, "beta", &logs_dir, 20).expect("informe de beta");
         assert_eq!(
             logs::cache_stats(),
@@ -420,7 +367,6 @@ mod tests {
             "el error de alfa no puede contarse en el informe de beta"
         );
 
-        // Y alfa, otra vez, da exactamente el mismo informe que la primera vez.
         let otra_vez = errors_for(&conn, "alfa", &logs_dir, 20).expect("informe de alfa otra vez");
         assert_eq!(otra_vez, alfa, "el cache no cambia ni un cubo del informe");
         assert_eq!(
@@ -430,7 +376,6 @@ mod tests {
         );
     }
 
-    /// Un directorio sin ficheros de log no entra al cache ni inventa un informe.
     #[test]
     fn sin_logs_el_informe_sale_vacio_y_el_cache_intacto() {
         let _turno = logs::cache_test_guard();
