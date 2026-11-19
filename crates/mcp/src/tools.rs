@@ -1,15 +1,9 @@
-//! Las tres tools de la fachada y su despacho.
+//! Las tools de la fachada y su despacho.
 //!
-//! Cada tool es una funcion pequena; lo que comparten (resolucion de la db,
-//! lectura de argumentos, recorte de la seccion de errores) esta en ayudantes
-//! para que el despacho no sea un `match` monolitico.
-//!
-//! # Formato de respuesta
-//!
-//! Todas devuelven `{"content":[{"type":"text","text":"..."}],"isError":bool}`.
-//! Un fallo de negocio (robot inexistente) es `isError: true` con el mensaje del
-//! motor ya redactado: el agente tiene que poder leerlo, no recibir un error de
-//! protocolo que su cliente puede tratar como caida del servidor.
+//! Todas responden `{"content":[{"type":"text","text":"..."}],"isError":bool}`:
+//! un fallo de negocio es `isError: true` con el mensaje del motor ya redactado,
+//! para que el agente lo lea y decida, en vez de un error de protocolo que su
+//! cliente pueda tratar como caida del servidor.
 
 use std::fmt::Write as _;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -37,15 +31,12 @@ pub const PROBLEMS_RECORD: &str = "problems_record";
 pub const PROBLEMS_FIX: &str = "problems_fix";
 pub const UI_RENDER: &str = "ui_render";
 
-/// Errores distintos que se pintan en la respuesta de `run_robot`.
 const MAX_ERRORS_IN_TEXT: usize = 10;
 
-/// Resultado de una tool, ya listo para el `result` de JSON-RPC.
 #[derive(Debug, Clone)]
 pub struct ToolOutput {
     pub text: String,
-    /// `true` = fallo de negocio (la tool se ejecuto, el robot no esta). No es
-    /// un error de protocolo: el agente lee el mensaje y decide.
+    /// `true` = fallo de negocio: no es error de protocolo.
     pub is_error: bool,
 }
 
@@ -75,16 +66,11 @@ impl ToolOutput {
 /// Fallos que si son de protocolo.
 #[derive(Debug, Clone)]
 pub enum CallError {
-    /// La llamada esta mal formada: falta un argumento o su tipo no encaja.
     InvalidParams(String),
-    /// La tool se rompio por dentro (panic del motor o fallo inesperado).
     Internal(String),
 }
 
-/// Catalogo de tools para `tools/list`.
-///
-/// Los `inputSchema` son JSON Schema de objeto, con `properties` y `required`:
-/// es lo que un cliente usa para construir la llamada sin adivinar.
+/// Catalogo de tools para `tools/list`; el `inputSchema` es JSON Schema de objeto.
 pub fn descriptors() -> Value {
     json!({
         "tools": [
@@ -287,10 +273,7 @@ fn db_property() -> Value {
 }
 
 /// Despacha una tool por nombre.
-///
-/// El `catch_unwind` es la red de seguridad del servidor: un bug del motor sobre
-/// un robot raro se convierte en `-32603` y el agente pierde una llamada, no la
-/// sesion entera (el proceso sigue leyendo lineas).
+/// `catch_unwind` convierte un panic del motor en `-32603` sin perder la sesion.
 pub fn call(name: &str, arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
     match catch_unwind(AssertUnwindSafe(|| dispatch(name, arguments, settings))) {
         Ok(result) => result,
@@ -318,8 +301,7 @@ fn dispatch(name: &str, arguments: &Value, settings: &Settings) -> Result<ToolOu
     }
 }
 
-/// `list_robots`: que hay en la db. Texto, no JSON: el agente lo lee igual y no
-/// paga las claves repetidas.
+/// `list_robots`: que hay en la db; texto, no JSON.
 fn list_robots(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
     let args = Args::new(arguments)?;
     let db_path = resolve_db(args.opt_str("db")?, settings);
@@ -332,7 +314,6 @@ fn list_robots(arguments: &Value, settings: &Settings) -> Result<ToolOutput, Cal
     }
 }
 
-/// `flow_pack`: el entregable real.
 fn flow_pack(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
     let args = Args::new(arguments)?;
     let robot = args.required_str("robot")?;
@@ -348,9 +329,6 @@ fn flow_pack(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallE
 }
 
 /// `flow_diff`: que cambio entre dos snapshots.
-///
-/// Es la tool que cierra el circulo del diagnostico: el pack dice que falla y
-/// donde; el diff dice que se toco entre la version que fallaba y la siguiente.
 fn flow_diff(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
     let args = Args::new(arguments)?;
     let robot = args.required_str("robot")?;
@@ -378,8 +356,7 @@ fn diff_markdown(db_path: &Path, robot: &str, from: i64, to: i64) -> Result<Stri
     ))
 }
 
-/// Nodos de un snapshot concreto. Abre su propia conexion para no arrastrar
-/// `rusqlite` como dependencia del crate: la fachada solo conoce el motor.
+/// Nodos de un snapshot, con su propia conexion para no arrastrar `rusqlite`.
 fn nodes_of(
     db_path: &Path,
     robot: &str,
@@ -396,9 +373,6 @@ fn nodes_of(
     Ok(rocketdebug_core::tree::flatten(commands))
 }
 
-// ---------------------------------------------------------------- ejecucion
-
-/// Texto cuando no hay `rocketbot.exe` configurado.
 fn sin_broker() -> String {
     "la ejecucion no esta configurada: define ROCKETBOT_EXE con la ruta a \
      rocketbot.exe y reinicia el servidor. Con Studio abierto el runner CLI delega \
@@ -432,8 +406,6 @@ fn run_robot(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallE
         None => exec_settings.default_timeout,
     };
 
-    // Un nombre mal escrito no debe esperar a que termine otra ejecucion para
-    // descubrirse: se valida antes de encolar.
     if let Err(source) = ensure_robot(&db_path, &robot) {
         return Ok(ToolOutput::business_error(describe_failure(
             &source, &db_path,
@@ -550,10 +522,7 @@ fn verdict_label(verdict: Verdict) -> &'static str {
 }
 
 /// Ultimas lineas utiles de la salida del runner, ya enmascaradas.
-///
-/// El caso tipico es el aviso de licencia de produccion: explica por que un
-/// `exit_code 0` no ejecuto nada. Se filtran las lineas de asteriscos del banner
-/// para que no se coman el unico dato que importa.
+/// Tipico: el aviso de licencia explica por que un `exit_code 0` no ejecuto nada.
 fn output_hint(report: &RunReport) -> Option<String> {
     let source = if report.stderr_tail.trim().is_empty() {
         &report.stdout_tail
@@ -636,9 +605,6 @@ fn clip(text: &str, max: usize) -> String {
     out
 }
 
-// ---------------------------------------------------------------- registro
-
-/// Texto que se devuelve cuando no hay registro configurado.
 fn sin_registro() -> String {
     "no hay registro de problemas configurado: define ROCKETDEBUG_REGISTRY (o \
      ROCKETDEBUG_HOME) y vuelve a arrancar el servidor"
@@ -651,10 +617,7 @@ fn abrir_registro(settings: &Settings) -> Result<rocketdebug_core::registry::Reg
         .map_err(|e| format!("no pude abrir el registro {}: {e}", path.display()))
 }
 
-/// Hora del sello de una observacion.
-///
-/// `chrono` va sin la feature `clock` en todo el workspace, asi que el reloj lo
-/// pone quien llama; aqui se toma del sistema una sola vez por peticion.
+/// Hora del sello de una observacion: `chrono` va sin `clock`, el reloj lo pone quien llama.
 fn ahora() -> chrono::NaiveDateTime {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -689,7 +652,6 @@ fn render_problems(stats: &[rocketdebug_core::registry::SignatureStats]) -> Stri
     o
 }
 
-/// `problems_search`: que se ha visto ya.
 fn problems_search(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
     let args = Args::new(arguments)?;
     let query = args.opt_str("query")?.unwrap_or_default();
@@ -708,9 +670,7 @@ fn problems_search(arguments: &Value, settings: &Settings) -> Result<ToolOutput,
 }
 
 /// `problems_record`: guardar lo que el motor ve ahora.
-///
-/// Es la unica tool que escribe algo, y escribe **su** fichero: el registro.
-/// `robot.db` se sigue abriendo en solo lectura.
+/// Es la unica tool que escribe, y escribe el registro, nunca `robot.db`.
 fn problems_record(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
     let args = Args::new(arguments)?;
     let robot = args.required_str("robot")?;
@@ -743,8 +703,7 @@ fn problems_record(arguments: &Value, settings: &Settings) -> Result<ToolOutput,
             }
         };
 
-    // Hora del snapshot observado, no del barrido: con el reloj, dos pasadas de la
-    // misma version contarian como dos avistamientos.
+    // Hora del snapshot observado, no del barrido: dos pasadas no son dos avistamientos.
     let visto_en = db::latest_created_at(&conn, &robot)
         .ok()
         .flatten()
@@ -753,8 +712,7 @@ fn problems_record(arguments: &Value, settings: &Settings) -> Result<ToolOutput,
     let mut nuevas = 0usize;
     let mut omitidas = 0usize;
     let mut fallos: Vec<String> = Vec::new();
-    // El ruido del motor no se registra: no es un defecto del robot y llenaria el
-    // historial de firmas que nadie va a arreglar.
+    // El ruido del motor no se registra: no es defecto del robot.
     for item in analysis
         .errors
         .live
@@ -764,8 +722,7 @@ fn problems_record(arguments: &Value, settings: &Settings) -> Result<ToolOutput,
         .chain(analysis.errors.platform.iter())
     {
         vistas += 1;
-        // Los mensajes que el propio robot escribe con `log_message` no son firmas
-        // de defecto: nadie los va a "arreglar" y ensucian el registro.
+        // Los mensajes de `log_message` los escribe el robot: no son firmas de defecto.
         if item.command == "log_message" {
             omitidas += 1;
             continue;
@@ -804,7 +761,6 @@ fn problems_record(arguments: &Value, settings: &Settings) -> Result<ToolOutput,
     Ok(ToolOutput::ok(o))
 }
 
-/// `problems_fix`: convertir un diagnostico en conocimiento.
 fn problems_fix(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
     let args = Args::new(arguments)?;
     let robot = args.required_str("robot")?;
@@ -857,14 +813,7 @@ fn problems_fix(arguments: &Value, settings: &Settings) -> Result<ToolOutput, Ca
     }
 }
 
-// ---------------------------------------------------------------- UI
-
-/// URL base de la UI.
-///
-/// El servidor HTTP no tiene puerto por defecto (se arranca con `--http`), asi que
-/// la fachada no puede adivinarlo: se configura con `ROCKETDEBUG_UI_URL`. El valor
-/// por defecto es el puerto que se usa en la documentacion, para que un agente que
-/// no lea la variable al menos acierte con el caso comun.
+/// URL base de la UI, de `ROCKETDEBUG_UI_URL`; por defecto `http://127.0.0.1:8765`.
 fn ui_base() -> String {
     std::env::var("ROCKETDEBUG_UI_URL")
         .ok()
@@ -874,9 +823,6 @@ fn ui_base() -> String {
 }
 
 /// `%xx` de todo lo que no sea incondicionalmente seguro en una URL.
-///
-/// Hace falta porque los nombres de robot y las etiquetas de db llevan `\`, tildes y
-/// espacios, y un enlace que el humano pega en el navegador tiene que funcionar.
 fn percent_encode(texto: &str) -> String {
     let mut out = String::with_capacity(texto.len());
     for byte in texto.as_bytes() {
@@ -927,10 +873,7 @@ fn ui_render(arguments: &Value) -> Result<ToolOutput, CallError> {
 }
 
 /// `robot_errors`: solo la seccion de errores del pack.
-///
-/// La seccion se pide al render estructurado ([`Pack::render_errors_section`]),
-/// no recortando el markdown por `## Errores`: el formato vive en un solo sitio y
-/// cambiar el orden de las secciones no puede romper la tool (deuda de #18).
+/// Se pide al render estructurado, no recortando el markdown: el formato vive en un solo sitio.
 fn robot_errors(arguments: &Value, settings: &Settings) -> Result<ToolOutput, CallError> {
     let args = Args::new(arguments)?;
     let robot = args.required_str("robot")?;
@@ -950,10 +893,7 @@ fn robot_errors(arguments: &Value, settings: &Settings) -> Result<ToolOutput, Ca
 }
 
 /// Lee los argumentos de una tool.
-///
-/// `Null` se acepta como "sin argumentos": la tool dira cual falta. Un valor que
-/// no sea objeto es un error de argumentos, no de protocolo, para que el agente
-/// vea el mensaje.
+/// `Null` se acepta como `{}`; un valor que no sea objeto es error de argumentos.
 struct Args<'a> {
     map: Option<&'a Map<String, Value>>,
 }
@@ -1011,9 +951,7 @@ impl<'a> Args<'a> {
 }
 
 /// Prioridad de la db: argumento, `ROCKETBOT_DB`, Studio local.
-///
-/// Un `db` vacio o de espacios se trata como ausente: un cliente que manda `""`
-/// quiere decir "la de siempre", no "abre la cadena vacia".
+/// Un `db` vacio o de espacios se trata como ausente.
 fn resolve_db(arg: Option<String>, settings: &Settings) -> PathBuf {
     match arg.filter(|path| !path.trim().is_empty()) {
         Some(path) => PathBuf::from(path),
@@ -1021,7 +959,6 @@ fn resolve_db(arg: Option<String>, settings: &Settings) -> PathBuf {
     }
 }
 
-/// Listado de robots. Cabecera con la db y una linea por robot.
 fn robots_text(db_path: &Path) -> Result<String, Error> {
     let conn = db::open_readonly(db_path)?;
     let robots = db::list_robots(&conn)?;
@@ -1055,8 +992,7 @@ fn robots_text(db_path: &Path) -> Result<String, Error> {
     Ok(out.trim_end().to_string())
 }
 
-/// Render del pack. La seccion de errores se llena solo si hay logs: es la
-/// misma politica que el CLI, y el motor no decide leer disco por su cuenta.
+/// Render del pack; la seccion de errores solo se llena si hay logs.
 pub(crate) fn pack_markdown(
     db_path: &Path,
     robot: &str,
@@ -1066,8 +1002,7 @@ pub(crate) fn pack_markdown(
     Ok(build_pack(db_path, robot, snapshot, settings)?.render_markdown())
 }
 
-/// Pack ya ensamblado, para las tools que necesitan una seccion y no el markdown
-/// entero (`robot_errors`).
+/// Pack ya ensamblado para las tools que necesitan una seccion y no el markdown.
 fn build_pack(
     db_path: &Path,
     robot: &str,
@@ -1091,13 +1026,8 @@ fn build_pack(
     )
 }
 
-/// Texto de `robot_errors`: la seccion del pack, o la explicacion de por que no
-/// hay seccion.
-///
-/// La distincion entre "no hay errores" y "no hay logs" es el punto de esta
-/// tool: un pack sin seccion de errores no dice que el robot este limpio, dice
-/// que no hay evidencia. Confundirlas es justo el falso verde que el motor evita
-/// en el resto del producto.
+/// Texto de `robot_errors`: la seccion del pack, o por que no hay seccion.
+/// Sin logs no es lo mismo que sin errores: no hay evidencia.
 fn errors_text(
     section: Option<String>,
     robot: &str,
@@ -1125,18 +1055,13 @@ fn errors_text(
     }
 }
 
-/// Etiqueta de la db sin ruta absoluta: `BBRE2\robot_run.db`.
-///
-/// El calculo vive en el motor ([`db::label`]) porque el informe del broker
-/// tambien lo necesita y dos implementaciones acabarian discrepando.
+/// Etiqueta de la db sin ruta absoluta; el calculo vive en el motor.
 pub(crate) fn db_label(path: &Path) -> String {
     db::label(path)
 }
 
 /// Mensaje de negocio: el del motor y, detras, la db que se consulto.
-///
-/// Sin la db, "robot no encontrado" no dice donde se busco, y con una db por
-/// defecto el agente no sabe que estaba mirando `C:\Rocketbot\robot.db`.
+/// Sin la db, "robot no encontrado" no dice donde se busco.
 pub(crate) fn describe_failure(source: &Error, db_path: &Path) -> String {
     format!("{source}\ndb: {} (solo lectura)", db_path.display())
 }

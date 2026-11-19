@@ -1,25 +1,9 @@
-//! Transporte HTTP/1.1 local para la fachada MCP.
+//! Transporte HTTP/1.1 local para la fachada MCP: una peticion por conexion, sin
+//! `keep-alive`, `chunked` ni TLS, y el mismo despacho que stdio.
 //!
-//! # Por que hace falta
-//!
-//! stdio basta cuando el cliente arranca el servidor: es el caso de DSH. Pero el
-//! producto sera una app con una sola instancia y un solo dueno del estado, y el
-//! agente un cliente que se conecta a ella. Eso pide un socket.
-//!
-//! # HTTP minimo, no un framework
-//!
-//! Lo que hay aqui es lo justo para JSON-RPC de peticion/respuesta: una peticion
-//! por conexion, sin `keep-alive`, sin `chunked`, sin TLS y sin pool de hilos.
-//! La app habla con un agente, no con una multitud; una dependencia de servidor
-//! HTTP solo traeria superficie que nadie usa.
-//!
-//! # Un solo despacho
-//!
-//! Este modulo no sabe de MCP: pasa el cuerpo por [`crate::handle_line_with`], la
-//! misma funcion que usa stdio, y devuelve lo que devuelve. Un `match` propio con
-//! los metodos duplicaria el protocolo y los dos transportes se separarian a la
-//! primera correccion. Como consecuencia, una notificacion (sin `id`) devuelve
-//! `None` tambien aqui, y eso se traduce a `202`: no hay nada que contestar.
+//! Invariante: solo loopback y cuerpo de 1 MiB como maximo. El motor lee
+//! `robot.db` sin autenticacion, asi que escuchar fuera de loopback expondria
+//! los robots del usuario a la red local.
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -31,35 +15,17 @@ use rocketdebug_core::db;
 
 use crate::Settings;
 
-/// Cuerpo maximo de `POST /mcp`.
-///
-/// Un context pack no llega ni de lejos; el tope esta para que una peticion no
-/// pueda reservar un `Vec` de gigabytes ni dejar un hilo leyendo para siempre.
+/// Cuerpo maximo de `POST /mcp`: 1 MiB.
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 
-/// Cabecera maxima. `Content-Length` y poco mas caben en una linea; 16 KiB es
-/// margen de sobra para un cliente que ademas mande `User-Agent` y `Accept`.
 const MAX_HEAD_BYTES: usize = 16 * 1024;
 
-/// Plazo de lectura y escritura.
-///
-/// Un cliente que abre la conexion y no habla ocupa un hilo; sin plazo, una app
-/// que no puede crear hilos se queda colgada detras de un socket mudo.
+/// Plazo de lectura y escritura: un cliente mudo no puede colgar un hilo.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Atiende peticiones hasta que el listener se cierre. Devuelve solo al error fatal.
-///
-/// Cada conexion se atiende en su hilo y se cierra al responder (`Connection:
-/// close`): no hay estado entre peticiones, asi que un `TcpStream` no puede
-/// quedarse pegado a una sesion de otro cliente.
-///
-/// # Seguridad
-///
-/// El motor lee `robot.db` sin autenticacion: si esto escuchara en `0.0.0.0`,
-/// cualquiera en la red local podria listar los robots del usuario. Por eso se
-/// comprueba el `local_addr` del listener y se rechaza lo que no sea loopback,
-/// aunque quien llame se haya equivocado al ligar.
+/// Atiende peticiones hasta que el listener se cierre, cada conexion en su hilo.
+/// Solo acepta loopback: el motor lee `robot.db` sin autenticacion.
 pub fn serve(listener: TcpListener, settings: Settings) -> io::Result<()> {
     let address = listener.local_addr()?;
     if !is_loopback(address) {
@@ -73,38 +39,25 @@ pub fn serve(listener: TcpListener, settings: Settings) -> io::Result<()> {
         match listener.accept() {
             Ok((stream, _peer)) => {
                 let settings = settings.clone();
-                // Un hilo por conexion: la app puede seguir pintando la UI
-                // mientras el agente pregunta. Los hilos no se acumulan porque
-                // cada conexion termina en cuanto recibe su respuesta.
                 std::thread::Builder::new()
                     .name("rocketdebug-mcp-http".to_string())
                     .spawn(move || {
-                        // Un fallo de esta conexion no es un fallo del servidor:
-                        // el cliente se fue o mando basura. Se cierra y ya.
                         let _ = handle_connection(stream, &settings);
                     })?;
             }
-            // Un `accept` que falla por una conexion concreta no puede tumbar el
-            // motor: rendirse ante el primer cliente que corta el handshake
-            // dejaria la app sin servidor.
+            // Un `accept` fallido por una conexion suelta no puede tumbar el motor.
             Err(error) if is_transient(&error) => continue,
             Err(error) => return Err(error),
         }
     }
 }
 
-/// La unica direccion en la que este transporte acepta hablar.
-///
-/// Aislado de [`serve`] para poder probar la regla sin abrir un socket.
 fn is_loopback(address: SocketAddr) -> bool {
     address.ip().is_loopback()
 }
 
 /// Errores de `accept` que son de una conexion, no del servidor.
-///
-/// `WouldBlock` no esta en la lista a proposito: con un listener no bloqueante
-/// (un fallo de quien llama, porque `bind` lo deja bloqueante) reintentar seria
-/// girar al 100% de CPU sin aceptar nada. Mejor devolver el error y que se vea.
+/// `WouldBlock` no entra: con un listener no bloqueante reintentar giraria al 100% de CPU.
 fn is_transient(error: &io::Error) -> bool {
     matches!(
         error.kind(),
@@ -114,15 +67,12 @@ fn is_transient(error: &io::Error) -> bool {
     )
 }
 
-/// Atiende una conexion: lee una peticion, responde y cierra.
 fn handle_connection(mut stream: TcpStream, settings: &Settings) -> io::Result<()> {
     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
     let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
 
     let response = match read_request(&mut stream) {
         Ok(Some(request)) => respond(&request, settings),
-        // Conexion abierta y cerrada sin escribir: un sondeo del SO o un cliente
-        // que se arrepiente. No hay peticion, asi que no hay respuesta.
         Ok(None) => return Ok(()),
         Err(error) => error.into_response(),
     };
@@ -131,30 +81,19 @@ fn handle_connection(mut stream: TcpStream, settings: &Settings) -> io::Result<(
 }
 
 /// Lo que el servidor necesita de una peticion.
-///
-/// Las cabeceras que no se miran se descartan al parsear en vez de guardarlas:
-/// este servidor solo decide con el metodo, la ruta y la longitud del cuerpo.
 #[derive(Debug)]
 struct Request {
     method: String,
-    /// Ruta sin query string (`/health?x=1` es `/health`).
     path: String,
-    /// Query string sin el `?` inicial. La UI la necesita para `/api/pack?robot=…`,
-    /// y descartarla en el parser (como se hacia antes) la hacia irrecuperable.
+    /// Query string sin el `?` inicial: la UI la usa para `/api/pack?robot=...`.
     query: String,
     /// `None` = la peticion no traia `Content-Length`, o sea que no declaro cuerpo.
     content_length: Option<usize>,
     body: Vec<u8>,
 }
 
-/// Lee una peticion completa.
-///
-/// `Ok(None)` = el cliente cerro sin escribir nada. `Err` = hay que contestar ese
-/// estado y cerrar; no es un fallo del servidor.
-///
-/// La lectura es incremental a proposito: un `read` de un socket no respeta
-/// ninguna frontera, ni la del final de cabecera ni la del cuerpo. Acumular hasta
-/// tener lo declarado es lo unico que funciona con un cuerpo troceado.
+/// Lee una peticion completa. `Ok(None)` = el cliente cerro sin escribir nada.
+/// La lectura es incremental: un `read` no respeta la frontera cabecera/cuerpo.
 fn read_request(reader: &mut impl Read) -> Result<Option<Request>, HttpError> {
     let mut buffer = Vec::with_capacity(1024);
     let mut chunk = [0u8; 4096];
@@ -181,7 +120,6 @@ fn read_request(reader: &mut impl Read) -> Result<Option<Request>, HttpError> {
         }
     };
 
-    // La cabecera de HTTP es ASCII (y por tanto UTF-8); si no lo es, no es HTTP.
     let head = std::str::from_utf8(&buffer[..head_end])
         .map_err(|_| HttpError::bad_request("la cabecera no es UTF-8"))?;
     if head_end > MAX_HEAD_BYTES {
@@ -208,18 +146,14 @@ fn read_request(reader: &mut impl Read) -> Result<Option<Request>, HttpError> {
         )));
     }
 
-    // El target puede venir en forma absoluta (`http://host/mcp`) detras de un
-    // proxy; aqui solo interesa la ruta. La query se guarda aparte porque las rutas
-    // de la UI la usan (`/api/pack?robot=…`).
+    // El target puede venir absoluto detras de un proxy; se guardan ruta y query.
     let path = target.split(['?', '#']).next().unwrap_or(target);
     let query = target
         .split_once('?')
         .map(|(_, resto)| resto.split('#').next().unwrap_or(""))
         .unwrap_or("");
 
-    // Las cabeceras son todas las lineas menos la de peticion; el CR final de
-    // cada una se tolera porque un cliente de Windows lo manda y aqui no anade
-    // informacion.
+    // Las cabeceras son todas las lineas menos la de peticion; el CR final se tolera.
     let headers = head
         .split('\n')
         .map(|line| line.trim_end_matches('\r'))
@@ -243,8 +177,7 @@ fn read_request(reader: &mut impl Read) -> Result<Option<Request>, HttpError> {
         } else if name.eq_ignore_ascii_case("transfer-encoding")
             && !value.eq_ignore_ascii_case("identity")
         {
-            // Soportar `chunked` seria otro parser entero (y otra forma de
-            // desincronizarse) para un cliente que aqui es siempre local.
+            // `chunked` seria otro parser entero para un cliente que siempre es local.
             return Err(HttpError::bad_request(
                 "Transfer-Encoding no soportado: manda el cuerpo con Content-Length",
             ));
@@ -267,10 +200,7 @@ fn read_request(reader: &mut impl Read) -> Result<Option<Request>, HttpError> {
 }
 
 /// Posicion `(final de la cabecera, inicio del cuerpo)` del separador.
-///
-/// Se aceptan `CRLF CRLF` (lo que manda cualquier cliente HTTP/1.1) y `LF LF`
-/// (lo que manda un `printf` de prueba): el segundo no cuesta nada y evita que un
-/// cliente de mano se quede esperando.
+/// Se aceptan `CRLF CRLF` y `LF LF`.
 fn find_head_end(bytes: &[u8]) -> Option<(usize, usize)> {
     let crlf = bytes
         .windows(4)
@@ -281,9 +211,8 @@ fn find_head_end(bytes: &[u8]) -> Option<(usize, usize)> {
         .position(|window| window == b"\n\n")
         .map(|start| (start, start + 2));
 
-    // El separador que aparece antes, no el que se comprueba antes: con una
-    // cabecera terminada en LF y un cuerpo que lleve `\r\n\r\n` dentro, quedarse
-    // con el CRLF CRLF partiria por el medio del cuerpo.
+    // El separador que aparece antes en el flujo, no el primero que se comprueba:
+    // un CRLF CRLF dentro del cuerpo partiria la cabecera.
     match (crlf, lf) {
         (Some(crlf), Some(lf)) => Some(if crlf.0 <= lf.0 { crlf } else { lf }),
         (Some(found), None) | (None, Some(found)) => Some(found),
@@ -291,7 +220,6 @@ fn find_head_end(bytes: &[u8]) -> Option<(usize, usize)> {
     }
 }
 
-/// Acumula el cuerpo hasta tener los bytes que declaro `Content-Length`.
 fn read_body(
     reader: &mut impl Read,
     buffered: &[u8],
@@ -300,7 +228,6 @@ fn read_body(
 ) -> Result<Vec<u8>, HttpError> {
     let mut body = Vec::with_capacity(length);
 
-    // Parte del cuerpo puede haber llegado en la misma lectura que la cabecera.
     let available_end = (start + length).min(buffered.len());
     if start < available_end {
         body.extend_from_slice(&buffered[start..available_end]);
@@ -315,8 +242,7 @@ fn read_body(
                 ));
             }
             Ok(read) => {
-                // Nunca se guarda mas de lo declarado: lo que sobre de esta
-                // lectura seria una peticion siguiente, y aqui no hay pipelining.
+                // Lo que sobre seria una peticion siguiente: no hay pipelining.
                 let missing = length - body.len();
                 body.extend_from_slice(&chunk[..read.min(missing)]);
             }
@@ -328,11 +254,8 @@ fn read_body(
     Ok(body)
 }
 
-/// Fallo al leer o interpretar la peticion.
-///
-/// No es un error del servidor: se contesta `status` con `{"error": "..."}` y se
-/// cierra. No se usa `io::Error` porque perderia el codigo HTTP que hay que
-/// devolver.
+/// Fallo al leer o interpretar la peticion: se contesta con su `status` y se cierra.
+/// No se usa `io::Error` porque perderia el codigo HTTP que hay que devolver.
 #[derive(Debug)]
 struct HttpError {
     status: u16,
@@ -355,8 +278,7 @@ impl HttpError {
     }
 
     fn from_io(error: io::Error) -> Self {
-        // Timeout o cliente que corta: el que se fue es el cliente, asi que el
-        // 400 es para el si todavia escucha, no un 500 que culpe al servidor.
+        // Timeout o cliente que corta: el 400 es para el cliente, no un 500 del servidor.
         Self::bad_request(format!("no pude leer la peticion: {error}"))
     }
 
@@ -365,13 +287,11 @@ impl HttpError {
     }
 }
 
-/// Respuesta HTTP ya completa, lista para escribir.
 struct Response {
     status: u16,
     /// `None` = respuesta sin cuerpo (el `202` de una notificacion).
     content_type: Option<&'static str>,
     body: Vec<u8>,
-    /// Cabecera `Allow` de los `405`.
     allow: Option<&'static str>,
 }
 
@@ -394,7 +314,6 @@ impl Response {
         }
     }
 
-    /// HTML de la UI. `text/html; charset=utf-8` porque la pagina lleva acentos.
     fn html(status: u16, body: impl Into<String>) -> Self {
         Self {
             status,
@@ -404,7 +323,6 @@ impl Response {
         }
     }
 
-    /// Texto plano: el markdown del pack, tal cual, sin escapar.
     fn text(status: u16, body: impl Into<String>) -> Self {
         Self {
             status,
@@ -414,7 +332,6 @@ impl Response {
         }
     }
 
-    /// Asset embebido con su tipo. Sirve CSS y JS de la UI.
     fn asset(content_type: &'static str, body: &'static str) -> Self {
         Self {
             status: 200,
@@ -438,9 +355,7 @@ impl Response {
     }
 }
 
-/// Decide la respuesta a una peticion ya leida.
-///
-/// Es una funcion pura (no toca el socket) para poder probar el ruteo sin red.
+/// Decide la respuesta a una peticion ya leida; puro, para probar el ruteo sin red.
 fn respond(request: &Request, settings: &Settings) -> Response {
     match request.path.as_str() {
         "/mcp" => {
@@ -448,8 +363,7 @@ fn respond(request: &Request, settings: &Settings) -> Response {
                 return Response::method_not_allowed("POST");
             }
             if request.content_length.is_none() {
-                // Sin `Content-Length` no hay cuerpo declarado: contestar `202`
-                // fingiria que se recibio una notificacion que nunca llego.
+                // Sin `Content-Length` un `202` fingiria una notificacion que no llego.
                 return Response::error(411, "POST /mcp necesita `Content-Length`");
             }
             let Ok(body) = std::str::from_utf8(&request.body) else {
@@ -457,8 +371,7 @@ fn respond(request: &Request, settings: &Settings) -> Response {
             };
             match crate::handle_line_with(body, settings) {
                 Some(response) => Response::json(200, response),
-                // Notificacion (sin `id`): JSON-RPC prohibe responderla. stdio
-                // tampoco escribe nada; el `202` dice "recibida y no contestada".
+                // Notificacion (sin `id`): JSON-RPC prohibe responderla; `202` = no contestada.
                 None => Response::empty(202),
             }
         }
@@ -468,18 +381,14 @@ fn respond(request: &Request, settings: &Settings) -> Response {
             }
             Response::json(200, health_body())
         }
-        // La UI. `/` sirve la pagina autocontenida; `/api/*` son sus datos.
-        // `/mcp` sigue siendo el protocolo del agente: la pagina nunca habla JSON-RPC.
         "/" | "/index.html" => {
             if request.method != "GET" {
                 return Response::method_not_allowed("GET");
             }
             Response::html(200, PAGE)
         }
-        // CSS y JS van en ficheros aparte, y no embebidos en el HTML, para que la CSP
-        // pueda prohibir `'unsafe-inline'` de verdad. Un `unsafe-inline` en
-        // `script-src` deja la defensa anti-XSS en nada: el CSP tiene que poder
-        // bloquear un script inyectado.
+        // CSS y JS en ficheros aparte, no embebidos, para que la CSP pueda prohibir
+        // `'unsafe-inline'` de verdad.
         "/app.css" => {
             if request.method != "GET" {
                 return Response::method_not_allowed("GET");
@@ -523,7 +432,6 @@ const PAGE: &str = include_str!("../assets/index.html");
 const APP_CSS: &str = include_str!("../assets/app.css");
 const APP_JS: &str = include_str!("../assets/app.js");
 
-/// Query string a pares clave/valor, con `%xx` y `+` decodificados.
 fn parse_query(query: &str) -> std::collections::BTreeMap<String, String> {
     let mut out = std::collections::BTreeMap::new();
     for par in query.split('&').filter(|p| !p.is_empty()) {
@@ -533,11 +441,7 @@ fn parse_query(query: &str) -> std::collections::BTreeMap<String, String> {
     out
 }
 
-/// Decodifica `%xx` y `+`.
-///
-/// Se hace a mano para no meter una dependencia por dos rutas: la UI manda los
-/// nombres de robot con `encodeURIComponent`, y sin esto un robot con espacios o
-/// acentos no se encontraria.
+/// Decodifica `%xx` y `+` a mano; sin esto un robot con espacios no se encontraria.
 fn percent_decode(texto: &str) -> String {
     let bytes = texto.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -555,8 +459,7 @@ fn percent_decode(texto: &str) -> String {
                         out.push(byte);
                         i += 3;
                     }
-                    // Un `%` que no es escape se deja tal cual: preferible a perder
-                    // el caracter entero.
+                    // Un `%` que no es escape se deja tal cual.
                     Err(_) => {
                         out.push(bytes[i]);
                         i += 1;
@@ -582,8 +485,7 @@ fn review_json(settings: &Settings) -> Result<String, String> {
         Some(root) => {
             let paths = db::discover_databases(root)
                 .map_err(|e| format!("no pude descubrir bases en {}: {e}", root.display()))?;
-            // Mismas etiquetas unicas que el CLI: si dos entregas comparten
-            // `sandbox\robot.db`, la bandeja no puede fusionarlas.
+            // Mismas etiquetas unicas que el CLI: dos entregas no pueden compartir etiqueta.
             let labels = db::labels_for(&paths);
             let mut abiertas = Vec::new();
             for (path, label) in paths.iter().zip(labels) {
@@ -635,7 +537,6 @@ fn review_json(settings: &Settings) -> Result<String, String> {
     .to_string())
 }
 
-/// Markdown del pack para la UI.
 fn pack_for(settings: &Settings, robot: &str, label: Option<&str>) -> Result<String, String> {
     let path = match label {
         Some(label) => {
@@ -659,11 +560,7 @@ fn pack_for(settings: &Settings, robot: &str, label: Option<&str>) -> Result<Str
         .map_err(|e| crate::tools::describe_failure(&e, &path))
 }
 
-/// Cuerpo de `GET /health`.
-///
-/// `name` y `version` son los mismos que `initialize` anuncia en `serverInfo`:
-/// quien pregunta por salud y quien negocia el protocolo tienen que ver la misma
-/// identidad.
+/// Cuerpo de `GET /health`; `name` y `version` son los mismos que anuncia `initialize`.
 fn health_body() -> String {
     json!({
         "ok": true,
@@ -673,7 +570,6 @@ fn health_body() -> String {
     .to_string()
 }
 
-/// Escribe la respuesta y cierra el lado de escritura.
 fn write_response(stream: &mut TcpStream, response: &Response) -> io::Result<()> {
     let mut head = format!(
         "HTTP/1.1 {} {}\r\n",
@@ -687,21 +583,17 @@ fn write_response(stream: &mut TcpStream, response: &Response) -> io::Result<()>
         head.push_str(&format!("Content-Type: {content_type}\r\n"));
     }
     head.push_str(&format!("Content-Length: {}\r\n", response.body.len()));
-    // Sin keep-alive: una respuesta y se cierra. Asi un cliente que no entienda
-    // `Connection: close` no se queda esperando una segunda respuesta que no va
-    // a llegar.
+    // Sin keep-alive: una respuesta y se cierra.
     head.push_str("Connection: close\r\n\r\n");
 
     stream.write_all(head.as_bytes())?;
     stream.write_all(&response.body)?;
     stream.flush()?;
-    // Cerrar el lado de escritura antes de soltar el socket evita que en Windows
-    // el cliente reciba un RST con la respuesta a medio leer.
+    // Cerrar la escritura antes de soltar el socket evita un RST en Windows.
     let _ = stream.shutdown(Shutdown::Write);
     Ok(())
 }
 
-/// Frase de estado que acompana al codigo.
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
