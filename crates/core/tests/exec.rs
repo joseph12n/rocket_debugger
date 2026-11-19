@@ -1,9 +1,3 @@
-//! Tests del broker de ejecucion con fixtures sinteticos.
-//!
-//! Ningun test lanza `rocketbot.exe`: los runners son dobles que escriben logs
-//! en directorios temporales. La ejecucion real contra BBRE2 vive en
-//! `crates/mcp/tests/exec.rs`, marcada `#[ignore]`.
-
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
@@ -24,7 +18,6 @@ fn snapshot_at() -> NaiveDateTime {
     db::parse_date("2026-11-17 10:00:00")
 }
 
-/// Proyecto minimo con un `setVar` que el log puede direccionar por `cmd_id`.
 fn project() -> String {
     json!({
         "project": {
@@ -76,8 +69,6 @@ fn make_db_with_versions(dir: &Path, rows: &[(i64, &str)]) -> PathBuf {
     path
 }
 
-/// Escribe un log con una peticion y un error posterior. La hora es muy futura
-/// para que quede dentro de la ventana de cualquier ejecucion del test.
 fn write_log(dir: &Path, name: &str, robot: &str) {
     std::fs::create_dir_all(dir).expect("creo el directorio de logs");
     let text = format!(
@@ -164,8 +155,6 @@ fn con_eventos_y_exit_cero_la_ejecucion_es_valida() {
 #[test]
 fn los_errores_se_atribuyen_al_snapshot_vivo_no_al_ultimo_guardado() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    // v1 estaba vivo cuando ocurrio el error; v2 se guardo despues. El informe
-    // debe hablar de v1 aunque el snapshot actual del robot sea v2.
     let db_path = make_db_with_versions(
         tmp.path(),
         &[(1, "2026-11-17 10:00:00"), (2, "2026-11-17 10:00:05")],

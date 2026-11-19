@@ -29,8 +29,6 @@ jobs:
       - name: tests
         run: cargo test --all
 
-  # El motor se compila y se prueba tambien en Windows: es la plataforma objetivo
-  # real y hay codigo que solo existe aqui (`tasklist`, `GetLocalTime`).
   build-windows:
     runs-on: windows-latest
     steps:
@@ -40,8 +38,6 @@ jobs:
       - run: cargo build --release --all
       - run: cargo test --all
 
-      # El ejecutable de cada build queda descargable desde la pestana Actions:
-      # es la forma de probar el binario real sin compilar nada en local.
       - uses: actions/upload-artifact@v4
         with:
           name: rocketdebug-windows

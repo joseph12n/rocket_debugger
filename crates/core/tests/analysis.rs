@@ -1,12 +1,3 @@
-//! Test de aceptacion del cableado: un pack deja de ser un volcado del flujo y
-//! pasa a traer hallazgos y contrato implicito de los subrobots.
-//!
-//! El caso es el medido en la fase 0: un orquestador cuyas variables solo tienen
-//! sentido como interfaz de los hijos. Sin grafo, `destinatario` y las demas
-//! parecen muertas; con grafo queda marcada solo la que no usa nadie.
-//!
-//! Ningun test toca `C:\Rocketbot`: los robots se construyen en memoria.
-
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
@@ -29,12 +20,10 @@ fn node(father: &str, line: &str, command: &str) -> Value {
     })
 }
 
-/// Nodo de llamada tal como lo guarda Studio: el nombre del hijo va en `command`.
 fn call(line: &str, child: &str) -> Value {
     node("execRocketBotDB", line, child)
 }
 
-/// Proyecto minimo con el panel de variables declarado.
 fn robot(commands: Vec<Value>, vars: &[&str]) -> Value {
     let vars: Vec<Value> = vars
         .iter()
@@ -49,7 +38,6 @@ fn robot(commands: Vec<Value>, vars: &[&str]) -> Value {
     })
 }
 
-/// Orquestador con dos hijos reales y uno que no esta en la db.
 fn orquestador() -> Value {
     robot(
         vec![
@@ -63,14 +51,12 @@ fn orquestador() -> Value {
             }),
             call("2", "hijo_web"),
             call("3", "hijo_excel"),
-            // Hijo inexistente: no genera contrato, pero tampoco puede romper nada.
             call("4", "no_esta_en_la_db"),
         ],
         &["busqueda", "ruta_salida", "destinatario"],
     )
 }
 
-/// Lee una variable que el padre provee y otra que no provee nadie.
 fn hijo_web() -> Value {
     robot(
         vec![node(
@@ -89,7 +75,6 @@ fn hijo_excel() -> Value {
     )
 }
 
-/// Orquestador en su primera version: una sola llamada y ni un `evaluateIf`.
 fn orq_v1() -> Value {
     robot(
         vec![
@@ -107,7 +92,6 @@ fn orq_v1() -> Value {
     )
 }
 
-/// La segunda version anade una llamada y un `evaluateIf` sin else en la linea 4.
 fn orq_v2() -> Value {
     robot(
         vec![
@@ -127,8 +111,6 @@ fn orq_v2() -> Value {
     )
 }
 
-/// Hijo que lee una variable de su padre. Se guardan dos versiones para comprobar
-/// que fijar el snapshot del padre **no** fija el del hijo.
 fn hijo_web_que_lee(var: &str) -> Value {
     robot(
         vec![node("log_message", "2.1", &format!("Buscando {{{var}}}"))],
@@ -136,7 +118,6 @@ fn hijo_web_que_lee(var: &str) -> Value {
     )
 }
 
-/// Db con dos versiones del orquestador y dos del hijo que lee.
 fn db_con_versiones(dir: &Path) -> PathBuf {
     make_db(
         dir,
@@ -154,8 +135,6 @@ fn make_db(dir: &Path, rows: Vec<(i64, String, Value)>) -> PathBuf {
     make_db_at(dir, "robot.db", rows)
 }
 
-/// Igual que [`make_db`] con nombre de fichero: un workspace tiene varias dbs y
-/// cada una vive en su carpeta.
 fn make_db_at(dir: &Path, file: &str, rows: Vec<(i64, String, Value)>) -> PathBuf {
     std::fs::create_dir_all(dir).expect("creo la carpeta de la db");
     let path = dir.join(file);
@@ -199,8 +178,6 @@ fn el_workspace_compartido_da_el_mismo_analisis_que_cada_robot_por_separado() {
     let path = workspace(tmp.path());
     let conn = db::open_readonly(&path).expect("abro");
 
-    // La bandeja carga los hechos una vez y analiza N robots sobre la misma foto
-    // (issue #18). El resultado tiene que ser identico al camino por robot.
     let shared_workspace =
         rocketdebug_core::analysis::Workspace::load(&[(&conn, DB)]).expect("workspace");
 
@@ -245,8 +222,6 @@ fn el_orquestador_ve_a_sus_hijos_y_solo_marca_lo_que_esta_muerto() {
     let pack = build_from_conn(&conn, "orq", None, DB).expect("pack");
     let analysis = &pack.analysis;
 
-    // El hijo `no_esta_en_la_db` no produce arista: `build_edges` lo omite porque
-    // no hay hechos con los que calcular su contrato.
     assert_eq!(
         analysis.contracts_out.len(),
         2,
@@ -276,16 +251,12 @@ fn el_orquestador_ve_a_sus_hijos_y_solo_marca_lo_que_esta_muerto() {
     );
     assert!(analysis.contracts_in.is_empty(), "nadie llama al orq");
 
-    // `busqueda` la usa orq y `ruta_salida` la lee hijo_excel: solo `destinatario`
-    // esta realmente muerta. Sin el grafo serian tres hallazgos falsos.
     assert_eq!(
         analysis.unused_declared,
         vec!["destinatario".to_string()],
         "la var que es API de un hijo no se marca"
     );
 
-    // `SIN_TRY` y `VAR_NO_USADA` son higiene: describen el robot entero, no un
-    // nodo concreto. Se separan para que no compitan por el cupo con lo accionable.
     let accionables: Vec<&str> = analysis
         .findings
         .iter()
@@ -303,10 +274,6 @@ fn el_orquestador_ve_a_sus_hijos_y_solo_marca_lo_que_esta_muerto() {
         "no hay lineas repetidas: {accionables:?}"
     );
 
-    // Una sola db de hechos: no hay otra donde buscar el hijo, asi que
-    // `build_edges` no puede saber si el nombre existe fuera y `ambiguous_calls`
-    // queda vacia. La llamada a un robot que no esta en ninguna db si se ve en
-    // `missing_calls`: era el punto ciego del issue #12.
     assert!(analysis.ambiguous_calls.is_empty());
     assert_eq!(
         analysis.missing_calls,
@@ -315,8 +282,6 @@ fn el_orquestador_ve_a_sus_hijos_y_solo_marca_lo_que_esta_muerto() {
     );
 
     let md = pack.render_markdown();
-    // Este robot no tiene defectos de linea, asi que no hay seccion de accionables;
-    // lo suyo (sin Try/Catch, variable muerta) va a higiene, con su propio recuento.
     assert!(
         !md.contains("## Hallazgos"),
         "sin accionables no se pinta la seccion:\n{md}"
@@ -338,7 +303,6 @@ fn el_orquestador_ve_a_sus_hijos_y_solo_marca_lo_que_esta_muerto() {
         "el hueco del contrato se ve antes de ejecutar:\n{md}"
     );
 
-    // El orden de las secciones es el del contrato del pack: primero lo accionable.
     let pos = |needle: &str| md.find(needle).unwrap_or_else(|| panic!("falta {needle}"));
     assert!(pos("## Higiene") < pos("## Contrato implicito"));
     assert!(pos("## Contrato implicito") < pos("## Variables"));
@@ -417,9 +381,6 @@ fn un_robot_que_no_esta_en_la_db_da_error_claro() {
     assert!(err.to_string().contains("no_existe"), "error: {err}");
 }
 
-/// Issue #12: con una sola db, un hijo que solo vive en otra db del workspace ni
-/// siquiera se veia. Con las dos dbs, la arista existe marcada `ambiguous` y su
-/// contrato se puede calcular.
 #[test]
 fn un_hijo_que_solo_esta_en_otra_db_sale_como_ambiguo() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -441,7 +402,6 @@ fn un_hijo_que_solo_esta_en_otra_db_sale_como_ambiguo() {
     let la = r"BBRE2\robot_run.db";
     let lb = r"entrega_corregida\robot_run.db";
 
-    // Antes: con una sola db `hijo_web` no existe, luego no hay arista que marcar.
     let solo_a = analyse(&conn_a, la, "orq").expect("analisis de una db");
     assert!(
         solo_a.ambiguous_calls.is_empty(),
@@ -454,7 +414,6 @@ fn un_hijo_que_solo_esta_en_otra_db_sale_como_ambiguo() {
         solo_a.contracts_out
     );
 
-    // La arista del workspace si existe, y marcada ambigua.
     let facts = load_workspace(&[(&conn_a, la), (&conn_b, lb)]).expect("hechos del workspace");
     let edges = build_edges(&facts);
     let web = edges
@@ -467,7 +426,6 @@ fn un_hijo_que_solo_esta_en_otra_db_sale_como_ambiguo() {
     );
     assert_eq!(web.child_db, lb);
 
-    // Y el analisis la reporta, en vez de perder la llamada.
     let ws = analyse_with_workspace_at_and_paths(
         &[(&conn_a, la), (&conn_b, lb)],
         la,
@@ -501,12 +459,9 @@ fn un_hijo_que_solo_esta_en_otra_db_sale_como_ambiguo() {
     );
 }
 
-/// Dedupe del workspace: el mismo robot copiado en dos dbs es un solo hecho; dos
-/// homonimos con contenido distinto son dos.
 #[test]
 fn load_workspace_deduplica_por_contenido_y_conserva_homonimos() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    // `orq` es identico en las dos dbs: es el mismo robot copiado entre entregas.
     let path_a = make_db_at(
         &tmp.path().join("trabajo"),
         "robot.db",
@@ -515,7 +470,6 @@ fn load_workspace_deduplica_por_contenido_y_conserva_homonimos() {
             (2, "hijo_excel".to_string(), hijo_excel()),
         ],
     );
-    // `hijo_excel` cambia de contenido y `hijo_web` solo existe aqui.
     let path_b = make_db_at(
         &tmp.path().join("entrega_corregida"),
         "robot.db",
@@ -531,8 +485,6 @@ fn load_workspace_deduplica_por_contenido_y_conserva_homonimos() {
 
     let facts = load_workspace(&[(&conn_a, la), (&conn_b, lb)]).expect("hechos");
 
-    // 5 filas (robot por db) -> 4 hechos: la copia identica de `orq` no se cuenta
-    // dos veces.
     assert_eq!(
         facts.len(),
         4,
@@ -558,8 +510,6 @@ fn load_workspace_deduplica_por_contenido_y_conserva_homonimos() {
     );
 }
 
-/// Issue #18: el analisis del robot pedido sale del snapshot pedido, y los demas
-/// robots del workspace siguen aportando su snapshot mas reciente.
 #[test]
 fn el_analisis_de_un_snapshot_anterior_no_mezcla_el_ultimo() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -592,7 +542,6 @@ fn el_analisis_de_un_snapshot_anterior_no_mezcla_el_ultimo() {
         v1.missing_calls
     );
 
-    // `None` conserva la firma y el comportamiento de siempre: ultimo snapshot.
     let ultima = analyse_with_logs(&conn, DB, "orq", None).expect("analisis de la ultima");
     assert_eq!(
         ultima.contracts_out.len(),
@@ -619,8 +568,6 @@ fn el_analisis_de_un_snapshot_anterior_no_mezcla_el_ultimo() {
     );
 }
 
-/// Un snapshot que no existe es un error y no una caida al ultimo: describir otra
-/// version en silencio es el defecto que este pin corrige.
 #[test]
 fn un_snapshot_inexistente_no_cae_al_ultimo() {
     let tmp = tempfile::tempdir().expect("tempdir");

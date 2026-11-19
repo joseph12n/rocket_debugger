@@ -1,9 +1,5 @@
 name: release
 
-# Version publica: al etiquetar `v*` se compila, se pasa la suite y se publica un
-# Release de GitHub con los dos ejecutables de Windows. El tag se firma en local
-# (la clave de firma ya esta registrada en la cuenta) y la nota la genera GitHub
-# a partir de los PRs mergeados.
 on:
   push:
     tags: ['v*']
@@ -17,12 +13,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Acciones pinchadas por SHA (S7637): un tag movible es un punto de
-      # supply-chain. `stable` y `v2` en el comentario dicen que version es.
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
 
-      # El release sale solo si la suite pasa: un binario roto no se publica.
       - run: cargo test --all
       - run: cargo build --release --all
 
@@ -41,7 +34,5 @@ jobs:
       - name: publicar
         env:
           GH_TOKEN: ${{ github.token }}
-          # El tag viaja por env y no interpolado en el script: dentro de un bloque
-          # `run` es entrada no confiable y Sonar (S6763) lo marca como inyeccion.
           TAG: ${{ github.ref_name }}
         run: gh release create "$env:TAG" dist\rocketdebug.exe dist\rocketdebug-mcp.exe --title "$env:TAG" --generate-notes --latest

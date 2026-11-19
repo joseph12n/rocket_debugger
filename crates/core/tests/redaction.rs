@@ -1,19 +1,11 @@
-//! Redaccion de secretos de punta a punta: `project.vars` -> pack -> render.
-//!
-//! Como en `pack.rs`, ningun test toca `C:\Rocketbot`: la db se construye en un
-//! directorio temporal con el mismo esquema que usa Studio.
-
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use rocketdebug_core::{build_from_conn, db, Pack};
 
-/// Token con la forma exacta que Rocketbot deja en `project.vars` al cifrar una
-/// credencial (Fernet, base64 URL-safe, prefijo `gAAAAA`).
 const CIFRADO: &str = "gAAAAABq7LyRAghP1xNXRUIBkRfDi6ioMMqj_-oPnZ5xvkmSw_Jb1B41VjB_\
                       0Yq-KLSS9s_mV8pv3cJ8R2Q==";
 
-/// Valor visible de una variable con nombre sensible: no debe aparecer en el render.
 const PASSWORD: &str = "S3cr3t0Visible42";
 
 fn make_db(dir: &Path, json: &str) -> PathBuf {
@@ -37,12 +29,10 @@ fn make_db(dir: &Path, json: &str) -> PathBuf {
     path
 }
 
-/// Envuelve las variables en un `project` minimo pero con la forma real.
 fn robot_con_vars(vars: serde_json::Value) -> String {
     robot_con("Fixture de redaccion", vars)
 }
 
-/// Igual que [`robot_con_vars`] pero con la descripcion del perfil a la vista.
 fn robot_con(descripcion: &str, vars: serde_json::Value) -> String {
     serde_json::json!({
         "project": {
@@ -69,9 +59,6 @@ fn pack_de(dir: &Path, json: &str) -> Pack {
     build_from_conn(&conn, "credenciales", None, "test\\robot.db").expect("construyo pack")
 }
 
-/// Robot con la expresion real del issue #16: la ruta del usuario dentro de los
-/// parametros de un `setVar`. No es un secreto, es informacion del flujo, asi que
-/// solo debe desaparecer el tramo del usuario.
 fn robot_con_ruta_en_params() -> String {
     serde_json::json!({
         "project": {
@@ -133,7 +120,6 @@ fn el_render_no_filtra_secretos_y_los_marca() {
         "el render debe ocultar el valor sensible:\n{md}"
     );
 
-    // Redactar no puede cegar el diagnostico: nombres y valores normales siguen.
     assert!(md.contains("- destinatario = (valor cifrado)"), "{md}");
     assert!(md.contains("- db_password = (oculto)"), "{md}");
     assert!(md.contains("https://ejemplo.test/api"), "{md}");
@@ -150,8 +136,6 @@ fn las_variables_de_flujo_no_se_redactan_por_nombre() {
     let pack = pack_de(tmp.path(), &json);
     let md = pack.render_markdown();
 
-    // `user` no esta en la lista a proposito: sin el, el agente no sabe a quien
-    // apunta la peticion que esta depurando.
     assert_eq!(pack.vars[0].value.as_deref(), Some("operador1"));
     assert!(md.contains("operador1"), "{md}");
     assert!(md.contains("- contador = 7"), "{md}");
@@ -162,7 +146,6 @@ fn las_variables_de_flujo_no_se_redactan_por_nombre() {
 fn el_render_no_filtra_rutas_absolutas_del_usuario() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let json = robot_con_vars(serde_json::json!([
-        // El caso real: el perfil de Chrome que usa el robot.
         {"name": "chrome_profile", "data": "C:/Users/josep/Downloads/perfil_chrome"},
         {"name": "carpeta_salida", "data": r"C:\Users\josep\Downloads\reportes"},
         {"name": "reporte", "data": "reporte_ml.xlsx"},
@@ -171,7 +154,6 @@ fn el_render_no_filtra_rutas_absolutas_del_usuario() {
     let pack = pack_de(tmp.path(), &json);
     let md = pack.render_markdown();
 
-    // La promesa de `docs/CONTEXT_PACK.md`: ni una ruta del usuario en el pack.
     assert!(
         !md.contains("C:/Users"),
         "ruta con barra normal filtrada:\n{md}"
@@ -185,8 +167,6 @@ fn el_render_no_filtra_rutas_absolutas_del_usuario() {
         "el nombre del usuario no debe salir:\n{md}"
     );
 
-    // Y redactar no puede cegar el flujo: el marcador y los valores normales
-    // siguen ahi.
     assert!(md.contains("(ruta)"), "falta el marcador de ruta:\n{md}");
     assert!(md.contains("- chrome_profile = (ruta)"), "{md}");
     assert!(md.contains("- carpeta_salida = (ruta)"), "{md}");
@@ -195,17 +175,11 @@ fn el_render_no_filtra_rutas_absolutas_del_usuario() {
     assert_eq!(pack.vars[0].value.as_deref(), Some("(ruta)"));
 }
 
-/// Issue #16: antes solo se redactaban las variables; los parametros de los
-/// comandos y el snippet del hallazgo `RUTA_ABSOLUTA` seguian publicando
-/// `C:/Users/josep/...`.
 #[test]
 fn el_pack_no_filtra_el_usuario_de_los_parametros() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let pack = pack_de(tmp.path(), &robot_con_ruta_en_params());
 
-    // El dato crudo conserva la ruta: el enmascarado es del render, no del pack,
-    // para que el pack siga siendo el dato fiel y la garantia viva en un unico
-    // punto de salida.
     assert!(
         pack.flow[0].params.contains("josep"),
         "el pack no deberia destruir el parametro: {}",
@@ -217,7 +191,6 @@ fn el_pack_no_filtra_el_usuario_de_los_parametros() {
     assert!(!md.contains("C:/Users"), "ruta Windows filtrada:\n{md}");
     assert!(!md.contains(r"C:\Users"), "ruta Windows filtrada:\n{md}");
 
-    // La cola util se conserva: se entiende donde escribe el robot.
     assert!(
         md.contains("%USERPROFILE%/OneDrive/Documentos/mercadolibre_"),
         "falta la ruta enmascarada del parametro:\n{md}"
@@ -232,9 +205,6 @@ fn el_pack_no_filtra_el_usuario_de_los_parametros() {
     );
 }
 
-/// Issue #18: la cabecera pintaba la descripcion del perfil con `one_line`, sin
-/// pasar por el helper que enmascara, asi que una ruta escrita en la descripcion
-/// se publicaba entera aunque el resto del render estuviera limpio.
 #[test]
 fn la_descripcion_del_perfil_no_publica_el_usuario() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -244,8 +214,6 @@ fn la_descripcion_del_perfil_no_publica_el_usuario() {
     );
     let pack = pack_de(tmp.path(), &json);
 
-    // El pack conserva el dato fiel: la garantia vive en el render, igual que en
-    // los parametros de los comandos.
     assert!(
         pack.description
             .as_deref()
@@ -264,7 +232,6 @@ fn la_descripcion_del_perfil_no_publica_el_usuario() {
         !md.contains("C:/Users"),
         "la ruta de la descripcion se publico entera:\n{md}"
     );
-    // Enmascarar no puede borrar la descripcion: es contexto del robot.
     assert!(
         md.contains(
             "> Reporte diario: exporta a %USERPROFILE%/OneDrive/Documentos y avisa por correo"

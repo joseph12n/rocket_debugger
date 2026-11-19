@@ -1,8 +1,3 @@
-//! Test de aceptacion del issue #3 sobre el caso medido: un orquestador cuyas
-//! variables son la superficie de API de sus subrobots.
-//!
-//! Ningun test toca `C:\Rocketbot`: los robots se construyen en memoria.
-
 use std::collections::BTreeSet;
 
 use rocketdebug_core::graph::{build_edges, contracts, missing_calls, unused_declared, RobotFacts};
@@ -34,19 +29,14 @@ fn hechos(db: &str, name: &str, declared: &BTreeSet<String>, nodes: Vec<FlatNode
     }
 }
 
-/// Nodo de llamada a un subrobot: el nombre del hijo va en `command`.
 fn llamada(line: &str, child: &str) -> FlatNode {
     nodo(line, "execRocketBotDB", &format!("\"{child}\""), None)
 }
 
-/// Reproduce la forma del orquestador real: 86 variables declaradas, 8 hijos que
-/// leen 83 de ellas y solo 3 que no usa nadie. Sin grafo, las 86 parecen muertas;
-/// con grafo quedan las 3 reales.
 #[test]
 fn el_grafo_quita_los_falsos_positivos_del_orquestador() {
     const DECLARADAS: usize = 86;
     const HIJOS: usize = 8;
-    // 83 variables repartidas entre los 8 hijos; las 3 ultimas no las lee nadie.
     const USADAS: usize = 83;
 
     let declaradas: BTreeSet<String> = (0..DECLARADAS).map(|i| format!("v{i}")).collect();
@@ -103,9 +93,6 @@ fn el_grafo_quita_los_falsos_positivos_del_orquestador() {
     );
 }
 
-/// Issue #12: una llamada a un robot que no esta en ninguna db se perdia en
-/// silencio. En runtime el runner no resuelve el nombre y el padre falla, asi que
-/// la llamada tiene que salir con su linea aunque no haya arista.
 #[test]
 fn una_llamada_sin_destino_no_genera_arista_pero_se_reporta() {
     let orq = hechos(
@@ -141,8 +128,6 @@ fn una_llamada_sin_destino_no_genera_arista_pero_se_reporta() {
     assert_eq!(faltan[0].child, "no_existe");
 }
 
-/// El dedupe por contenido deja un solo hecho, pero el runner busca el nombre en
-/// la db del padre: una copia identica alli no puede salir como ambigua.
 #[test]
 fn una_copia_identica_en_otra_db_resuelve_la_arista() {
     let orq = hechos(

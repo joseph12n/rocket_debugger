@@ -10,9 +10,6 @@ license = "MIT"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
-# preserve_order: los parametros de un comando conservan el orden en que los
-# escribio Studio. Con el orden alfabetico, un reordenamiento de claves al
-# re-guardar el robot aparece como ruido en el diff entre versiones.
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 chrono = { version = "0.4", default-features = false, features = ["std"] }

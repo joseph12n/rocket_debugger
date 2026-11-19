@@ -1,4 +1,3 @@
-# Normaliza a LF en el repo: CI corre en Linux y Windows comparte el mismo contenido.
 * text=auto eol=lf
 *.png binary
 *.db binary

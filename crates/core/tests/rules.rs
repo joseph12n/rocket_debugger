@@ -1,8 +1,3 @@
-//! Tests del motor de reglas sobre fixtures y JSON sintetico.
-//!
-//! Ningun test toca `C:\Rocketbot`: el flujo se construye con `tree::flatten` a
-//! partir del fixture del repo o de JSON inline.
-
 use std::collections::BTreeMap;
 
 use rocketdebug_core::rules::{
@@ -33,12 +28,10 @@ fn fixture_nodes() -> Vec<FlatNode> {
     tree::flatten(commands)
 }
 
-/// Evaluacion con el tope por defecto, sin colisiones ni variables.
 fn default_findings(nodes: &[FlatNode]) -> Vec<Finding> {
     evaluate(nodes, &BTreeMap::new(), &[], 0)
 }
 
-/// Evaluacion con tope amplio: sirve para comprobar que una regla calla.
 fn all_findings(nodes: &[FlatNode]) -> Vec<Finding> {
     evaluate_with_limit(nodes, &BTreeMap::new(), &[], 0, 50)
 }
@@ -196,8 +189,6 @@ fn ruta_absoluta_dispara_en_params_pero_no_con_una_url() {
     );
 }
 
-/// Cadena de `levels` niveles: cada nivel es un `evaluateIf` con else, para que
-/// el unico hallazgo estructural esperable sea el de anidamiento.
 fn nested(levels: usize) -> Value {
     let mut inner = node("log_message", "fin", "ok");
     for level in (0..levels.saturating_sub(1)).rev() {
@@ -293,8 +284,6 @@ fn el_tope_de_cinco_se_respeta_y_conserva_lo_mas_grave() {
     assert!(dos.iter().all(|f| f.severity == Severity::Alta));
 }
 
-/// `(rule_id, line)` ordenados: compara conjuntos de hallazgos sin depender del
-/// orden en que los cubos se concatenan.
 fn claves_ordenadas(findings: &[Finding]) -> Vec<(String, String)> {
     let mut claves: Vec<(String, String)> = findings
         .iter()
@@ -372,8 +361,6 @@ fn el_fixture_reparte_colisiones_en_accionables_y_higiene_en_su_cubo() {
 
 #[test]
 fn un_robot_sin_try_manda_sin_try_a_higiene_y_deja_vacio_lo_accionable() {
-    // El defecto es del robot entero y no apunta a ninguna linea: es exactamente
-    // el ruido que hundia la precision util, asi que no puede caer en accionables.
     let nodes = flat(json!([node("log_message", "1", "ok")]));
     let (accionables, higiene) = evaluate_split(&nodes, &BTreeMap::new(), &[], 0, 5);
 
@@ -385,9 +372,6 @@ fn un_robot_sin_try_manda_sin_try_a_higiene_y_deja_vacio_lo_accionable() {
 
 #[test]
 fn las_tres_accionables_senalan_una_linea_concreta() {
-    // Un robot donde disparan las tres reglas accionables a la vez: colision,
-    // catch vacio y ruta absoluta. Es el contrato de `Kind::Accionable`: si
-    // dispara, senala una linea; sin linea no habria nada que accionar.
     let nodes = flat(json!([
         {
             "father": "trycatch",
@@ -435,8 +419,6 @@ fn las_tres_accionables_senalan_una_linea_concreta() {
 
 #[test]
 fn cada_cubo_se_trunca_por_separado_a_su_tope() {
-    // Tres colisiones (accionable, alta) y cuatro evaluateIf sin else (higiene,
-    // baja) mas el SIN_TRY que comparte el cubo de higiene.
     let mut commands = Vec::new();
     for line in 1..=3 {
         commands.push(node("setVar", &line.to_string(), "\"a\""));
@@ -484,7 +466,6 @@ fn cada_cubo_se_trunca_por_separado_a_su_tope() {
     assert_eq!(higiene[1].rule_id, "IF_SIN_ELSE");
     assert_eq!(higiene[1].line, "10", "orden determinista dentro del cubo");
 
-    // Con tope amplio se ven los ocho: repartir no descarta ni duplica hallazgos.
     let (todos_accionables, todos_higiene) = evaluate_split(&nodes, &collisions, &[], 0, 50);
     assert_eq!(todos_accionables.len(), 3);
     assert_eq!(
@@ -505,8 +486,6 @@ fn cada_cubo_se_trunca_por_separado_a_su_tope() {
 
 #[test]
 fn cada_hallazgo_hereda_el_kind_declarado_por_su_regla() {
-    // El `Vec` de reglas vive hasta el final del test: las claves del mapa son
-    // `&str` a sus ids.
     let specs = rules::builtin_rules();
     let por_id: BTreeMap<&str, Kind> = specs.iter().map(|r| (r.id.as_str(), r.kind)).collect();
 

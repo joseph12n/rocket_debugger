@@ -1,9 +1,3 @@
-//! Tests de la regla `RUTA_MIGRADA`.
-//!
-//! Los tests sinteticos usan un `LocalPaths` con raices temporales: comprueban
-//! el disco de verdad, pero solo dentro del directorio del test. El caso BBRE2
-//! va marcado `#[ignore]` porque necesita la db real.
-
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
@@ -34,7 +28,6 @@ fn make_db(dir: &Path, robot: &str, project: &str) -> PathBuf {
     path
 }
 
-/// Proyecto con las rutas repartidas entre variables y parametros.
 fn project(remote_base: &str, existing: &str) -> String {
     json!({
         "project": {
@@ -164,7 +157,6 @@ fn sin_equivalente_local_lo_dice_en_el_fix() {
         &project(&remote.to_string_lossy(), &existing.to_string_lossy()),
     );
     let conn = db::open_readonly(&db).expect("abro");
-    // Raiz local vacia: no hay ninguna ENTREGA_BBRE2.
     let probe = LocalPaths::with_roots(vec![tmp.path().join("local-vacio")]);
     let pack =
         build_from_conn_with_logs_and_paths(&conn, "demo", None, "prueba\\robot.db", None, &probe)
@@ -216,14 +208,12 @@ fn una_ruta_que_existe_no_se_marca() {
     ))
     .expect("json");
     let mut project = project;
-    // Quita las rutas migradas: deja solo la variable que existe.
     for var in project["project"]["vars"].as_array_mut().expect("vars") {
         let name = var["name"].as_str().unwrap_or("");
         if name != "existente" {
             var["data"] = Value::Null;
         }
     }
-    // El comando literal tambien apuntaba a la carpeta remota.
     project["project"]["commands"][3]["command"] = json!("INICIO");
     let db = make_db(tmp.path(), "demo", &project.to_string());
     let conn = db::open_readonly(&db).expect("abro");
@@ -238,10 +228,6 @@ fn una_ruta_que_existe_no_se_marca() {
     );
 }
 
-/// Caso real de #26: BBRE2 trae ENTREGA_BBRE2 en las variables de
-/// `reporteMercadolibre`; la carpeta no existe en este equipo. No se puede
-/// marcar `C:/Rocketbot` (sistema), `C:/Program Files/...` (sistema) ni ninguna
-/// ruta que exista.
 #[test]
 #[ignore = "requiere C:\\rocketbot_bots\\BBRE2\\robot_run.db"]
 fn bbre2_detecta_entrega_bbre2_y_no_marca_rutas_validas() {

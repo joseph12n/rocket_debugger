@@ -1,8 +1,3 @@
-//! Tests de integracion del motor contra fixtures sinteticos.
-//!
-//! Ningun test de este fichero toca `C:\Rocketbot`. Los datos reales se prueban
-//! aparte en `real_data`, marcado `#[ignore]`.
-
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -23,7 +18,6 @@ fn golden_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Crea un `robot.db` minimo con las filas indicadas `(id, created_at, json)`.
 fn make_db(dir: &Path, robot: &str, rows: &[(i64, &str, &str)]) -> PathBuf {
     let path = dir.join("robot.db");
     let conn = rusqlite::Connection::open(&path).expect("abro db temporal");
@@ -82,8 +76,6 @@ fn detecta_colision_de_lineas_del_fixture_real() {
     let conn = db::open_readonly(&path).expect("abro");
     let pack = build_from_conn(&conn, "line_collision", None, "test\\robot.db").expect("pack");
 
-    // El fixture reproduce el defecto observado en ML_06_Legacy: el try y el catch
-    // comparten la numeracion 2.1 y 2.2.
     assert_eq!(pack.collisions.get("2.1"), Some(&2));
     assert_eq!(pack.collisions.get("2.2"), Some(&2));
     let md = pack.render_markdown();
@@ -119,8 +111,6 @@ fn el_indice_de_versiones_atribuye_al_snapshot_vivo() {
         "a las 12:49:22 estaba vivo el snapshot 10"
     );
 
-    // El indice debe reflejar el contenido de cada version, no del actual:
-    // el hash las distingue aunque ambas tengan el mismo numero de nodos.
     assert_ne!(
         pack.versions.versions[0].hash, pack.versions.versions[1].hash,
         "cada version debe tener su propio hash de contenido"
@@ -162,7 +152,6 @@ fn robot_inexistente_da_error_claro() {
     assert!(err.to_string().contains("no_existe"), "error: {err}");
 }
 
-/// Proyecto minimo de una version del robot de prueba.
 fn proyecto(commands: Vec<Value>, vars: &[&str]) -> String {
     let vars: Vec<Value> = vars
         .iter()
@@ -188,10 +177,6 @@ fn nodo(father: &str, line: &str, command: &str) -> Value {
     })
 }
 
-/// Primera version del robot de prueba: **3 nodos** y dos hallazgos propios.
-///
-/// La ruta absoluta de la linea 2 da `RUTA_ABSOLUTA` (accionable) y `vieja` es una
-/// variable declarada que no se lee en ninguna linea (`VAR_NO_USADA`).
 fn version_1() -> String {
     proyecto(
         vec![
@@ -210,11 +195,6 @@ fn version_1() -> String {
     )
 }
 
-/// Segunda version: **4 nodos** y otro juego de hallazgos.
-///
-/// Ya no hay ruta absoluta ni variable muerta, y aparece un `evaluateIf` sin else
-/// en la linea 4 (`IF_SIN_ELSE`). La linea 4 no existe en la v1: un hallazgo suyo
-/// dentro de un pack de la v1 delata que el analisis miro otra version.
 fn version_2() -> String {
     proyecto(
         vec![
@@ -234,9 +214,6 @@ fn version_2() -> String {
     )
 }
 
-/// Firmas de los hallazgos (regla + linea), accionables e higiene, en el orden del
-/// analisis: distingue dos versiones sin comparar los mensajes, que llevan conteos
-/// y rutas.
 fn reglas(analysis: &Analysis) -> Vec<(&str, &str)> {
     analysis
         .findings
@@ -246,8 +223,6 @@ fn reglas(analysis: &Analysis) -> Vec<(&str, &str)> {
         .collect()
 }
 
-/// Db con dos versiones del mismo robot: la v1 sin ruta portable y con una
-/// variable muerta, la v2 con el flujo mas largo y un IF sin else.
 fn db_dos_versiones(dir: &Path) -> PathBuf {
     let v1 = version_1();
     let v2 = version_2();
@@ -261,11 +236,6 @@ fn db_dos_versiones(dir: &Path) -> PathBuf {
     )
 }
 
-/// Issue #18: el pack de la v1 habla de la v1.
-///
-/// Antes, `--snapshot 10` renderizaba el flujo de la v1 pero el analisis seguia
-/// describiendo el ultimo snapshot: dos versiones del mismo robot en el mismo
-/// documento, y el lector no tenia forma de saberlo.
 #[test]
 fn el_pack_de_una_version_anterior_analiza_esa_version() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -282,9 +252,6 @@ fn el_pack_de_una_version_anterior_analiza_esa_version() {
         pack_v1.render_markdown()
     );
 
-    // El analisis describe los mismos nodos que el flujo: el indice coincide y
-    // todo hallazgo con linea cae dentro del flujo pedido. Sin esto, un hallazgo
-    // de la v2 (linea 4) se colaria en el pack de la v1.
     let del_indice = pack_v1
         .versions
         .versions
@@ -322,8 +289,6 @@ fn el_pack_de_una_version_anterior_analiza_esa_version() {
         "la variable muerta es la de la v1"
     );
 
-    // Y la v2 dice otra cosa: se compara para demostrar que el pin cambia el
-    // analisis, no que se trunque el mismo.
     let pack_v2 = build_from_conn_with_logs(&conn, "demo", Some(11), "test\\robot.db", None)
         .expect("pack de la v2");
     assert_eq!(pack_v2.snapshot_id, 11);
@@ -345,8 +310,6 @@ fn el_pack_de_una_version_anterior_analiza_esa_version() {
     );
 }
 
-/// Sin `--snapshot` el pack sigue siendo el de la ultima version: el pin cambio la
-/// coherencia del pack, no su comportamiento por defecto.
 #[test]
 fn sin_snapshot_el_pack_sigue_siendo_el_ultimo() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -385,8 +348,6 @@ fn el_pack_no_filtra_rutas_absolutas_del_usuario() {
     );
 }
 
-/// Conteos de referencia medidos el 2026-11-17 sobre el entorno real.
-/// Se corre a mano: `cargo test -- --ignored real_`
 #[test]
 #[ignore]
 fn real_el_workspace_entero_parsea_y_comprime() {

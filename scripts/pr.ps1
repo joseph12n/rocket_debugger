@@ -1,45 +1,5 @@
-<#
-.SYNOPSIS
-  Sube la rama actual y deja el PR en verde: push, alta si no existe y espera CI.
 
-.DESCRIPTION
-  El ciclo completo de un cambio, para que la calidad quede visible en GitHub:
-    1. exige arbol limpio, rama `<tipo>/<slug-en-ingles>` y un diff dentro del tope;
-    2. push con upstream (o --force-with-lease con -Force, tras un rebase);
-    3. crea el PR si la rama aun no tiene uno (titulo = ultimo commit);
-    4. espera las comprobaciones (`gh pr checks --watch`) e imprime el estado.
-  Con -Merge lo aterriza en la base con merge rebase, que conserva los commits y
-  no rompe las cadenas de PRs apilados.
 
-.PARAMETER Title
-  Titulo del PR nuevo. Por defecto, el asunto del ultimo commit.
-
-.PARAMETER BodyFile
-  Fichero Markdown con el cuerpo del PR nuevo.
-
-.PARAMETER Base
-  Rama destino. Por defecto, main.
-
-.PARAMETER MaxLines
-  Tope de lineas de codigo **cambiadas** (el movimiento puro no cuenta: una linea
-  borrada que reaparece identica en otro fichero es un traslado). Por defecto 400;
-  no cuentan `docs/`, `fixtures/`, `*.md` ni `Cargo.lock`. Si el cambio no cabe, se
-  parte en PRs mas pequenos.
-
-.PARAMETER Force
-  Fuerza el push con --force-with-lease (solo tras rebase).
-
-.PARAMETER NoWait
-  No espera a las comprobaciones: solo sube y asegura el PR.
-
-.PARAMETER Merge
-  Si todo esta en verde, hace fast-forward de la rama a la base. No usa el boton
-  de GitHub a proposito: rebase/squash reescriben los commits y pierden la firma.
-
-.EXAMPLE
-  pwsh scripts/pr.ps1
-  pwsh scripts/pr.ps1 -Title "chore: limpieza" -BodyFile C:\tmp\pr.md -Merge
-#>
 [CmdletBinding()]
 param(
     [string]$Title,
@@ -70,9 +30,6 @@ if (git status --porcelain) { Fail 'hay cambios sin commitear' }
 git fetch -q origin $Base
 if ($LASTEXITCODE -ne 0) { Fail "no se pudo actualizar origin/${Base}" }
 
-# Tope de tamano. Cuenta lineas **cambiadas**, no movidas: un fichero que se parte
-# en modulos aparece como cientos de altas y bajas identicas y no es revision real.
-# Sin docs, fixtures, markdown ni Cargo.lock; las lineas en blanco no cuentan.
 $removed = @{}
 $added = New-Object System.Collections.Generic.List[string]
 $file = ''
@@ -141,8 +98,6 @@ if (-not $NoWait) {
 }
 
 if ($Merge) {
-    # Fast-forward local y push: el merge de GitHub (rebase o squash) reescribe los
-    # commits y se pierde la firma SSH; asi llegan a la base tal como se firmaron.
     Write-Host "==> fast-forward de ##$number en $Base" -ForegroundColor Cyan
     git merge-base --is-ancestor "origin/${Base}" HEAD
     if ($LASTEXITCODE -ne 0) {

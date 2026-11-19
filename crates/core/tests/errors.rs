@@ -1,11 +1,3 @@
-//! Seccion `## Errores` del context pack.
-//!
-//! Los errores se prueban aqui contra `fixtures/logs/sample.log` y una db
-//! sintetica: ningun test lee `C:\Rocketbot` ni depende de que el entorno tenga
-//! logs. El caso reproducido es el medido en `ML_06_Legacy`: el `NameError` de
-//! `contador` ocurrio cuando estaba viva una version anterior, asi que es
-//! historico aunque el robot de hoy siga teniendo ese nodo con esos parametros.
-
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
@@ -17,9 +9,7 @@ use serde_json::{json, Value};
 
 const DB: &str = r"test\robot.db";
 
-/// `cmd_id` del `evaluateIf` que consultaba `contador` (`sample.log`, L2.10).
 const CMD_CONTADOR: &str = "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f";
-/// `cmd_id` del `stop` que estaba vivo cuando fallo `similitud`.
 const CMD_STOP: &str = "c08176a8-97c4-4ecb-8433-e52920439e0e";
 
 fn logs_fixture() -> PathBuf {
@@ -37,7 +27,6 @@ fn node(father: &str, line: &str, id: &str, command: &str) -> Value {
     })
 }
 
-/// Crea un `robot.db` con los snapshots indicados `(id, created_at, comandos)`.
 fn make_db(dir: &Path, robot: &str, rows: &[(i64, &str, Vec<Value>)]) -> PathBuf {
     std::fs::create_dir_all(dir).expect("creo el directorio de la db");
     let path = dir.join("robot.db");
@@ -69,8 +58,6 @@ fn make_db(dir: &Path, robot: &str, rows: &[(i64, &str, Vec<Value>)]) -> PathBuf
     path
 }
 
-/// El robot de `sample.log` en dos guardados: el de las 12:47:10, cuando corria el
-/// nodo del `contador`, y el de las 12:50:24, que ya es la version actual.
 fn db_ml_legacy(dir: &Path) -> PathBuf {
     make_db(
         dir,
@@ -102,11 +89,6 @@ fn item<'a>(items: &'a [ErrorItem], needle: &str) -> &'a ErrorItem {
         .unwrap_or_else(|| panic!("no hay ningun error con {needle:?} en {items:#?}"))
 }
 
-/// Pack de un robot minimo en un temporal, con el informe de errores sustituido.
-///
-/// Se construye con `build_from_conn` en vez de armar el `Pack` a mano para que el
-/// render se pruebe sobre la estructura real y no sobre una copia que se
-/// desincronice cuando el pack gane secciones.
 fn pack_de_prueba(dir: &Path, errors: ErrorReport) -> Pack {
     let path = make_db(
         dir,
@@ -134,9 +116,6 @@ fn el_name_error_de_contador_es_historico_y_no_vivo() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let report = errors_de_sample(&tmp.path().join("db"));
 
-    // El log lo escribio el runner a las 12:49:22, cuando vivia v25; el robot es
-    // v26 desde las 12:50:24. El nodo sigue existiendo con los mismos parametros,
-    // asi que compararlo con la version actual daria "vivo" y seria una mentira.
     let contador = item(&report.historical, "contador");
     assert_eq!(contador.version, Some(25), "{report:#?}");
     assert_eq!(contador.line, "2.10");
@@ -148,9 +127,6 @@ fn el_name_error_de_contador_es_historico_y_no_vivo() {
         report.live
     );
 
-    // El otro NameError del fixture ocurrio a las 12:50:29, con v26 viva y siendo
-    // v26 la ultima: misma firma, veredicto distinto. Es justo la distincion que
-    // no se puede hacer mirando el log.
     let vivo = item(&report.live, "similitud");
     assert_eq!(vivo.version, Some(26));
     assert_eq!(vivo.line, "4");
@@ -166,8 +142,6 @@ fn el_ruido_del_motor_y_los_defectos_de_modulo_no_van_al_robot() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let report = errors_de_sample(&tmp.path().join("db"));
 
-    // zdev (base64) y getbot (subrobot inexistente) son fallos de Rocketbot: el
-    // robot no los puede arreglar y contarlos como suyos deja el panel en rojo.
     let zdev = report
         .noise
         .iter()
@@ -187,7 +161,6 @@ fn el_ruido_del_motor_y_los_defectos_de_modulo_no_van_al_robot() {
         "el ruido no puede aparecer como error vivo"
     );
 
-    // datatransform es defecto de la plataforma: se muestra aparte, con su fuente.
     assert_eq!(report.platform.len(), 1, "{:#?}", report.platform);
     assert!(report.platform[0].message.contains("datatransform"));
     assert!(
@@ -231,8 +204,6 @@ fn el_render_lista_los_vivos_y_resume_lo_demas() {
         "el ruido se cuenta, no se lista:\n{md}"
     );
 
-    // La seccion va detras del contrato y delante del flujo: es lo primero
-    // accionable del pack.
     let pos = |needle: &str| md.find(needle).unwrap_or_else(|| panic!("falta {needle}"));
     assert!(pos("## Errores") < pos("## Flujo"));
 }
@@ -255,18 +226,15 @@ fn sin_logs_ni_directorio_el_informe_sale_vacio() {
     let path = db_ml_legacy(&tmp.path().join("db"));
     let conn = db::open_readonly(&path).expect("abro la db");
 
-    // Sin logs pedidos, el analisis del codigo funciona igual y no hay errores.
     let analysis =
         analysis::analyse_with_logs(&conn, DB, "ML_06_Legacy", None).expect("analisis del codigo");
     assert!(analysis.errors.is_empty());
     assert_eq!(analysis.errors.total(), 0);
 
-    // Un directorio que no existe no es un error: el pack degrada, no miente.
     let vacio = analysis::errors_for(&conn, "ML_06_Legacy", &tmp.path().join("no_existe"), 10)
         .expect("informe");
     assert!(vacio.is_empty());
 
-    // Y un directorio de logs sin ficheros tampoco.
     let sin_ficheros = tmp.path().join("logs_vacios");
     std::fs::create_dir_all(&sin_ficheros).expect("creo el directorio");
     let vacio = analysis::errors_for(&conn, "ML_06_Legacy", &sin_ficheros, 10).expect("informe");
@@ -276,7 +244,6 @@ fn sin_logs_ni_directorio_el_informe_sale_vacio() {
 #[test]
 fn las_repeticiones_se_agrupan_por_firma_y_el_payload_cambiado_se_separa() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    // Un unico guardado (el actual) con el nodo que consulta `contador`.
     let path = make_db(
         &tmp.path().join("db"),
         "demo",
@@ -293,8 +260,6 @@ fn las_repeticiones_se_agrupan_por_firma_y_el_payload_cambiado_se_separa() {
     );
     let logs_dir = tmp.path().join("logs");
     std::fs::create_dir_all(&logs_dir).expect("creo logs");
-    // Dos errores con los parametros de hoy y uno con los parametros cambiados: la
-    // misma firma, dos veredictos (es el caso "el fix estaba a medias").
     std::fs::write(
         logs_dir.join("logfile.log"),
         "2026-11-17 12:10:00.000000 - rocketbot - INFO - request: demo : line 2.10 - rpalogic : evaluateIf  id: id-contador -  - int({contador}) < 10\n\
