@@ -159,52 +159,49 @@ conviene fiarse de que `kernel32` venga por defecto.)
 `watch.rs` (943), `exec.rs` (1343, nuevo), `registry.rs` (845): partir solo si crecen. El split
 natural de `exec` si llega el modo API es `runner.rs` / `broker.rs`.
 
-## 4. Sanitizacion de comentarios
+## 4. Sanitizacion de comentarios (plan v2, 2026-11-19)
 
-Criterio (respeta la convencion del README: el comentario documenta el POR QUE, no el QUE):
+El criterio v1 conservaba demasiado: quedan ~3.120 lineas de comentario en el src y 19 ficheros por
+encima del 20% (peor: `core/lib.rs` al 55%, `analysis/mod.rs` al 46%). El v2 parte de que el codigo
+se explica solo y sustituye al v1 por completo.
 
-**Queda**
-- el por que no obvio, invariantes y trampas de plataforma (`Path` no trata `\` como separador en
-  Linux; candados envenenados),
-- datos medidos y referencias a issues,
-- un ejemplo donde el contrato no es obvio (el doctest de `attribution::attribute`).
+**Criterio v2**
 
-**Se quita**
-- prosa que repite el codigo linea a linea,
-- la historia del bug cuando el test ya la fija (el test es la historia),
-- cabeceras de seccion que duplican el nombre del modulo,
-- anecdotas de 15+ lineas: se resumen a 2-4 y el detalle vive en docs/ o en el issue.
+- Doc de modulo: maximo 6 lineas —que vive aqui y UNA invariante no obvia—. Sin historia.
+- Doc de API publica: 1-3 lineas de contrato. Campos triviales, sin doc.
+- Inline: SOLO trampas de plataforma, invariantes que no expresa un tipo y datos medidos con su
+  issue. Nada de narrar pasos ni historia que un test ya fije.
+- Espanol sin acentos; identificadores en ingles; cada nota repetida se documenta UNA vez.
+- Diff solo de comentarios: `cargo test --all` identico, fmt y clippy verdes, y el filtro
+  `git diff -U0` sin ni una linea de codigo.
 
-**Reglas de forma**
-- doc comment: tope orientativo 10 lineas; espanol sin acentos; identificadores en ingles,
-- cada nota repetida se documenta UNA vez y los demas sitios apuntan ahi,
-- diff solo de comentarios: `cargo test --all` identico, fmt y clippy verdes. Lo que ya cumple el
-  criterio no se toca (restriccion = parte del estandar).
+**Inventario medido (2026-11-19) y objetivo por fichero** (lineas de comentario -> objetivo):
 
-**Inventario** (orden propuesto, densidad primero): `analysis.rs` (29%) -> `logs.rs` (25%) ->
-`redact.rs` (23%) -> `watch.rs` (21%) -> `graph.rs` (22%) -> `registry.rs` (22%) -> `attribution.rs`
-(32%, pero casi todo es por que legitimo) -> resto por debajo del 20%.
+| Grupo | Ficheros (actual -> objetivo) | Corte |
+|---|---|---|
+| PR1 cabeceras | core/lib 36->12, analysis/mod 100->40, pack 62->25, db 73->35, pathscan 34->15, versions 21->10, tree 22->10 | ~200 |
+| PR2 | attribution 192->80, diff 144->60 | ~196 |
+| PR3 | registry 186->90, review 101->50 | ~147 |
+| PR4 | graph 192->90, rules 129->60 | ~171 |
+| PR5 | logs 199->95, redact 199->95 | ~208 |
+| PR6 | render 144->70, signature 108->55, exec 192->95 | ~224 |
+| PR7 | analysis/errors 117->55, analysis/workspace 115->55 | ~122 |
+| PR8 mcp | lib 111->40, http 166->80, protocol 58->25, main 35->15, tools 114->60 | ~274 |
+| PR9 cli | main 104->45, review 58->30, watch 178->70 | ~195 |
 
-**Medido hasta ahora** (diff solo de comentarios; la suite no cambia):
+Total: 3.120 -> ~1.440 lineas de comentario (-54%). No se tocan los tests (densidad <=12%) ni lo que
+ya cumple su objetivo. Cada PR va en rama `chore/comments-<grupo>`, gate local y `pr.ps1 -Merge`
+desde la rama (fast-forward, conserva la firma; el boton de GitHub la pierde). Tras cada grupo se
+actualiza esta tabla con el numero real.
 
-| Modulo | Antes | Despues | Nota |
-|---|---|---|---|
-| `logs.rs` | 256 | 199 | piloto |
-| `exec.rs` | 209 | 188 | cabecera del broker |
-| `analysis.rs` | 402 (29%) | 322 (24,6%) | + doc de `Workspace` que estaba pegado a `analyse_with_workspace_at` |
-
-`analysis.rs` es el caso especial: lo que queda es casi todo invariantes del cableado (dedupe por
-contenido, pin de snapshot, cubos de error) y bajarlo mas seria borrar el por que, no la prosa.
-
-**Automatizacion del ciclo** (lo que hace que un PR llegue verde): `scripts/gate.ps1` replica el
-job de Linux (fmt, clippy `-D warnings`, tests) y opcionalmente el build release de Windows;
-`scripts/pr.ps1` sube la rama, crea el PR si no existe y espera las comprobaciones. Detalle en el
-README.
+El plan vive tambien en engram (`plan/sanitizacion-comentarios` + procedimiento
+`sanitizacion-comentarios-rocketdebugger`) para retomarlo en otra sesion sin releer nada.
 
 ## 5. Roadmap sugerido
 
 1. Landing de la cadena (#29 -> #32), del tope hacia la base. Hecho.
-2. Sanitizacion por modulo en el orden del inventario: `logs`, `exec` y `analysis` hechos.
+2. Sanitizacion v2 por grupos PR1-PR9 (seccion 4): el criterio v1 quedo corto y la tabla mide lo
+   que falta. Pendiente de ejecutar.
 3. H3 (trivial) y H2 (extractor unico) con sus tests.
 4. H1 partir `analysis.rs`; luego H7 testkit, H6 job de tests en Windows, H4 variantes.
 5. H5 solo si la bandeja crece.
