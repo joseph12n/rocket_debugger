@@ -1,8 +1,5 @@
-//! Ensamblado del context pack.
-//!
-//! El pack es la unica estructura que consume el resto del sistema: el render
-//! markdown (para el agente), el JSON (para la UI) y las metricas (para los
-//! tests de ratio) salen todos de aqui.
+//! Ensamblado del context pack: la unica estructura que consumen el render
+//! markdown, el JSON y las metricas de ahorro.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -28,8 +25,8 @@ pub struct VarInfo {
 #[derive(Debug, Clone)]
 pub struct Pack {
     pub robot: String,
-    /// Etiqueta de la db sin ruta absoluta (`BBRE2\robot_run.db`), para no filtrar
-    /// el arbol de directorios del usuario al compartir un pack.
+    /// Etiqueta de la db sin ruta absoluta: el pack se comparte sin filtrar
+    /// directorios del usuario.
     pub db_label: String,
     pub snapshot_id: i64,
     pub snapshot_at: NaiveDateTime,
@@ -40,12 +37,8 @@ pub struct Pack {
     /// Lineas repetidas: si hay alguna, `line` no sirve para direccionar nodos.
     pub collisions: BTreeMap<String, usize>,
     pub flow: Vec<FlatNode>,
-    /// Hallazgos, contratos implicitos y variables muertas del robot.
-    ///
-    /// Se calcula contra la db entera (grafo de llamadas) y describe **este**
-    /// snapshot: el mismo que el flujo, tambien cuando se pide uno anterior con
-    /// `--snapshot` (issue #18). Los demas robots del workspace aportan su ultimo
-    /// snapshot, que es el que el runner resolveria hoy al ejecutar este flujo.
+    /// Hallazgos, contratos implicitos y variables muertas de **este** snapshot;
+    /// se calcula contra la db entera y respeta `--snapshot` (issue #18).
     pub analysis: Analysis,
     /// JSON completo del snapshot, para medir el ahorro real.
     pub raw_pretty: String,
@@ -71,42 +64,24 @@ impl Pack {
 
 /// Logs que se leen como maximo en un pack automatico.
 ///
-/// Medido en el entorno real: el directorio pesa ~6,6 MB repartidos en 13
-/// ficheros, y con los 20 mas recientes entran todas las ejecuciones recientes sin
-/// que el pack dependa de logs de semanas atras.
-/// Ficheros de log que se leen por defecto al construir un pack con logs.
-///
-/// Vive aqui y no en el CLI para que la politica (cuantos dias atras mira el motor)
-/// sea una sola: 20 ficheros cubren la semana de trabajo normal sin recorrer meses.
+/// Medido: el directorio real pesa ~6,6 MB en 13 ficheros; 20 cubren la semana
+/// de trabajo normal sin arrastrar meses.
 pub const DEFAULT_LOG_FILES: usize = 20;
 
 /// Construye el pack del snapshot indicado (por defecto, el ultimo).
-///
-/// Todo el pack describe ese snapshot: el flujo, las variables y tambien el
-/// analisis (hallazgos y contratos), que antes se calculaba siempre sobre el
-/// ultimo (issue #18).
-///
-/// La seccion de errores se rellena leyendo los logs **solo si el directorio
-/// existe**: aqui, y no en `analysis`, es donde se decide si este entorno tiene
-/// logs. Asi un pack de test no depende de `C:\Rocketbot` y un pack real no pierde
-/// la seccion por una ruta mal escrita.
+/// No lee logs: el pack de test no depende de `C:\Rocketbot`.
 pub fn build_from_conn(
     conn: &rusqlite::Connection,
     robot: &str,
     snapshot: Option<i64>,
     db_label: &str,
 ) -> Result<Pack> {
-    // Sin logs por defecto: un pack de test no puede depender de `C:\Rocketbot`.
-    // El CLI es quien decide leerlos (ver `build_from_conn_with_logs`).
     build_from_conn_with_logs(conn, robot, snapshot, db_label, None)
 }
 
 /// Igual que [`build_from_conn`], con un origen de logs explicito.
 ///
-/// `None` deja la seccion de errores vacia y no toca el sistema de ficheros: eso es
-/// lo que usan los tests y cualquier consumidor sin logs. Que el motor no decida
-/// por su cuenta es lo que mantiene la suite hermética: antes, un test cuyo robot se
-/// llamara igual que uno real habria cambiado de resultado segun la maquina.
+/// `None` deja la seccion de errores vacia y no toca el sistema de ficheros.
 pub fn build_from_conn_with_logs(
     conn: &rusqlite::Connection,
     robot: &str,
@@ -125,12 +100,9 @@ pub fn build_from_conn_with_logs(
 }
 
 /// Igual que [`build_from_conn_with_logs`], comprobando las rutas declaradas
-/// contra el dispositivo con `path_probe`.
+/// contra el dispositivo con `path_probe` (lo necesita `RUTA_MIGRADA`).
 ///
-/// Es la variante que usan el CLI y la fachada MCP: `RUTA_MIGRADA` necesita
-/// saber si una ruta existe **aqui**, y ese acceso al disco no puede estar
-/// escondido en el motor hermetico. Con [`paths::NoPaths`] el resultado es
-/// exactamente el historico.
+/// Con [`paths::NoPaths`] el resultado es exactamente el historico.
 pub fn build_from_conn_with_logs_and_paths(
     conn: &rusqlite::Connection,
     robot: &str,
@@ -147,14 +119,8 @@ pub fn build_from_conn_with_logs_and_paths(
             .ok_or(crate::error::Error::SnapshotNotFound(id))?,
         None => snaps.last().expect("load_snapshots nunca devuelve vacio"),
     };
-    // El analisis cruzado necesita la db entera (grafo de llamadas), no solo este
-    // robot; por eso se resuelve aqui y se pasa ya hecho a `build`, que trabaja
-    // unicamente con el snapshot pedido y no vuelve a tocar la conexion.
-    //
-    // Se pasa el `id` del snapshot objetivo, no el `--snapshot` crudo: con `None`
-    // el objetivo es el ultimo y el analisis tiene que describir ese mismo, no
-    // quedarse en "el ultimo" por su cuenta. Antes de esto, pedir la v26 daba un
-    // flujo de la v26 y hallazgos de la ultima version (issue #18).
+    // Se pasa el `id` resuelto y no el `--snapshot` crudo: con `None` el analisis
+    // debe describir el mismo snapshot que el flujo (issue #18).
     let analysis = analysis::analyse_with_logs_at_paths(
         conn,
         db_label,
@@ -173,8 +139,6 @@ fn build(
     target: &Snapshot,
     analysis: Analysis,
 ) -> Pack {
-    // El indice recorre todas las versiones. Cuando llegue el daemon esto se
-    // cachea por (db, robot, ultimo_id); hoy es barato y mantiene el codigo simple.
     let mut versions = VersionIndex::default();
     for s in snaps {
         let root = db::project_root(&s.project);
@@ -211,8 +175,7 @@ fn build(
     }
 }
 
-/// Las variables salen ya redactadas: el pack se comparte (agente, incidencia,
-/// UI) y `project.vars` puede llevar credenciales cifradas por Rocketbot.
+/// Variables ya redactadas: el pack se comparte y la db puede llevar credenciales.
 fn vars_of(root: &Value) -> Vec<VarInfo> {
     paths::declared_vars(root)
         .into_iter()

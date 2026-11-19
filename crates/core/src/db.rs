@@ -1,8 +1,5 @@
-//! Lectura de `robot.db`.
-//!
-//! La tabla `bots` es un **historial**: cada guardado en Studio inserta una fila
-//! nueva en vez de actualizar. Por eso `ORDER BY id` da la evolucion del robot y
-//! `created_at` da los intervalos temporales que usa la atribucion de errores.
+//! Lectura de `robot.db`: `bots` es un historial; `ORDER BY id` da la evolucion
+//! y `created_at` los intervalos de atribucion de errores.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -16,7 +13,6 @@ use crate::error::{Error, Result};
 /// Formato de `bots.created_at` observado en el entorno real.
 pub const DATE_FMT: &str = "%Y-%m-%d %H:%M:%S";
 
-/// Base de datos por defecto del Studio local.
 pub const DEFAULT_DB: &str = r"C:\Rocketbot\robot.db";
 
 #[derive(Debug, Clone)]
@@ -32,19 +28,14 @@ pub struct Snapshot {
     pub id: i64,
     pub name: String,
     pub created_at: NaiveDateTime,
-    /// Base64 tal cual esta en la base de datos. Se conserva para medir el
-    /// tamano crudo real sin volver a consultar.
+    /// Base64 tal cual esta en la db: mide el tamano crudo sin volver a consultar.
     pub raw_b64: String,
     /// Proyecto ya decodificado (`project` o la raiz si no hay envoltura).
     pub project: Value,
 }
 
 /// `created_at` del ultimo snapshot del robot, si lo tiene.
-///
-/// Es la hora con la que se registra una observacion en el historial de problemas.
-/// Si se usara el reloj del barrido, dos escaneos de la **misma** version contarian
-/// como dos avistamientos y el contador dejaria de significar nada: la identidad de
-/// una observacion incluye el instante, asi que ese instante tiene que ser estable.
+/// Es la hora estable de la observacion: dos escaneos de la misma version no cuentan doble.
 pub fn latest_created_at(conn: &Connection, name: &str) -> Result<Option<NaiveDateTime>> {
     let mut stmt =
         conn.prepare("SELECT created_at FROM bots WHERE name = ?1 ORDER BY id DESC LIMIT 1")?;
@@ -60,10 +51,6 @@ pub fn latest_created_at(conn: &Connection, name: &str) -> Result<Option<NaiveDa
 }
 
 /// `(id, created_at)` del ultimo snapshot del robot, sin decodificar el JSON.
-///
-/// El broker de ejecucion lo usa para decir contra que version se atribuyeron
-/// los errores. Decodificar todas las versiones solo para leer la ultima
-/// costaria lo mismo que construir el pack entero.
 pub fn latest_snapshot(conn: &Connection, name: &str) -> Result<Option<(i64, NaiveDateTime)>> {
     let mut stmt =
         conn.prepare("SELECT id, created_at FROM bots WHERE name = ?1 ORDER BY id DESC LIMIT 1")?;
@@ -127,11 +114,7 @@ pub fn load_snapshots(conn: &Connection, name: &str) -> Result<Vec<Snapshot>> {
     Ok(out)
 }
 
-/// Un snapshot concreto, leyendo **solo su fila**.
-///
-/// Antes decodificaba todas las versiones del robot y filtraba en memoria. Eso
-/// hacia que una version vieja corrupta bloqueara el analisis de la ultima, y
-/// costaba O(versiones) por robot en cada pasada (issue #18).
+/// Un snapshot concreto, leyendo **solo su fila**: una version corrupta no bloquea la ultima.
 pub fn load_snapshot(conn: &Connection, name: &str, id: i64) -> Result<Snapshot> {
     let mut stmt =
         conn.prepare("SELECT id, name, created_at, data FROM bots WHERE name = ?1 AND id = ?2")?;
@@ -175,8 +158,7 @@ fn snapshot_from_row(row: &rusqlite::Row<'_>) -> Result<Snapshot> {
     })
 }
 
-/// `bots.data` es base64 de un JSON. Se acepta tambien JSON plano porque el
-/// formato no esta documentado y no conviene romperse por una variante.
+/// `bots.data` es base64 de un JSON; se acepta JSON plano (formato no documentado).
 fn decode_project(id: i64, bytes: &[u8]) -> Result<Value> {
     if bytes.is_empty() {
         return Ok(Value::Null);
@@ -207,9 +189,6 @@ pub fn project_root(json: &Value) -> &Value {
 }
 
 /// Comandos de un proyecto ya decodificado (`project.commands`).
-///
-/// Vive aqui y no en cada consumidor porque el grafo y el pack tienen que ver la
-/// misma lista: un nodo que falta en uno y sobra en el otro es otro contrato.
 pub fn commands_of(root: &Value) -> &[Value] {
     match root.get("commands").and_then(Value::as_array) {
         Some(commands) => commands.as_slice(),
@@ -217,9 +196,7 @@ pub fn commands_of(root: &Value) -> &[Value] {
     }
 }
 
-/// Descubre bases de datos validas bajo una raiz.
-///
-/// Se excluyen `backups/` (copias de trabajo que duplicarian cada robot) y las
+/// Descubre bases de datos validas bajo una raiz, excluyendo `backups/` y las
 /// bases auxiliares de Studio que comparten nombre con `robot.db`.
 pub fn discover_databases(root: &Path) -> Result<Vec<PathBuf>> {
     const SKIP_FILES: [&str; 3] = ["analytics.db", "files.db", "nodb.db"];
@@ -257,12 +234,8 @@ pub fn discover_databases(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-/// Etiqueta de una db sin ruta absoluta: `BBRE2\robot_run.db`.
-///
-/// El pack y los informes se comparten (agente, incidencia, UI), asi que no
-/// llevan el arbol de directorios del desarrollador. Se normalizan los dos
-/// separadores a proposito: `Path` solo reconoce `\` en Windows y la etiqueta no
-/// puede depender del host que la construye.
+/// Etiqueta de una db sin ruta absoluta: se comparte sin el arbol del usuario.
+/// Normaliza ambos separadores porque `Path` solo reconoce `\` en Windows.
 pub fn label(path: &Path) -> String {
     let normalizado = path.to_string_lossy().replace('\\', "/");
     let mut partes: Vec<&str> = normalizado.split('/').filter(|p| !p.is_empty()).collect();
@@ -278,23 +251,14 @@ pub fn label(path: &Path) -> String {
 
 /// Etiquetas **unicas** y relativas para un conjunto de dbs de un workspace.
 ///
-/// [`label`] conserva solo las dos ultimas componentes: dos arboles distintos con
-/// `sandbox\robot.db` producen la misma etiqueta y el workspace los confunde como
-/// una sola identidad (issue #18). Aqui se empieza por esa etiqueta historica y se
-/// alarga la cola **solo para las dbs que colisionan**; si dos rutas agotan sus
-/// componentes con la misma cola, se anade un sufijo hash determinista. Nunca se
-/// incluye la unidad ni la raiz, asi que la etiqueta sigue sin filtrar el arbol del
-/// usuario.
-///
-/// El resultado es estable y determinista: depende de las rutas, no del orden de
-/// entrada.
+/// Alarga la cola de [`label`] solo para las que colisionan y anade un sufijo hash
+/// determinista si agotan la ruta (issue #18); nunca incluye la unidad ni la raiz.
 pub fn labels_for(paths: &[PathBuf]) -> Vec<String> {
     let normalized: Vec<String> = paths
         .iter()
         .map(|path| path.to_string_lossy().replace('\\', "/"))
         .collect();
 
-    // Rutas identicas son la misma db y comparten etiqueta.
     let mut unique: Vec<&str> = Vec::new();
     for path in &normalized {
         if !unique.contains(&path.as_str()) {
@@ -321,8 +285,6 @@ pub fn labels_for(paths: &[PathBuf]) -> Vec<String> {
     let max_depth = components.iter().map(Vec::len).max().unwrap_or(2).max(2);
     let mut assigned: Vec<Option<String>> = vec![None; unique.len()];
 
-    // Se prueban colas de 2, 3... componentes; en cada pasada solo se asignan las
-    // que ya son unicas. Las que siguen empatadas pasan a la siguiente.
     for depth in 2..=max_depth {
         let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for (index, parts) in components.iter().enumerate() {
@@ -348,8 +310,8 @@ pub fn labels_for(paths: &[PathBuf]) -> Vec<String> {
         }
     }
 
-    // Dos rutas con la misma cola completa (mismo arbol repetido en otra unidad o
-    // en otra raiz): el hash de la ruta completa las separa sin revelarla.
+    // Misma cola completa en otra unidad o raiz: el hash de la ruta completa las
+    // separa sin revelarla.
     for (index, slot) in assigned.iter_mut().enumerate() {
         if slot.is_some() {
             continue;

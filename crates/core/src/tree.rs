@@ -1,8 +1,5 @@
-//! Arbol de comandos -> lista plana.
-//!
-//! El render necesita el orden de ejecucion (pre-orden) y la profundidad, no la
-//! estructura anidada. Una lista plana ademas hace triviales las comprobaciones
-//! estructurales (colisiones de linea, profundidad maxima).
+//! Arbol de comandos -> lista plana en pre-orden; `line` no es unica (Try y
+//! Catch comparten numeracion), asi que direccionar nodos usa `id`.
 
 use std::collections::BTreeMap;
 
@@ -10,11 +7,8 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Branch {
-    /// Nivel raiz del robot.
     Main,
-    /// Rama `children` de un comando logico (el caso verdadero / cuerpo).
     Then,
-    /// Rama `else` (el catch de un Try, el falso de un IF, el fin de un bucle).
     Else,
 }
 
@@ -26,19 +20,16 @@ impl Branch {
 
 #[derive(Debug, Clone)]
 pub struct FlatNode {
-    /// Numero de linea tal como lo muestra Studio. **No es unico** en robots con
-    /// Try/Catch, porque Studio reutiliza la numeracion en las dos ramas.
+    /// Numero de linea de Studio. **No es unico**: Try y Catch comparten numeracion.
     pub line: String,
-    /// UUID del nodo. Coincide con el `cmd_id` que escribe el runner en el log.
+    /// UUID del nodo; coincide con el `cmd_id` del log.
     pub id: String,
-    /// Clave del comando (`openbrowser`, `setVar`, `trycatch`, ...).
     pub cmd: String,
     pub group: Option<String>,
     pub option: Option<String>,
     pub desc: Option<String>,
     /// Parametros ya normalizados a texto de una linea.
     pub params: String,
-    /// Variable que escribe este nodo, si es un comando de asignacion.
     pub write_var: Option<String>,
     pub branch: Branch,
     pub depth: usize,
@@ -73,9 +64,8 @@ pub fn normalize_line(v: &Value) -> String {
     }
 }
 
-/// El campo `command` es polimorfico: texto libre, expresion Python o un JSON
-/// serializado con los parametros. Si es JSON de objeto se re-serializa compacto
-/// para que un objeto con espacios no infle el context pack.
+/// `command` es polimorfico (texto, expresion Python o JSON); un JSON de objeto
+/// se re-serializa compacto para no inflar el context pack.
 pub fn params_text(cmd: &Value) -> String {
     match cmd {
         Value::String(s) => {
@@ -128,15 +118,13 @@ fn walk(list: &[Value], branch: Branch, depth: usize, out: &mut Vec<FlatNode>) {
     }
 }
 
-/// Pre-orden: padre antes que hijos, `children` antes que `else`.
 pub fn flatten(commands: &[Value]) -> Vec<FlatNode> {
     let mut out = Vec::new();
     walk(commands, Branch::Main, 0, &mut out);
     out
 }
 
-/// Lineas que aparecen mas de una vez. Es el defecto estructural mas grave que
-/// se puede detectar sin ejecutar: rompe el direccionamiento por linea.
+/// Lineas repetidas: es el defecto estructural mas grave detectable sin ejecutar.
 pub fn collisions(nodes: &[FlatNode]) -> BTreeMap<String, usize> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for n in nodes {

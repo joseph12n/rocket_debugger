@@ -1,17 +1,8 @@
 //! Historial de snapshots y atribucion temporal.
 //!
-//! Rocketbot no escribe en el log que version del robot se ejecuto. Pero `bots`
-//! guarda una fila por cada guardado con su `created_at`, asi que el intervalo
-//! en que cada version estuvo viva es reconstruible:
-//!
 //! ```text
 //! snapshot_vivo(t) = argmax { created_at <= t }
 //! ```
-//!
-//! Esto es lo que impide que un panel mienta: un error de hace tres versiones
-//! no es un error de hoy. Caso real medido: `ML_06_Legacy` fallaba con
-//! `NameError: contador` entre 12:49:22 y 12:50:28, cuando estaba vivo v25/v26;
-//! el robot actual es v29 y el error ya no existe.
 
 use chrono::NaiveDateTime;
 
@@ -22,14 +13,12 @@ pub struct VersionInfo {
     /// Tamano del base64 en la base de datos (no del JSON decodificado).
     pub bytes: i64,
     pub nodes: usize,
-    /// Hash corto del contenido: dos filas con el mismo hash son el mismo robot
-    /// copiado en otra db (esto pasa entre dbs de entrega y de trabajo).
+    /// Hash corto del contenido: mismo hash = mismo robot copiado en otra db.
     pub hash: String,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct VersionIndex {
-    /// Ordenado por id ascendente (orden de guardado).
     pub versions: Vec<VersionInfo>,
 }
 

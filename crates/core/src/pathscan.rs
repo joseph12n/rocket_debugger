@@ -1,27 +1,14 @@
 //! Primitivas del escaneo de rutas absolutas en texto libre.
 //!
-//! Tres consumidores miran el mismo texto con contratos distintos: `rules` marca
-//! la primera ruta de unidad de un parametro, `paths` extrae todas las rutas para
-//! comprobarlas contra el disco y `redact` decide si un valor lleva una ruta del
-//! usuario. Las politicas difieren a proposito (UNC solo cuenta para privacidad,
-//! POSIX abierto solo para la migracion), pero el esqueleto era el mismo y estaba
-//! copiado: `continues_scheme` tres veces y `path_snippet` dos, con topes que ya
-//! habian derivado (60 para el mensaje, 260 para el diagnostico).
-//!
-//! Aqui vive una sola copia de las primitivas; cada consumidor conserva su
-//! politica y su formato. Un cambio de criterio se hace una vez y se ve en los tres.
-//!
-//! Los indices son offsets de **byte**: quien recorte con ellos tiene que respetar
-//! `is_char_boundary` (un texto con acentos tiene posiciones que no son frontera de
-//! caracter y cortar ahi entra en panico).
+//! Una copia para `rules`, `paths` y `redact`, cada uno con su politica. Los
+//! indices son offsets de **byte**: hay que respetar `is_char_boundary`.
 
 /// Separador de esquema: lo que sigue a `://` es una direccion, no el disco.
 const URL_SEP: &str = "://";
 
 /// Tramos que ocupa cada URL (`esquema://resto`) dentro del texto.
 ///
-/// El resto del texto puede ser una ruta aunque comparta cadena con ellas: en
-/// `file:///C:/x` el `C:/` cae dentro del tramo y no es una ruta del usuario.
+/// En `file:///C:/x` el `C:/` cae dentro del tramo y no es una ruta del usuario.
 pub fn url_spans(text: &str) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     let mut from = 0;
@@ -49,7 +36,7 @@ pub fn inside_any(spans: &[(usize, usize)], at: usize) -> bool {
     spans.iter().any(|&(start, end)| (start..end).contains(&at))
 }
 
-/// Caracteres que puede llevar un esquema (`https`, `file`, `git+ssh`).
+/// Caracteres de un esquema (`https`, `file`, `git+ssh`).
 fn is_scheme_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')
 }
@@ -60,9 +47,6 @@ pub fn continues_scheme(text: &str, at: usize) -> bool {
 }
 
 /// `true` si la posicion cae dentro de un token que ya abrio un esquema (`://`).
-///
-/// Complementa a [`url_spans`]: alli el tramo se calcula de antemano; aqui se mira
-/// hacia atras desde la posicion, que es lo que necesita un escaneo byte a byte.
 pub fn inside_url_token(text: &str, at: usize) -> bool {
     let start = text[..at]
         .char_indices()
@@ -78,17 +62,14 @@ pub fn inside_url_token(text: &str, at: usize) -> bool {
     text[start..at].contains(URL_SEP)
 }
 
-/// `true` si la posicion abre token: la anterior no es parte de una palabra.
-///
-/// Lo usa la deteccion de raices POSIX: en `carpeta/home/x` el prefijo aparece,
-/// pero la ruta es relativa y se conserva.
+/// `true` si la posicion abre token (la anterior no es parte de una palabra):
+/// en `carpeta/home/x` la ruta es relativa y no es una raiz POSIX.
 pub fn opens_token(text: &str, at: usize) -> bool {
     text[..at].chars().next_back().map_or(true, |c| {
         !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
     })
 }
 
-/// Un caracter que corta la URL: a partir de ahi empieza otro token del valor.
 fn is_url_stop(c: char) -> bool {
     c.is_whitespace()
         || matches!(
