@@ -1,13 +1,7 @@
 //! Presentacion de la vista de bandeja: la agregacion vive en el motor.
 //!
-//! Este modulo solo resuelve el origen (una db o un workspace) y pinta la
-//! [`Review`] que devuelve `rocketdebug_core`: los numeros, el orden y la
-//! tolerancia a un robot ilegible son del motor. Antes esta agregacion vivia
-//! aqui; se movio para que la UI que viene no tenga que duplicarla y pueda
-//! ensenar cifras distintas de las del CLI.
-//!
-//! `format_review` sigue siendo el contrato de salida: cabecera, tabla y totales,
-//! con la misma salida byte a byte que documenta `crates/cli/tests/review.rs`.
+//! Aqui solo se resuelve el origen y se pinta: los numeros y el orden vienen de
+//! `rocketdebug_core` y no se recalculan.
 
 use std::path::Path;
 use std::time::Instant;
@@ -16,18 +10,10 @@ use anyhow::Context;
 use rocketdebug_core::db;
 use rocketdebug_core::review::{review_conn, review_workspace, Review, ReviewRow};
 
-/// Filas que se listan sin `--limit`.
-///
-/// Veinte deja el panorama de una entrega entera en pantalla (la mayor db real
-/// medida tiene 10 robots y el workspace 32 instancias) y, si se recorta, la ultima
-/// fila de la tabla dice cuantas quedaron fuera.
+/// Filas que se listan sin `--limit` (20); el resto se resume en una linea.
 pub const DEFAULT_LIMIT: usize = 20;
 
-/// Anchos minimos de cada columna, tomados del ejemplo de referencia del issue.
-///
-/// Son minimos y no fijos: si un nombre o un contador no cabe, la columna se
-/// ensancha para todos y la alineacion se mantiene. Un numero grande no puede
-/// desalinear el resto de la tabla.
+/// Anchos minimos de cada columna: si un valor no cabe, la columna se ensancha.
 const NAME_MIN_WIDTH: usize = 24;
 const NODES_MIN_WIDTH: usize = 8;
 const ACTIONABLE_MIN_WIDTH: usize = 5;
@@ -36,9 +22,8 @@ const LIVE_MIN_WIDTH: usize = 7;
 
 /// Ejecuta `rocketdebug review` y escribe la vista en stdout.
 ///
-/// `log_source` es `(directorio, maximo de ficheros)` ya resuelto por el CLI, o
-/// `None` con `--no-logs`. El tiempo se informa por stderr: stdout es el contrato
-/// de formato de la vista y la medida del coste no puede ensuciarlo.
+/// `log_source` ya viene resuelto por el CLI; el tiempo va por stderr, fuera del
+/// contrato de formato.
 pub fn run(
     db_path: &Path,
     workspace: Option<&Path>,
@@ -47,8 +32,6 @@ pub fn run(
 ) -> anyhow::Result<()> {
     let started = Instant::now();
     let mut review = collect(db_path, workspace, log_source)?;
-    // El detalle por db que antes salia mientras se barria se conserva, ahora que
-    // el motor ya hizo el trabajo: las filas siguen contiguas por db.
     if workspace.is_some() {
         report_dbs(&review);
     }
@@ -62,10 +45,7 @@ pub fn run(
     Ok(())
 }
 
-/// Construye el origen ya abierto (una db o el workspace) y pide la foto al motor.
-///
-/// El descubrimiento y la apertura son del CLI porque el motor no decide leer
-/// disco; a partir de ahi los numeros no se tocan.
+/// Abre el origen (una db o el workspace) y pide la foto al motor.
 fn collect(
     db_path: &Path,
     workspace: Option<&Path>,
@@ -81,15 +61,13 @@ fn collect(
         Some(dir) => {
             let paths = db::discover_databases(dir)
                 .with_context(|| format!("descubriendo bases en {}", dir.display()))?;
-            // Etiquetas unicas para el conjunto: dos arboles distintos con
-            // `sandbox\robot.db` no pueden ser la misma identidad.
+            // Etiquetas unicas para el conjunto: dos arboles con el mismo fichero no colisionan.
             let labels = db::labels_for(&paths);
             let mut opened = Vec::with_capacity(paths.len());
             for (path, label) in paths.iter().zip(labels) {
                 match db::open_readonly(path) {
                     Ok(conn) => opened.push((conn, label)),
-                    // Una db ilegible no puede tumbar el panorama de las demas: se
-                    // avisa y se sigue.
+                    // Una db ilegible se avisa y se omite; el resto del panorama sigue.
                     Err(e) => eprintln!("aviso: {e}"),
                 }
             }
@@ -102,11 +80,7 @@ fn collect(
     }
 }
 
-/// Cabecera de la vista.
-///
-/// La etiqueta del motor para un workspace es neutra (`workspace (4 dbs)`); el CLI
-/// conserva el prefijo historico de su salida (`workspace: 4 dbs`). En una sola db
-/// basta la etiqueta relativa que ya trae la foto.
+/// Cabecera de la vista: prefijo historico del CLI sobre la etiqueta del motor.
 fn display_source(review: &Review, workspace: bool) -> String {
     if workspace {
         format!("workspace: {}", dbs_label(review.dbs))
@@ -115,10 +89,7 @@ fn display_source(review: &Review, workspace: bool) -> String {
     }
 }
 
-/// Cuantas filas aporto cada db, en el orden en que se recorrieron.
-///
-/// Es informacion operativa para stderr: en un workspace con robots homonimos, la
-/// tabla no distingue de que entrega sale cada fila y este detalle si.
+/// Cuantas filas aporto cada db, por stderr; en un workspace distingue entregas.
 fn report_dbs(review: &Review) {
     let mut actual: Option<&str> = None;
     let mut count = 0usize;
@@ -172,7 +143,6 @@ impl ColumnWidths {
         }
     }
 
-    /// Una linea de la tabla: nombre a la izquierda y contadores a la derecha.
     fn line(
         &self,
         robot: &str,
@@ -219,9 +189,7 @@ fn numeric_width(minimum: usize, values: impl Iterator<Item = usize>) -> usize {
 
 /// Pinta el panorama: cabecera, tabla ordenada y totales.
 ///
-/// El orden lo decide [`Review::sorted`] (accionables, vivos y nombre), no este
-/// formateador: es el mismo que vera la UI. Los totales suman **todas** las filas,
-/// no solo las que entran por `limit`: cortar la tabla no puede cambiar la foto.
+/// Los totales suman todas las filas, no solo las que entran por `limit`.
 pub fn format_review(source: &str, review: &mut Review, limit: usize) -> String {
     review.sorted();
 
@@ -248,7 +216,6 @@ pub fn format_review(source: &str, review: &mut Review, limit: usize) -> String 
             &row.vivos.to_string(),
         ));
     }
-    // Nunca se oculta en silencio lo que el limite deja fuera.
     if total > limit {
         lines.push(format!("  ... y {} mas", robots_label(total - limit)));
     }
