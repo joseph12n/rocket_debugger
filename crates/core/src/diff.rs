@@ -1,59 +1,6 @@
 //! Diff estructural entre dos snapshots del mismo robot (`v26` -> `v27`).
-//!
-//! La atribucion ([`crate::attribution`]) dice *en que version* y *en que nodo*
-//! fallo algo, pero no *que se cambio* para arreglarlo. El diff cierra esa
-//! pregunta: es lo que permite responder "¿que cambio entre la v26 y la v27?",
-//! verificar un fix y registrar el porque de un cambio. Sin diff, el agente sabe
-//! que algo fallo y no puede comprobar si el arreglo toco lo que creia tocar.
-//!
-//! # Se empareja por `id`, nunca por `line`
-//!
-//! El `id` de cada nodo es estable entre versiones (Studio lo conserva al
-//! re-guardar) y coincide con el `cmd_id` que el runner escribe en el log: es la
-//! unica union fiable entre ejecucion y codigo.
-//!
-//! `line` no sirve para emparejar. Se renumera al insertar un nodo antes, y en
-//! algunos robots **no es unica**: en `ML_06_Legacy` el `try` y el `catch`
-//! comparten `2.1`, `2.2` y `2.3`. Emparejar por linea cruzaria ramas y
-//! atribuiria un cambio a un nodo que no se toco.
-//!
-//! # Que cuenta como cambio
-//!
-//! Un nodo que existe en las dos versiones es un cambio si cambian sus `params`
-//! o su `cmd`. Nada mas:
-//!
-//! | diferencia | resultado | por que |
-//! |---|---|---|
-//! | `params` | [`ChangeKind::Changed`] | es lo que el runner ejecuta y lo que el agente edita |
-//! | `cmd` | [`ChangeKind::Changed`] | el usuario cambio de comando en el mismo nodo |
-//! | solo `line` | *nada* | es renumeracion: al insertar un nodo antes se renumeran todos los siguientes, y contarlo convertiria cada diff en decenas de cambios falsos que esconden el unico real |
-//! | `branch`, `depth` | *nada* | se derivan de la posicion en el arbol: cambian por el mismo motivo que la linea |
-//! | `group`, `option`, `desc` | *nada* | son etiquetas de la interfaz de Studio; el contrato de esta funcion es `params` + `cmd` |
-//!
-//! # Ids repetidos
-//!
-//! Studio genera un UUID por nodo, asi que en un robot sano los ids son unicos.
-//! Si no lo fueran (robot editado a mano, formato futuro), emparejar por id
-//! dejaria de ser una biyeccion y un mapa ingenuo perderia nodos en silencio.
-//! La defensa es emparejar **por ocurrencia**: la k-esima aparicion de un id en
-//! `after` se empareja con la k-esima en `before`, y la aparicion que sobra sale
-//! como [`ChangeKind::Added`] o [`ChangeKind::Removed`]. Ningun nodo desaparece
-//! del informe y el resultado no depende del orden de las listas de entrada. Lo
-//! mismo cubre los nodos sin `id`: [`crate::tree::flatten`] los deja como cadena
-//! vacia y el emparejamiento por ocurrencia evita que se pisen entre ellos.
-//!
-//! # Determinismo
-//!
-//! La salida no depende del recorrido de ningun mapa: primero los nodos de
-//! `after` en su orden de aparicion y al final los `Removed` en el orden de
-//! `before`. La misma entrada produce la misma salida.
-//!
-//! # Lo que este modulo no hace
-//!
-//! No enmascara rutas ni recorta parametros: `before`/`after` llevan los
-//! `params` tal cual, porque el enmascarado vive en un solo punto
-//! (`render::field`) y hacerlo aqui lo duplicaria. Tampoco decide como se
-//! muestra el diff: solo lo calcula.
+//! Empareja por `id` y, si se repite, por ocurrencia. Un nodo con los mismos
+//! `params` y `cmd` no aparece aunque cambie de `line`: renumerar no es un cambio.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -62,11 +9,8 @@ use crate::tree::FlatNode;
 /// Relacion de un nodo con la version anterior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeKind {
-    /// El nodo existe solo en la version `to`.
     Added,
-    /// El nodo existia solo en la version `from`.
     Removed,
-    /// El nodo existe en las dos y cambiaron sus parametros o su comando.
     Changed,
 }
 
@@ -74,28 +18,14 @@ pub enum ChangeKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeChange {
     pub kind: ChangeKind,
-    /// `id` del nodo: la clave del emparejamiento (ver el modulo).
     pub id: String,
-    /// Linea de Studio en la version `to`; en un `Removed`, la de `from`.
     pub line: String,
-    /// Comando en la version `to`; en un `Removed`, el de `from`.
     pub command: String,
-    /// Parametros antes del cambio. `None` si el nodo no existia (`Added`).
     pub before: Option<String>,
-    /// Parametros despues del cambio. `None` si el nodo desaparecio (`Removed`).
     pub after: Option<String>,
 }
 
 /// Compara dos snapshots ya aplanados y devuelve que nodos cambiaron.
-///
-/// El emparejamiento es por `id`, que es estable entre versiones; `line` solo se
-/// copia al resultado como etiqueta. Un nodo presente en las dos versiones con
-/// los mismos `params` y el mismo `cmd` **no** aparece: si solo cambio la linea
-/// (renumeracion) el nodo es el mismo y reportarlo seria ruido en cada guardado.
-///
-/// Orden de salida: los nodos de `after` en su orden de aparicion y, al final,
-/// los `Removed` en el orden de `before`.
-///
 /// ```
 /// use rocketdebug_core::diff::{diff_nodes, summarize, ChangeKind};
 /// use rocketdebug_core::tree::flatten;
@@ -128,10 +58,6 @@ pub struct NodeChange {
 /// assert_eq!(summarize(&cambios), "1 anadido");
 /// ```
 pub fn diff_nodes(before: &[FlatNode], after: &[FlatNode]) -> Vec<NodeChange> {
-    // Una cola de indices por `id`: es lo que implementa el emparejamiento por
-    // ocurrencia sin perder nodos cuando un id se repite. El mapa se usa solo
-    // para buscar por id; el orden del resultado sale de `after` y de `before`,
-    // nunca de recorrer el mapa (ver el barrido de sobrantes, que se ordena).
     let mut pendientes: HashMap<&str, VecDeque<usize>> = HashMap::new();
     for (i, node) in before.iter().enumerate() {
         pendientes.entry(node.id.as_str()).or_default().push_back(i);
@@ -144,13 +70,10 @@ pub fn diff_nodes(before: &[FlatNode], after: &[FlatNode]) -> Vec<NodeChange> {
             .and_then(VecDeque::pop_front)
             .map(|i| &before[i]);
         let Some(previo) = previo else {
-            // El id no estaba en `before` (o ya se consumieron todas sus
-            // ocurrencias): el nodo es nuevo.
             cambios.push(agregado(node));
             continue;
         };
 
-        // `line` no entra en la comparacion a proposito: ver el modulo.
         if previo.params == node.params && previo.cmd == node.cmd {
             continue;
         }
@@ -164,9 +87,6 @@ pub fn diff_nodes(before: &[FlatNode], after: &[FlatNode]) -> Vec<NodeChange> {
         });
     }
 
-    // Lo que nadie consumio de `before` son nodos retirados. Se recogen los
-    // indices y se ordenan: el resultado tiene que depender del orden del
-    // snapshot, no del recorrido del `HashMap`.
     let mut sobrantes: Vec<usize> = pendientes.into_values().flatten().collect();
     sobrantes.sort_unstable();
     for i in sobrantes {
@@ -197,11 +117,7 @@ fn removido(node: &FlatNode) -> NodeChange {
     }
 }
 
-/// Resumen de una linea para la cabecera del diff: `"2 anadidos, 1 eliminado, 3 cambiados"`.
-///
-/// Omite las categorias con cero (no dice `0 anadidos`) y devuelve `"sin
-/// cambios"` con la lista vacia, que es el caso que el agente lee como "esta
-/// version no toco nada del flujo".
+/// Resumen de una linea para la cabecera del diff.
 pub fn summarize(changes: &[NodeChange]) -> String {
     if changes.is_empty() {
         return "sin cambios".to_string();

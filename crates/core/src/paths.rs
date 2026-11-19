@@ -1,33 +1,7 @@
-//! Deteccion de rutas horneadas de **otro dispositivo** y propuesta de remapeo.
-//!
-//! `RUTA_ABSOLUTA` solo mira el formato: una ruta `C:\...` es poco portable, pero
-//! puede ser perfectamente valida en la maquina donde corre el robot. Este modulo
-//! responde una pregunta distinta y comprobable: *¿esta ruta existe aqui?*.
-//!
-//! # Por que agrupa por carpeta
-//!
-//! Un robot real trae diez variables bajo la misma carpeta de origen
-//! (`ENTREGA_BBRE2`): una por salida, una por XML, una por perfil de Chrome. Un
-//! hallazgo por variable se come el presupuesto de cinco del pack y repite diez
-//! veces el mismo diagnostico. Se agrupa por la **primera carpeta que no existe**
-//! y se propone el remapeo de esa carpeta, que es la unidad que el agente puede
-//! aplicar de una vez.
-//!
-//! # Por que no marca todas las rutas
-//!
-//! - Si la ruta existe, no es un defecto.
-//! - Las rutas del sistema (`C:\Windows`, `C:\Program Files`, `C:\Rocketbot`,
-//!   `/usr`, ...) no se migran con el robot: se excluyen.
-//! - Las rutas con placeholders (`{carpeta}`, `%USERPROFILE%`) no se pueden
-//!   comprobar sin ejecutar y no se inventan.
-//! - Una URL no es una ruta.
-//!
-//! # Por que el acceso al disco es un trait
-//!
-//! El motor es deterministico y sus tests no tocan `C:\Rocketbot`. [`PathProbe`]
-//! permite que el pack de un test use un probe vacio o uno con raices temporales,
-//! y que el CLI/MCP use [`LocalPaths`] para comprobar el disco de verdad. Sin un
-//! probe que lo pida (`NoPaths`), la regla no se evalua y el golden no cambia.
+//! Regla `RUTA_MIGRADA`: rutas absolutas de otro dispositivo y su remapeo.
+//! Solo se marcan rutas que no existen en este equipo; las del sistema y las
+//! dinamicas se excluyen. El motor no decide sobre el disco: todo acceso pasa
+//! por [`PathProbe`] y, sin probe (`NoPaths`), la regla no se evalua.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -44,12 +18,7 @@ pub const RULE_ID: &str = "RUTA_MIGRADA";
 /// Variables que se listan en el mensaje antes de resumir el resto.
 const MAX_GROUP_VARS: usize = 4;
 
-/// Profundidad y entradas maximas de la busqueda de un equivalente local.
-///
-/// Un robot puede tener varias rutas migradas y el pack de la bandeja se pide al
-/// seleccionar una fila: recorrer el arbol entero de `C:\` no es aceptable. Con
-/// estas cotas la busqueda queda en decenas de milisegundos en las carpetas del
-/// proyecto.
+/// Cotas de la busqueda de un equivalente local: el arbol entero de `C:\` no es aceptable.
 const SEARCH_DEPTH: usize = 4;
 const SEARCH_ENTRIES: usize = 2_000;
 
@@ -61,10 +30,7 @@ pub struct VarValue {
 }
 
 /// Variables del panel (`project.vars`): nombre y valor crudo, sin nombres vacios.
-///
-/// Es la fuente unica de la lista: [`vars_of`] aqui y `pack::vars_of` la consumen y
-/// cada uno decide que hacer con el crudo (aqui, solo escalares; el pack, redactar).
-/// Si duplicaran el filtro, un cambio en las reglas del panel solo valdria en uno.
+/// Es la fuente unica: [`vars_of`] y `pack::vars_of` deciden que hacer con el crudo.
 pub fn declared_vars(root: &Value) -> Vec<(&str, Option<&Value>)> {
     let Some(array) = root.get("vars").and_then(Value::as_array) else {
         return Vec::new();
@@ -104,13 +70,10 @@ pub struct RemapCandidate {
     pub score: u8,
 }
 
-/// Acceso al dispositivo donde corre el motor.
-///
-/// `exists` devuelve `None` cuando no se puede saber; en ese caso la ruta no se
-/// marca (mejor no avisar que inventar un defecto).
+/// Acceso al disco del equipo donde corre el motor.
+/// `exists` devuelve `None` si no se puede saber y entonces la ruta no se marca.
 pub trait PathProbe {
-    /// `false` desactiva la regla entera. `NoPaths` lo usa para que el motor
-    /// hermetico no toque el disco.
+    /// `false` desactiva la regla entera (lo usa `NoPaths`).
     fn enabled(&self) -> bool {
         true
     }
@@ -123,8 +86,7 @@ pub trait PathProbe {
     }
 }
 
-/// Probe que no comprueba nada: es el que usan los tests y cualquier consumidor
-/// que quiera un pack puro (solo db).
+/// Probe que no comprueba nada: tests y consumidores que quieren un pack puro.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoPaths;
 
@@ -138,8 +100,7 @@ impl PathProbe for NoPaths {
     }
 }
 
-/// Probe real: comprueba el sistema de ficheros y busca equivalentes bajo raices
-/// concretas.
+/// Probe real: comprueba el sistema de ficheros bajo raices concretas.
 #[derive(Debug, Clone)]
 pub struct LocalPaths {
     roots: Vec<PathBuf>,
@@ -158,9 +119,6 @@ impl LocalPaths {
     }
 
     /// Raices naturales del proyecto: la carpeta de la db y su padre.
-    ///
-    /// Para `C:\rocketbot_bots\BBRE2\robot_run.db` son `BBRE2` y
-    /// `C:\rocketbot_bots`: donde el usuario guarda los proyectos y sus entregas.
     pub fn for_db(db: &Path) -> Self {
         let mut roots = Vec::new();
         if let Some(parent) = db.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -204,14 +162,8 @@ impl PathProbe for LocalPaths {
 }
 
 /// Rutas migradas de un robot, ya convertidas en hallazgos.
-///
-/// `line_hints` permite que el analisis aporte la linea de una variable que no se
-/// usa en este robot sino en un subrobot: en ese caso la linea util es la de la
-/// llamada `execRocketBotDB` en el padre. Si no hay pista, se busca el primer uso
-/// en los nodos del propio robot.
-///
-/// Es `pub` para que un consumidor que ya tiene los nodos y las variables pueda
-/// pedir solo esta regla; el pack la usa a traves del analisis.
+/// `line_hints` aporta la linea de una variable usada en un subrobot (la llamada
+/// `execRocketBotDB` en el padre); si falta, se usa el primer uso en los nodos.
 pub fn findings(
     nodes: &[FlatNode],
     vars: &[VarValue],
@@ -336,8 +288,7 @@ impl Group {
     }
 }
 
-/// Funde un grupo que cuelga de otro: si falta `ENTREGA_BBRE2` y tambien su
-/// subcarpeta `reportes`, el diagnostico es uno, no dos.
+/// Funde un grupo que cuelga de otro: el diagnostico es uno, no dos.
 fn merge_nested(groups: &mut BTreeMap<String, Group>) {
     let mut roots: Vec<String> = groups.keys().cloned().collect();
     // Primero los cortos (menos profundidad): los hijos caen en ellos.
@@ -401,10 +352,8 @@ fn first_use_lines(nodes: &[FlatNode], vars: &[VarValue]) -> BTreeMap<String, St
     out
 }
 
-/// Ruta absoluta cuando el valor **entero** es una ruta.
-///
-/// Es el caso de una variable: `C:/Users/x/ENTREGA_BBRE2` con espacios en el
-/// nombre se conserva entero, a diferencia del escaneo de un parametro.
+/// Ruta absoluta cuando el valor entero es una ruta (caso de una variable).
+/// A diferencia del escaneo de un parametro, se conserva entera aunque tenga espacios.
 fn absolute_value(value: &str) -> Option<String> {
     let value = value.trim();
     if value.is_empty() || is_dynamic(value) || value.contains("://") {
@@ -419,17 +368,14 @@ fn absolute_value(value: &str) -> Option<String> {
 }
 
 /// Rutas absolutas embebidas en el texto de un parametro.
-///
-/// Reconoce `C:\...`, `C:/...` y `/...`. No reconoce URLs (`://`), rutas
-/// relativas ni rutas con placeholders.
+/// Reconoce `C:\...`, `C:/...` y `/...`; no URLs, rutas relativas ni placeholders.
 pub fn paths_in_text(text: &str) -> Vec<String> {
     let bytes = text.as_bytes();
     let mut out: Vec<String> = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        // Los indices se recorren byte a byte para encontrar `C:` o `/`; en un
-        // texto con tildes hay posiciones que no son frontera de caracter y
-        // cortar ahi entraria en panico.
+        // Se recorre byte a byte: en un texto no ASCII hay indices que no son
+        // frontera de caracter y cortar ahi entraria en panico.
         if !text.is_char_boundary(i) {
             i += 1;
             continue;
@@ -489,7 +435,7 @@ fn path_snippet(rest: &str) -> String {
         .to_string()
 }
 
-/// ¿La ruta esta en un arbol del sistema que no se migra con el robot?
+/// La ruta esta en un arbol del sistema que no se migra con el robot?
 fn is_system_path(path: &str) -> bool {
     let mut normalized = path.replace('\\', "/").to_ascii_lowercase();
     while normalized.starts_with("//") {
@@ -524,15 +470,12 @@ fn is_system_path(path: &str) -> bool {
             return true;
         }
     }
-    // Git-Bash monta la unidad como `/c/...`; en Windows se normaliza antes de
-    // comprobar, pero un consumidor puede pasar la forma cruda.
+    // Git-Bash monta la unidad como `/c/...`: un consumidor puede pasar la forma cruda.
     normalized.starts_with("/c/windows")
 }
 
 /// Primera carpeta de la ruta que no existe en este dispositivo.
-///
-/// Devuelve `None` si la ruta existe entera o si no se puede comprobar (un probe
-/// sin respuesta o una ruta dinamica).
+/// `None` si existe entera o no se puede comprobar (probe sin respuesta o ruta dinamica).
 fn missing_root(path: &str, probe: &dyn PathProbe) -> Option<String> {
     let (anchor, components) = split_components(path)?;
     let mut current = anchor;
@@ -607,10 +550,8 @@ fn join_component(current: &str, component: &str) -> String {
 }
 
 /// Busca un equivalente local por coincidencia del final de la ruta.
-///
-/// La hoja (ultimo componente) es obligatoria; cada componente padre que tambien
-/// coincida sube el puntaje. No se compara el principio de la ruta: la carpeta de
-/// usuario cambia entre dispositivos y no es lo que hay que remapear.
+/// La hoja es obligatoria; cada padre coincidente sube el puntaje. El principio no
+/// se compara: la carpeta de usuario cambia entre dispositivos.
 fn propose_in(roots: &[PathBuf], missing: &Path) -> Option<RemapCandidate> {
     let text = missing.to_string_lossy();
     let (_, components) = split_components(&text)?;

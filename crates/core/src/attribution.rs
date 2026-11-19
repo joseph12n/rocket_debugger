@@ -1,142 +1,62 @@
-//! Atribucion temporal de cada error al snapshot de codigo que estaba vivo.
-//!
-//! Rocketbot no escribe en el log que version del robot se ejecuto. Pero `bots`
-//! guarda una fila por cada guardado con su `created_at`, asi que el intervalo de
-//! vida de cada version es reconstruible:
+//! Atribucion de cada error al snapshot de codigo vivo en su instante.
+//! El log no registra la version ejecutada, pero `bots` guarda un `created_at`
+//! por guardado: un error pertenece al ultimo snapshot con `created_at <= t`,
+//! no al ultimo guardado.
 //!
 //! ```text
 //! snapshot_vivo(t) = argmax { created_at <= t }
 //! ```
-//!
-//! # Por que la dimension temporal es obligatoria
-//!
-//! Caso real medido en `ML_06_Legacy`: `NameError: name 'contador' is not defined`
-//! entre las 12:49:22 y las 12:50:28 del 2026-11-17. `contador` estaba
-//! inicializado en las siete versiones guardadas y el nodo que reventaba
-//! conservaba `id`, linea y parametros en todas: el fix consistio en anadir un
-//! nodo **antes**, sin tocar el nodo que fallaba. Comparar el nodo del error con
-//! el snapshot actual da "coincide" y concluye que el error sigue vivo, cuando en
-//! esos minutos lo que corria era v25/v26 y el robot actual ya era v29. Solo la
-//! atribucion temporal separa "el codigo de hoy tiene ese nodo" de "ese nodo se
-//! ejecuto cuando fallo".
-//!
-//! # Veredictos
-//!
-//! | veredicto | significado |
-//! |---|---|
-//! | [`Verdict::Vivo`] | la version viva es la ultima y el nodo sigue con los mismos parametros |
-//! | [`Verdict::PayloadCambiado`] | la version viva es la ultima, pero los parametros del nodo cambiaron |
-//! | [`Verdict::Historico`] | ocurrio en una version que ya no es la actual, o en un nodo que se retiro |
-//! | [`Verdict::Desconocido`] | no habia version viva (error anterior al primer guardado) o el nodo no existe en ningun snapshot |
-//!
-//! El motor no afirma causas (ver `docs/FINDINGS.md`): aqui solo se decide *a que
-//! codigo* pertenece el error y si ese codigo sigue siendo el actual. El *porque*
-//! lo cierra el agente leyendo el diff entre dos snapshots.
-//!
-//! # Modulo puro
-//!
-//! No toca disco ni `robot.db`: recibe los snapshots ya cargados y los errores ya
-//! agregados, y devuelve una atribucion por error. Es lo que permite reproducir el
-//! caso real en un test sin depender de `C:\Rocketbot`.
 
 use std::collections::BTreeMap;
 
 use chrono::NaiveDateTime;
 
-/// Nodo del snapshot reducido a lo unico que hace falta para atribuir un error.
-///
-/// La clave del mapa que lo contiene es el `cmd_id`, no la linea: `line` **no es
-/// unica** (Studio reutiliza la numeracion entre las ramas `children` y `else` de
-/// un Try/Catch) y direccionar por ella acaba en el nodo equivocado.
+/// Nodo del snapshot; la clave es el `cmd_id`: `line` no es unica entre ramas de un Try/Catch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeRef {
-    /// Etiqueta de linea de Studio en esa version (`2.10`).
     pub line: String,
-    /// Parametros del comando como texto de una linea (`tree::params_text`).
     pub params: String,
 }
 
-/// Un guardado de `bots` visto como mapa `cmd_id -> nodo`.
 #[derive(Debug, Clone)]
 pub struct SnapshotView {
-    /// `bots.id`: identifica el snapshot y rompe empates de fecha.
     pub id: i64,
-    /// `bots.created_at`: instante desde el que esta version esta viva.
     pub created_at: NaiveDateTime,
-    /// Nodos de esta version indexados por `cmd_id`.
     pub nodes: BTreeMap<String, NodeRef>,
 }
 
 /// Un error agregado del log, listo para atribuir.
+/// Solo `timestamp`, `cmd_id` y `payload` entran en el veredicto.
 #[derive(Debug, Clone)]
 pub struct RawError {
-    /// Instante del error. Es la unica entrada de la dimension temporal.
     pub timestamp: NaiveDateTime,
-    /// `cmd_id` que el runner escribio en el bloque `request:` del log.
     pub cmd_id: String,
-    /// Comando del nodo (`evaluateIf`, `savexlsx`...). No entra en el veredicto:
-    /// viaja con el error para que el render no tenga que volver al log.
     pub command: String,
-    /// Parametros que el runner registro al ejecutar el nodo. Se compara con
-    /// [`NodeRef::params`] para decidir si el nodo cambio.
     pub payload: String,
-    /// Texto del error. No entra en el veredicto: es la evidencia que se muestra.
     pub message: String,
-    /// Veces que se repitio. No entra en el veredicto: un error repetido no es
-    /// mas ni menos historico que uno que ocurrio una vez.
     pub occurrences: usize,
-    /// Firma estable (`signature::normalize`), copiada tal cual a la atribucion.
-    /// Agrupar por defecto es cosa de quien llama; atribuir es cosa de este modulo.
     pub signature: String,
 }
 
-/// Veredicto de la atribucion: que relacion tiene el error con el codigo de hoy.
+/// Veredicto de la atribucion: que relacion tiene el error con el codigo actual.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
-    /// La version viva es la ultima y el nodo conserva los mismos parametros.
     Vivo,
-    /// La version viva es la ultima, pero los parametros del nodo cambiaron.
     PayloadCambiado,
-    /// Ocurrio en una version que ya no es la actual (o en un nodo que se retiro).
     Historico,
-    /// No se puede atribuir: no habia version viva o el nodo no existe en el
-    /// historial.
     Desconocido,
 }
 
-/// Atribucion de un error del log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attribution {
     pub verdict: Verdict,
-    /// `id` del snapshot vivo en el instante del error. `None` cuando no hay
-    /// version a la que atribuirlo (ver [`Verdict::Desconocido`]).
     pub version: Option<i64>,
-    /// Si la version viva es el ultimo guardado.
     pub en_version_actual: bool,
-    /// Linea del nodo **en su version**. `None` si el nodo no existe en esa
-    /// version: no se inventa una linea que no se puede leer.
     pub line: Option<String>,
-    /// Firma del error, copiada sin tocar.
     pub signature: String,
 }
 
 /// Atribuye cada error al snapshot vivo en su instante y decide si sigue vivo.
-///
-/// Reglas, en este orden:
-///
-/// 1. `latest` = snapshot con mayor `created_at` (empate: mayor `id`).
-/// 2. Version viva = snapshot con mayor `created_at` menor o igual que el error.
-///    Si no hay ninguna, el error es [`Verdict::Desconocido`] sin version.
-/// 3. Si el `cmd_id` no esta en la version viva pero si en otra, el error es
-///    [`Verdict::Historico`]; si no esta en ninguna, [`Verdict::Desconocido`].
-/// 4. Si la version viva no es `latest`, el error es [`Verdict::Historico`].
-/// 5. Si la version viva es `latest`, se compara el `payload` con los `params`
-///    del nodo colapsando solo espacios: iguales (o alguno vacio) ->
-///    [`Verdict::Vivo`]; si no -> [`Verdict::PayloadCambiado`].
-/// 6. `line` es la del nodo en su version y `signature` se copia del error.
-///
-/// Siempre devuelve una atribucion por error, en el mismo orden de entrada.
-///
 /// ```
 /// use std::collections::BTreeMap;
 ///
@@ -183,8 +103,6 @@ pub struct Attribution {
 /// assert!(!atribuciones[0].en_version_actual);
 /// ```
 pub fn attribute(errors: &[RawError], snapshots: &[SnapshotView]) -> Vec<Attribution> {
-    // `latest` se calcula una vez, no una por error: el historial es el mismo
-    // para toda la lista y recalcularlo invita a que dos errores discrepen.
     let latest = latest_of(snapshots);
     errors
         .iter()
@@ -198,15 +116,10 @@ fn attribute_one(
     latest: Option<&SnapshotView>,
 ) -> Attribution {
     let Some(viva) = live_at(snapshots, error.timestamp) else {
-        // Sin guardado anterior no hay codigo al que colgar el error. Decir "v29"
-        // porque es la actual seria el falso positivo que este modulo evita.
         return desconocido(error);
     };
 
     let Some(nodo) = viva.nodes.get(&error.cmd_id) else {
-        // El nodo no esta en la version viva. Si aparece en otra version, el error
-        // pertenece a codigo que ya no corria en ese intervalo; si no aparece en
-        // ninguna, el `cmd_id` del log no se corresponde con ningun nodo.
         return if existe_en_alguna(snapshots, &error.cmd_id) {
             Attribution {
                 verdict: Verdict::Historico,
@@ -220,15 +133,9 @@ fn attribute_one(
         };
     };
 
-    // Los snapshots son filas de `bots`: `id` es la unica clave que dice "es el
-    // mismo guardado". Comparar por fecha no valdria con dos guardados en el
-    // mismo segundo.
     let en_version_actual = latest.is_some_and(|l| l.id == viva.id);
 
     let verdict = if !en_version_actual {
-        // Vivo en su momento no es vivo hoy. La comparacion de parametros solo
-        // tiene sentido contra la ultima version: en una anterior, que los
-        // parametros coincidan no cambia el hecho de que ese codigo ya no corre.
         Verdict::Historico
     } else if mismos_params(&error.payload, &nodo.params) {
         Verdict::Vivo
@@ -255,11 +162,7 @@ fn desconocido(error: &RawError) -> Attribution {
     }
 }
 
-/// Snapshot vivo en `t`: el ultimo guardado que ya existia.
-///
-/// La comparacion es `<=` y no `<`: un guardado a las 12:50:24 ya es el codigo
-/// que corre en ese instante, y el error de las 12:50:28 pertenece a esa version
-/// (caso real: v25 muere justo en v26).
+/// Snapshot vivo en `t`: el ultimo guardado con `created_at <= t` (el mismo segundo ya cuenta).
 fn live_at(snapshots: &[SnapshotView], t: NaiveDateTime) -> Option<&SnapshotView> {
     snapshots
         .iter()
@@ -267,11 +170,7 @@ fn live_at(snapshots: &[SnapshotView], t: NaiveDateTime) -> Option<&SnapshotView
         .max_by_key(|s| (s.created_at, s.id))
 }
 
-/// Ultimo guardado del historial.
-///
-/// El empate se rompe por `id` porque `created_at` solo tiene precision de
-/// segundo: dos guardados seguidos pueden compartir fecha, y el posterior es el
-/// de `id` mayor (la tabla es un historial `AUTOINCREMENT`).
+/// Ultimo guardado: el empate de `created_at` lo rompe el `id` mayor.
 fn latest_of(snapshots: &[SnapshotView]) -> Option<&SnapshotView> {
     snapshots.iter().max_by_key(|s| (s.created_at, s.id))
 }
@@ -280,25 +179,14 @@ fn existe_en_alguna(snapshots: &[SnapshotView], cmd_id: &str) -> bool {
     snapshots.iter().any(|s| s.nodes.contains_key(cmd_id))
 }
 
-/// Compara los parametros que escribio el runner con los del snapshot.
-///
-/// Solo se colapsan los espacios: el `payload` es texto formateado por el runner
-/// (con saltos de linea y separadores variables) y los `params` salen de
-/// `tree::params_text`, que ya compacta el JSON. Normalizar mas -minusculas,
-/// comillas, expresiones- esconderia justo el cambio que hay que detectar: un
-/// `{contador} < 10` reescrito a `{contador} < 3` es el defecto, no ruido.
-///
-/// Con un lado vacio no hay nada que comparar. Ante la duda se elige `Vivo`:
-/// afirmar un cambio sin evidencia es el tipo de falso positivo que hace que el
-/// informe se deje de mirar.
+/// Compara payload y params colapsando solo espacios: normalizar mas esconderia
+/// el cambio a detectar. Con un lado vacio no hay cambio.
 fn mismos_params(payload: &str, params: &str) -> bool {
     let payload = collapse_ws(payload);
     let params = collapse_ws(params);
     payload.is_empty() || params.is_empty() || payload == params
 }
 
-/// Espacios multiples (incluidos saltos de linea y tabuladores) a uno solo, sin
-/// extremos.
 fn collapse_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
