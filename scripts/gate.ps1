@@ -52,6 +52,14 @@ function Invoke-Step {
 
 Push-Location (Split-Path -Parent $PSScriptRoot)
 try {
+    # El sandbox del harness bloquea la escritura en %TEMP% para los binarios del
+    # workspace: `tempfile` y los tests fallan con EACCES. Un temp dentro del
+    # workspace evita el falso rojo; en CI no cambia nada.
+    $localTemp = Join-Path (Get-Location) 'target\tmp'
+    New-Item -ItemType Directory -Force -Path $localTemp | Out-Null
+    $env:TEMP = $localTemp
+    $env:TMP = $localTemp
+
     Invoke-Step 'fmt' @('fmt', '--all', '--', '--check')
     Invoke-Step 'clippy' @('clippy', '--all-targets', '--', '-D', 'warnings')
     if (-not $Quick) { Invoke-Step 'tests' @('test', '--all') }
