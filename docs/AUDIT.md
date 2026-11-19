@@ -9,8 +9,8 @@ sobre el workspace real (`C:\rocketbot_bots`: 16 robots en 4 dbs).
 
 ## 1. Foto
 
-41 ficheros `.rs` en `crates/`: **22.291 lineas, 3.829 de comentarios (17,2%)**. Los diez modulos
-mas cargados de comentario:
+41 ficheros `.rs` en `crates/`: **22.291 lineas, 3.829 de comentarios (17,2%)** (foto previa a la
+sanitizacion v2; el resultado de esta, en la seccion 4). Los diez modulos mas cargados de comentario:
 
 | modulo | lineas | comentarios | % |
 |---|---:|---:|---:|
@@ -159,49 +159,51 @@ conviene fiarse de que `kernel32` venga por defecto.)
 `watch.rs` (943), `exec.rs` (1343, nuevo), `registry.rs` (845): partir solo si crecen. El split
 natural de `exec` si llega el modo API es `runner.rs` / `broker.rs`.
 
-## 4. Sanitizacion de comentarios (plan v2, 2026-11-19)
+## 4. Sanitizacion de comentarios (plan v2, ejecutada 2026-11-19)
 
-El criterio v1 conservaba demasiado: quedan ~3.120 lineas de comentario en el src y 19 ficheros por
-encima del 20% (peor: `core/lib.rs` al 55%, `analysis/mod.rs` al 46%). El v2 parte de que el codigo
-se explica solo y sustituye al v1 por completo.
+El criterio v1 conservaba demasiado: quedaban 3.296 lineas de comentario en el src. El v2 parte de
+que el codigo se explica solo; se aplico a los 29 ficheros con inventario y sustituye al v1.
 
 **Criterio v2**
 
-- Doc de modulo: maximo 6 lineas —que vive aqui y UNA invariante no obvia—. Sin historia.
+- Doc de modulo: maximo 6 lineas (que vive aqui y UNA invariante no obvia). Sin historia.
 - Doc de API publica: 1-3 lineas de contrato. Campos triviales, sin doc.
 - Inline: SOLO trampas de plataforma, invariantes que no expresa un tipo y datos medidos con su
   issue. Nada de narrar pasos ni historia que un test ya fije.
-- Espanol sin acentos; identificadores en ingles; cada nota repetida se documenta UNA vez.
-- Diff solo de comentarios: `cargo test --all` identico, fmt y clippy verdes, y el filtro
-  `git diff -U0` sin ni una linea de codigo.
+- Espanol sin acentos (ASCII); identificadores en ingles; cada nota repetida se documenta UNA vez.
+- Diff solo de comentarios: ni una linea de codigo; modulo `#[cfg(test)]` y los 5 bloques de
+  doctest intactos; `cargo test --all` identico; fmt y clippy verdes.
 
-**Inventario medido (2026-11-19) y objetivo por fichero** (lineas de comentario -> objetivo):
+**Resultado medido** (lineas de comentario en el fichero completo; objetivo -> real):
 
-| Grupo | Ficheros (actual -> objetivo) | Corte |
-|---|---|---|
-| PR1 cabeceras | core/lib 36->12, analysis/mod 100->40, pack 62->25, db 73->35, pathscan 34->15, versions 21->10, tree 22->10 | ~200 |
-| PR2 | attribution 192->80, diff 144->60 | ~196 |
-| PR3 | registry 186->90, review 101->50 | ~147 |
-| PR4 | graph 192->90, rules 129->60 | ~171 |
-| PR5 | logs 199->95, redact 199->95 | ~208 |
-| PR6 | render 144->70, signature 108->55, exec 192->95 | ~224 |
-| PR7 | analysis/errors 117->55, analysis/workspace 115->55 | ~122 |
-| PR8 mcp | lib 111->40, http 166->80, protocol 58->25, main 35->15, tools 114->60 | ~274 |
-| PR9 cli | main 104->45, review 58->30, watch 178->70 | ~195 |
+| Grupo | Ficheros | Objetivo | Real | PR |
+|---|---|---:|---:|---:|
+| cabeceras | core/lib, analysis/mod, pack, db, pathscan, versions, tree | 147 | 137 | #49 |
+| atribucion | attribution, diff, paths | 190 | 187 | #50 |
+| registro | registry, core/review | 140 | 119 | #51 |
+| grafo | graph, rules | 150 | 101 | #52 |
+| logs | logs, redact | 190 | 173 | #53 |
+| render y firmas | render, signature | 125 | 89 | #54 |
+| ejecucion | exec | 95 | 71 | #55 |
+| informes | analysis/errors, analysis/workspace | 110 | 104 | #56 |
+| mcp contrato | mcp/lib, protocol, main | 80 | 63 | #57 |
+| mcp http y tools | mcp/http, mcp/tools | 140 | 100 | #58 |
+| cli | cli/main, review, watch | 145 | 133 | #59 |
 
-Total: 3.120 -> ~1.440 lineas de comentario (-54%). No se tocan los tests (densidad <=12%) ni lo que
-ya cumple su objetivo. Cada PR va en rama `chore/comments-<grupo>`, gate local y `pr.ps1 -Merge`
-desde la rama (fast-forward, conserva la firma; el boton de GitHub la pierde). Tras cada grupo se
-actualiza esta tabla con el numero real.
+Total: **3.296 -> 1.277 lineas de comentario (-61%)**, por debajo del objetivo de 1.512. Los tests
+que viven en los `#[cfg(test)]` no se tocaron (su densidad ya era <=12%).
 
-El plan vive tambien en engram (`plan/sanitizacion-comentarios` + procedimiento
-`sanitizacion-comentarios-rocketdebugger`) para retomarlo en otra sesion sin releer nada.
+Cada PR fue una rama `chore/comments-*` con gate local verde (fmt/clippy/test), checks de CI verdes
+(ubuntu test + windows build/test + SonarCloud) y merge fast-forward desde la rama (firma SSH
+conservada). PR6 y PR8 se partieron en dos por el tope de 400 lineas cambiadas, de ahi los 11 PRs;
+las 11 ramas quedan en el remoto, no se borran. El plan y las reglas siguen en engram
+(`plan/sanitizacion-comentarios` + procedimiento `sanitizacion-comentarios-rocketdebugger`).
 
 ## 5. Roadmap sugerido
 
 1. Landing de la cadena (#29 -> #32), del tope hacia la base. Hecho.
-2. Sanitizacion v2 por grupos PR1-PR9 (seccion 4): el criterio v1 quedo corto y la tabla mide lo
-   que falta. Pendiente de ejecutar.
+2. Sanitizacion v2 por grupos PR1-PR9: hecha en 11 PRs (#49-#59), 3.296 -> 1.277 lineas de
+   comentario. La tabla de la seccion 4 conserva objetivo y resultado real.
 3. H3 (trivial) y H2 (extractor unico) con sus tests.
 4. H1 partir `analysis.rs`; luego H7 testkit, H6 job de tests en Windows, H4 variantes.
 5. H5 solo si la bandeja crece.
