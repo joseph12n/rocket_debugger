@@ -21,8 +21,9 @@
   Rama destino. Por defecto, main.
 
 .PARAMETER MaxLines
-  Tope de lineas de codigo cambiadas (anadidas + borradas). Por defecto 400; no
-  cuentan `docs/`, `fixtures/`, `*.md` ni `Cargo.lock`. Si el cambio no cabe, se
+  Tope de lineas de codigo **cambiadas** (el movimiento puro no cuenta: una linea
+  borrada que reaparece identica en otro fichero es un traslado). Por defecto 400;
+  no cuentan `docs/`, `fixtures/`, `*.md` ni `Cargo.lock`. Si el cambio no cabe, se
   parte en PRs mas pequenos.
 
 .PARAMETER Force
@@ -69,19 +70,38 @@ if (git status --porcelain) { Fail 'hay cambios sin commitear' }
 git fetch -q origin $Base
 if ($LASTEXITCODE -ne 0) { Fail "no se pudo actualizar origin/${Base}" }
 
-# Tope de tamano: sin docs ni markdown ni Cargo.lock, sumando anadidas y borradas.
-$changed = 0
-foreach ($line in (git diff --numstat "origin/${Base}...HEAD")) {
-    if (-not $line.Trim()) { continue }
-    $parts = $line -split "`t"
-    $path = $parts[2]
-    if ($path -match '^(docs|fixtures)/' -or $path -match '\.md$' -or $path -eq 'Cargo.lock') { continue }
-    $changed += [int]$parts[0] + [int]$parts[1]
+# Tope de tamano. Cuenta lineas **cambiadas**, no movidas: un fichero que se parte
+# en modulos aparece como cientos de altas y bajas identicas y no es revision real.
+# Sin docs, fixtures, markdown ni Cargo.lock; las lineas en blanco no cuentan.
+$removed = @{}
+$added = New-Object System.Collections.Generic.List[string]
+$file = ''
+foreach ($line in (git diff --unified=0 "origin/${Base}...HEAD")) {
+    if ($line -like '+++ b/*') { $file = $line.Substring(6); continue }
+    if ($line -like '--- a/*') { continue }
+    if ($file -match '^(docs|fixtures)/' -or $file -match '\.md$' -or $file -eq 'Cargo.lock') { continue }
+    if ($line.StartsWith('+') -and -not $line.StartsWith('+++')) {
+        $text = $line.Substring(1)
+        if ($text.Trim()) { $added.Add($text) }
+    } elseif ($line.StartsWith('-') -and -not $line.StartsWith('---')) {
+        $text = $line.Substring(1)
+        if (-not $text.Trim()) { continue }
+        if ($removed.ContainsKey($text)) { $removed[$text]++ } else { $removed[$text] = 1 }
+    }
 }
+$changed = 0
+foreach ($text in $added) {
+    if ($removed.ContainsKey($text) -and $removed[$text] -gt 0) {
+        $removed[$text]--
+    } else {
+        $changed++
+    }
+}
+foreach ($text in $removed.Keys) { $changed += $removed[$text] }
 if ($changed -gt $MaxLines) {
     Fail "el PR cambia $changed lineas de codigo (tope $MaxLines): parte el trabajo en PRs mas pequenos"
 }
-Write-Host "==> diff: $changed/$MaxLines lineas de codigo" -ForegroundColor Cyan
+Write-Host "==> diff: $changed/$MaxLines lineas cambiadas" -ForegroundColor Cyan
 
 Write-Host "==> push $branch" -ForegroundColor Cyan
 $pushArgs = @('push', '--set-upstream', 'origin', $branch)

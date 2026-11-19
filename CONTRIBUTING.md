@@ -51,15 +51,16 @@ herramientas de IA, ni en el mensaje ni en el codigo.
 
 ## Tamano de PR
 
-Tope: **400 lineas de codigo cambiadas**, sumando anadidas y borradas. No cuentan `docs/`,
-`fixtures/`, los `*.md` ni `Cargo.lock`. Se mide con:
+Tope: **400 lineas de codigo cambiadas**. No cuentan `docs/`, `fixtures/`, los `*.md`,
+`Cargo.lock` ni el **movimiento puro**: una linea que se borra y reaparece identica en otro fichero
+es un traslado, no una revision. Se mide con:
 
 ```bash
-git diff --numstat origin/main...HEAD
+git diff --numstat origin/main...HEAD   # foto rapida: suma anadidas y borradas
 ```
 
-`pr.ps1` hace la misma cuenta (tope 400) y no sube si se pasa. Si el cambio no cabe, se parte
-en PRs apilados por tema, no en uno gigante.
+`pr.ps1` calcula el numero que vale (descuenta las lineas movidas) y no sube si se pasa del tope.
+Si el cambio no cabe, se parte en PRs apilados por tema, no en uno gigante.
 
 ## Firma de commits
 
