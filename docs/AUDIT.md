@@ -203,7 +203,8 @@ las 11 ramas quedan en el remoto, no se borran. El plan y las reglas siguen en e
 
 Politica final: no queda ningun comentario en ningun fichero de codigo o configuracion (Rust de
 src y tests, `Cargo.toml`, YAML de CI, scripts PowerShell, assets de la UI y `.gitattributes`). Se
-eliminaron **1.904 lineas de comentario en 58 ficheros**; el codigo quedo identico en
+eliminaron **1.921 lineas con comentario en 56 ficheros** (1.915 de linea completa y 6 al final de
+una linea de codigo); el codigo quedo identico en
 comportamiento: los 5 ejemplos de doctest eran redundantes con tests unitarios ya existentes y la
 ayuda de clap paso a atributos `help`/`about`. Gate local (fmt/clippy/test) y CI verdes.
 Excepciones: `Cargo.lock` es autogenerado y conserva su cabecera (cargo la repone en cada
