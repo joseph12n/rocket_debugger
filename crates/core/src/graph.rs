@@ -1,41 +1,15 @@
 //! Grafo de llamadas entre robots y contrato implicito de variables.
 //!
-//! `execRocketBotDB` no arranca un proceso nuevo: ejecuta el hijo dentro del
-//! interprete del padre, asi que el hijo ve **todas** las variables del padre (y
-//! puede pisar el valor heredado si declara una con el mismo nombre). Ese
-//! contrato no esta escrito ni en el robot ni en el JSON: solo existe en la
-//! documentacion del comando, y es la razon por la que una regla de "variable
-//! declarada y nunca usada" se equivoca en un orquestador.
-//!
-//! Medido sobre 28 robots reales: 86 falsos positivos de 89 en un orquestador con
-//! 8 hijos, porque sus variables no estan muertas: son la superficie de API de
-//! los subrobots. El grafo no es una feature opcional, es un requisito de
-//! correccion de las reglas.
-//!
-//! Los pasos estan separados para probarlos y reutilizarlos: [`reads_and_writes`]
-//! (uso de variables), [`build_edges`] (quien llama a quien) y [`contracts`] /
-//! [`unused_declared`] (que provee el padre en la llamada, que lee el hijo y nadie
-//! le da, y que variables del padre siguen sin uso contando a los hijos).
-//!
-//! Un hijo inexistente **se omite** en [`build_edges`] (sin hechos no hay contrato)
-//! y la llamada sale en [`missing_calls`]: en runtime el runner no resuelve el
-//! nombre y el padre falla. Si solo existe en otras dbs, la arista se marca
-//! [`Edge::ambiguous`].
-//!
-//! El workspace son varias dbs y el robot suele estar copiado:
-//! [`analysis::load_workspace`] deduplica por contenido y guarda las etiquetas
-//! descartadas en [`RobotFacts::also_in`], porque el runner busca al hijo en la db
-//! del padre y una copia identica cuenta como presente.
+//! `execRocketBotDB` ejecuta al hijo en el interprete del padre, asi que el hijo
+//! ve todas sus variables y puede pisarlas: un contrato que no esta escrito en el
+//! robot y que hace que "variable declarada y sin uso" falle en un orquestador.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::tree::FlatNode;
 
-/// Variables que inyecta el entorno de Rocketbot: no las declara el robot.
-///
-/// Se excluyen de las lecturas porque aparecen en casi cualquier `params` y no
-/// dicen nada de la interfaz del robot. Contarlas convertiria cada nodo en una
-/// lectura y el contrato en ruido.
+/// Variables que inyecta el entorno de Rocketbot: no las declara el robot y se
+/// excluyen de las lecturas para no convertir el contrato en ruido.
 const RUNTIME_VARS: [&str; 6] = [
     "rb_home",
     "base_path",
@@ -49,60 +23,37 @@ fn is_runtime(name: &str) -> bool {
     RUNTIME_VARS.contains(&name)
 }
 
-/// Hechos de un robot ya extraidos de su snapshot: lo minimo para analizar el
-/// grafo sin volver a tocar la db.
+/// Hechos de un robot ya extraidos de su snapshot.
 #[derive(Debug, Clone)]
 pub struct RobotFacts {
-    /// Etiqueta de la db donde vive el robot. Distingue homologos: el mismo
-    /// nombre puede existir en varias dbs con contenido distinto.
     pub db: String,
-    /// Otras dbs del workspace donde vive una copia **identica** de este robot.
-    ///
-    /// El dedupe por contenido deja un solo hecho, pero el runner resuelve el
-    /// nombre contra la db del padre: si esa db era la copia descartada, la
-    /// arista saldria ambigua sin serlo. Estas etiquetas son las que permiten
-    /// resolverla. Un homologo con contenido distinto **no** va aqui: es otro
-    /// hecho y se conserva aparte.
+    /// Dbs donde vive una copia identica (dedupe por contenido): el runner busca
+    /// al hijo en la db del padre y una copia identica resuelve igual.
     pub also_in: Vec<String>,
     pub name: String,
     pub nodes: Vec<FlatNode>,
-    /// Variables del panel del robot (`project.vars`), no las que aparecen en el
-    /// flujo. El contrato que hereda un hijo es el panel del padre: una variable
-    /// declarada a `null` tambien existe en el namespace del hijo.
+    /// Variables declaradas en el panel (`project.vars`); el hijo las hereda
+    /// todas, incluidas las declaradas a `null`.
     pub declared: BTreeSet<String>,
-    /// Valor declarado de cada variable, para las comprobaciones que miran el
-    /// contenido (rutas migradas). El contrato sigue usando solo `declared`.
+    /// Valor declarado de cada variable, para comprobaciones de contenido.
     pub vars: Vec<crate::paths::VarValue>,
 }
 
 impl RobotFacts {
-    /// Etiquetas de db donde vive el hecho: la primaria primero y despues las
-    /// copias identicas. El orden importa para que la resolucion prefiera la db
-    /// del hecho y los listados sean deterministas.
+    /// Etiquetas de db del hecho: la primaria primero y despues las copias.
     pub fn db_labels(&self) -> impl Iterator<Item = &str> {
         std::iter::once(self.db.as_str()).chain(self.also_in.iter().map(String::as_str))
     }
 
     /// `true` si el hecho vive en esa db, como primaria o como copia identica.
-    ///
-    /// Es la pregunta del runner ("este nombre existe en mi db?") y no la del
-    /// dedupe ("cual es la etiqueta del hecho que quedo?"). Confundirlas marca
-    /// como ambigua una llamada que el runner resuelve sin problema.
     pub fn lives_in(&self, db: &str) -> bool {
         self.db == db || self.also_in.iter().any(|label| label == db)
     }
 }
 
-/// Arista padre -> hijo, una por nodo `execRocketBotDB`.
-///
-/// `line` es la linea del nodo de llamada **en el padre** (puede repetirse en
-/// robots con Try/Catch: `line` no es direccion unica).
-///
-/// `same_db` es la resolucion preferente: el runner busca el nombre en la db del
-/// padre. Cuenta tambien una copia identica en esa db ([`RobotFacts::also_in`]),
-/// porque el contenido es el mismo y el nombre resuelve. `ambiguous` avisa de que
-/// solo habia homologos en otras dbs, asi que la arista es la mejor conjetura y
-/// el consumidor no debe tratarla como certeza.
+/// Arista padre -> hijo, una por nodo `execRocketBotDB`; `line` es la del nodo
+/// en el padre y no es unica (Try/Catch). El runner resuelve el nombre en la db
+/// del padre: si el hijo solo existe fuera, la arista es ambigua, no inexistente.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Edge {
     pub parent: String,
@@ -114,13 +65,8 @@ pub struct Edge {
     pub ambiguous: bool,
 }
 
-/// Contrato implicito de una llamada.
-///
-/// `provided` es lo que el padre ofrece en esa linea: sus declaradas (heredar el
-/// namespace incluye una variable declarada aunque siga a `null`) mas las que
-/// escribe antes de la llamada. `missing` es lo que el hijo lee y nadie le da: ni
-/// el padre, ni una declaracion propia, ni una escritura propia, ni el runtime.
-/// Eso es exactamente lo que fallaria en runtime con `NameError`.
+/// Contrato implicito de una llamada: `provided` son las declaradas mas las
+/// escritas antes de la llamada; `missing`, lo que el hijo lee y nadie le da.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Contract {
     pub parent: String,
@@ -130,11 +76,7 @@ pub struct Contract {
     pub missing: Vec<String>,
 }
 
-/// Uso de variables de un robot.
-///
-/// Devuelve dos mapas `variable -> lineas` (en orden de flujo y sin repetir linea
-/// por variable): lecturas de placeholders en `params` y escrituras de
-/// `write_var`. Las variables de runtime no cuentan como lectura.
+/// Uso de variables de un robot: `variable -> lineas` de lecturas y escrituras.
 pub fn reads_and_writes(
     nodes: &[FlatNode],
 ) -> (BTreeMap<String, Vec<String>>, BTreeMap<String, Vec<String>>) {
@@ -158,22 +100,13 @@ pub fn reads_and_writes(
 
 fn push_line(map: &mut BTreeMap<String, Vec<String>>, var: &str, line: &str) {
     let lines = map.entry(var.to_string()).or_default();
-    // Un nodo puede citar `{x}` dos veces en el mismo `params`; para el contrato
-    // es una sola lectura en esa linea.
     if !lines.iter().any(|known| known == line) {
         lines.push(line.to_string());
     }
 }
 
-/// Nombres `{var}` de un texto, sin regex.
-///
-/// El formato es un `{`, un identificador y un `}`; una dependencia nueva solo
-/// para esto no se justifica.
-///
-/// Cuando el contenido no es un identificador se avanza **un** caracter y no
-/// hasta el `}`: los `params` son a veces JSON (`{"url":"{url}"}`) y ahi el primer
-/// `}` no cierra el placeholder sino la llave del objeto. Retroceder de uno en uno
-/// deja que el escaneo encuentre los placeholders anidados.
+/// Nombres `{var}` de un texto. Si el contenido no es un identificador se avanza
+/// un caracter: en JSON (`{"url":"{url}"}`) el primer `}` cierra el objeto.
 fn placeholders(text: &str) -> Vec<&str> {
     let bytes = text.as_bytes();
     let mut out = Vec::new();
@@ -198,9 +131,6 @@ fn placeholders(text: &str) -> Vec<&str> {
 }
 
 /// Identificador simple: empieza por letra o `_` y sigue con alfanumericos o `_`.
-///
-/// Se descarta todo lo demas (expresiones, claves JSON, `obj.atributo`): no es una
-/// variable que el contrato pueda proveer con una sustitucion textual.
 fn is_var_name(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
@@ -210,36 +140,22 @@ fn is_var_name(s: &str) -> bool {
     chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
-/// Clave de comparacion de lineas.
-///
-/// `line` es una ruta de indices (`2.10.1`), no un decimal: `2.10` se ejecuta
-/// **despues** de `2.9` y antes que `2.10.1`. Comparar como texto invierte el
-/// primer caso, y ese es justo el error que decide si una variable estaba provista
-/// antes de una llamada. Un tramo no numerico cuenta como 0: solo aparece en datos
-/// mal formados y asi el orden sigue siendo total.
+/// Clave de comparacion de lineas: son rutas de indices, no decimales (`2.10` va
+/// despues de `2.9`). Un tramo no numerico cuenta como 0 y el orden sigue total.
 fn line_key(line: &str) -> Vec<u64> {
     line.split('.')
         .map(|part| part.trim().parse().unwrap_or(0))
         .collect()
 }
 
-/// `a` se ejecuta antes que `b` si su ruta de indices es menor. Una ruta que es
-/// prefijo de otra va antes: `2.10` < `2.10.1`.
+/// `a` se ejecuta antes que `b`; una ruta prefijo va antes (`2.10` < `2.10.1`).
 fn is_before(a: &str, b: &str) -> bool {
     line_key(a) < line_key(b)
 }
 
-/// Construye las aristas del grafo.
-///
-/// Una arista por nodo `execRocketBotDB`; el nombre del hijo es el `params`
-/// recortado de comillas (el selector de Studio lo guarda tal cual y algunos
-/// exports lo citan).
-///
-/// Resolucion: se prefiere una db que el padre tambien vea (la suya, o una copia
-/// identica del hijo en ella, ver [`RobotFacts::also_in`]); si solo existe en dbs
-/// ajenas se emite una arista por cada homologo, todas marcadas [`Edge::ambiguous`]
-/// en orden de hechos. Los nombres que no existen en ninguna db no generan arista
-/// ([`missing_calls`] avisa de ellos) y los `params` vacios tampoco.
+/// Una arista por nodo `execRocketBotDB`, resolviendo el nombre del hijo en la db
+/// del padre (o en una copia identica); los hijos solo en dbs ajenas generan
+/// aristas `ambiguous` y los inexistentes se omiten y salen en [`missing_calls`].
 pub fn build_edges(facts: &[RobotFacts]) -> Vec<Edge> {
     let mut edges = Vec::new();
 
@@ -252,19 +168,13 @@ pub fn build_edges(facts: &[RobotFacts]) -> Vec<Edge> {
                 continue;
             };
 
-            // Los hechos del hijo, no sus etiquetas: el dedupe deja un hecho por
-            // contenido y es `also_in` quien conserva las demas dbs.
             let candidates: Vec<&RobotFacts> =
                 facts.iter().filter(|fact| fact.name == child).collect();
             if candidates.is_empty() {
-                // Hijo inexistente: no hay contrato que calcular. [`missing_calls`]
-                // es quien avisa de la llamada (ver doc del modulo).
                 continue;
             }
 
             match shared_db(parent, &candidates) {
-                // El nombre existe en una db que el padre tambien ve: resolucion
-                // preferente, igual que hace el runner.
                 Some(db) => edges.push(Edge {
                     parent: parent.name.clone(),
                     child,
@@ -275,8 +185,6 @@ pub fn build_edges(facts: &[RobotFacts]) -> Vec<Edge> {
                     ambiguous: false,
                 }),
                 None => {
-                    // Solo homologos en dbs ajenas: una arista por candidato, todas
-                    // marcadas `ambiguous` porque no se puede elegir.
                     for fact in candidates {
                         edges.push(Edge {
                             parent: parent.name.clone(),
@@ -296,19 +204,12 @@ pub fn build_edges(facts: &[RobotFacts]) -> Vec<Edge> {
     edges
 }
 
-/// Db donde el padre encontraria al hijo, si comparten alguna.
-///
-/// La db del padre manda: es donde el runner busca el nombre. Si el hijo solo
-/// comparte una copia identica (dos dbs con la misma copia del padre), esa copia
-/// resuelve igual porque el contenido es el mismo. Sin db compartida devuelve
-/// `None`: solo hay homologos en otras dbs y la arista no se puede afirmar.
+/// Db compartida donde el padre encontraria al hijo; la db del padre manda.
 fn shared_db(parent: &RobotFacts, candidates: &[&RobotFacts]) -> Option<String> {
     if candidates.iter().any(|fact| fact.lives_in(&parent.db)) {
         return Some(parent.db.clone());
     }
 
-    // Cualquier otra db compartida, la menor por etiqueta para que dos
-    // ejecuciones produzcan el mismo grafo.
     let mut shared: BTreeSet<&str> = BTreeSet::new();
     for fact in candidates {
         for db in fact.db_labels() {
@@ -321,9 +222,6 @@ fn shared_db(parent: &RobotFacts, candidates: &[&RobotFacts]) -> Option<String> 
 }
 
 /// Llamada a un robot que no existe en ninguna db del workspace.
-///
-/// `line` es la linea del nodo de llamada **en el padre**, que es lo unico que
-/// permite localizarla: sin ella el aviso no se puede ni mirar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MissingCall {
     pub parent: String,
@@ -332,13 +230,8 @@ pub struct MissingCall {
     pub child: String,
 }
 
-/// Llamadas cuyo destino no existe en **ninguna** db del workspace.
-///
-/// [`build_edges`] las omite porque sin los hechos del hijo no hay contrato que
-/// calcular, y esa omision silenciosa era el punto ciego: en runtime el runner no
-/// resuelve el nombre y el padre falla. Se devuelven con la linea para que el
-/// aviso sea accionable y sin deduplicar (`line` no es unico en robots con
-/// Try/Catch: agrupar es decision del consumidor).
+/// Llamadas cuyo destino no existe en ninguna db del workspace. [`build_edges`]
+/// las omite (sin hechos no hay contrato); se devuelven con la linea del padre.
 pub fn missing_calls(facts: &[RobotFacts]) -> Vec<MissingCall> {
     let mut out = Vec::new();
 
@@ -350,10 +243,8 @@ pub fn missing_calls(facts: &[RobotFacts]) -> Vec<MissingCall> {
             let Some(child) = child_name(&node.params) else {
                 continue;
             };
-            // Basta el nombre: el runner falla igual si el hijo no esta en su db,
-            // pero aqui la pregunta es si el robot existe en algun sitio del
-            // workspace. Si existe solo en otra db, la arista es ambigua, no
-            // inexistente.
+            // Basta el nombre: si el hijo existe solo en otra db, la arista es
+            // ambigua, no inexistente.
             if facts.iter().any(|fact| fact.name == child) {
                 continue;
             }
@@ -391,10 +282,7 @@ fn strip_quotes(s: &str) -> &str {
     s
 }
 
-/// Calcula el contrato de cada arista.
-///
-/// Las aristas cuyo padre o hijo no estan en `facts` se omiten: sin los hechos de
-/// los dos lados no hay contrato que calcular.
+/// Calcula el contrato de cada arista; omite las que no tienen hechos de ambos lados.
 pub fn contracts(facts: &[RobotFacts], edges: &[Edge]) -> Vec<Contract> {
     let mut out = Vec::with_capacity(edges.len());
 
@@ -406,9 +294,8 @@ pub fn contracts(facts: &[RobotFacts], edges: &[Edge]) -> Vec<Contract> {
             continue;
         };
 
-        // Declaradas + escritas antes de la llamada. El orden de escritura importa:
-        // una variable asignada despues de la llamada no existe todavia para el
-        // hijo, y eso es lo que distingue un contrato roto de uno correcto.
+        // Declaradas + escritas antes de la llamada: una variable asignada
+        // despues no existe todavia para el hijo.
         let mut provided: BTreeSet<String> = parent.declared.clone();
         for node in &parent.nodes {
             let Some(var) = &node.write_var else {
@@ -444,14 +331,7 @@ pub fn contracts(facts: &[RobotFacts], edges: &[Edge]) -> Vec<Contract> {
     out
 }
 
-/// Busca los hechos de un robot por `(db, nombre)` y cae al nombre suelto.
-///
-/// La caida sirve cuando el consumidor reconstruye aristas a mano o cuando las
-/// etiquetas de db no coinciden literalmente; con homologos en varias dbs la
-/// resolucion exacta sigue ganando. Entre dos homologos gana el que **vive** en
-/// esa db (es el caso de una copia identica deduplicada, cuya etiqueta primaria es
-/// otra): sin ese paso, la caida por nombre podria devolver el homologo con
-/// contenido distinto y calcular su contrato.
+/// Busca los hechos por `(db, nombre)` y cae al nombre suelto.
 fn find_fact<'a>(facts: &'a [RobotFacts], db: &str, name: &str) -> Option<&'a RobotFacts> {
     facts
         .iter()
@@ -464,24 +344,14 @@ fn find_fact<'a>(facts: &'a [RobotFacts], db: &str, name: &str) -> Option<&'a Ro
         .or_else(|| facts.iter().find(|fact| fact.name == name))
 }
 
-/// Variables declaradas que ni se leen, ni se escriben, ni las lee un hijo.
-///
-/// Es el filtro que elimina los 86 falsos positivos del orquestador: una variable
-/// puede no aparecer en ningun `params` del padre y aun asi ser la entrada de un
-/// subrobot. Solo se devuelven los robots con al menos una variable muerta; un
-/// mapa lleno de vectores vacios obligaria al consumidor a filtrar sin aportar
-/// nada.
-///
-/// La salida va por nombre de robot, no por `(db, nombre)`: si el mismo nombre
-/// aparece en varias dbs se unen sus hechos y sus hijos, de modo que una variable
-/// usada en cualquiera de las copias no se marca (preferimos no marcarla a
-/// inventar un hallazgo).
+/// Variables declaradas que nadie lee ni escribe, contando a los hijos, por
+/// nombre de robot. Solo se devuelven los robots con al menos una muerta.
 pub fn unused_declared(
     facts: &[RobotFacts],
     child_contracts: &[Contract],
 ) -> BTreeMap<String, Vec<String>> {
-    // Lecturas de los hijos por robot padre. Se acumula el nombre de la variable,
-    // no la linea: el mismo hijo puede llamarse varias veces y el uso es el mismo.
+    // Lecturas de los hijos por robot padre: el uso es el mismo aunque el hijo
+    // se llame varias veces.
     let mut read_by_child: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for contract in child_contracts {
         for child in facts.iter().filter(|fact| fact.name == contract.child) {
@@ -522,8 +392,6 @@ pub fn unused_declared(
         let from_child = read_by_child.get(robot);
         let mut dead = BTreeSet::new();
         for var in declared {
-            // Las runtime no se pueden "eliminar" y sus lecturas se excluyen a
-            // proposito: contarlas aqui reinyectaria el ruido que quita el grafo.
             if is_runtime(var) {
                 continue;
             }

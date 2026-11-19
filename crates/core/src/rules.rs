@@ -1,22 +1,9 @@
 //! Motor de reglas: hallazgos accionables sobre un flujo ya aplanado.
 //!
-//! Las reglas son **datos** (`rules/builtin.json`), no codigo: id, severidad,
-//! alcance, condicion y arreglo. El evaluador interpreta el id y rellena el
-//! mensaje con lo que ve en el robot; el `fix` sale del JSON, de modo que afinar
-//! una recomendacion no obliga a tocar Rust.
-//!
-//! El producto son "unos pocos hallazgos", no un informe. Por eso todo se ordena
-//! por severidad y se trunca: un motor que enumera cada detalle que ve se deja de
-//! leer a la semana.
-//!
-//! Un hallazgo no vale lo mismo que otro segun donde apunte: los **accionables**
-//! senalan una linea con un defecto concreto (una colision, un catch vacio, una
-//! ruta absoluta) y se arreglan leyendo esa linea; los de **higiene** describen
-//! un habito del robot entero ("sin trycatch", "sin else", "anidado", "variables
-//! muertas") y son ciertos pero genericos: en las dbs reales son la mayoria y un
-//! lector humano los ignora. Separarlos en dos cubos ([`evaluate_split`]) deja que
-//! el render les de secciones y topes distintos sin tocar la severidad, que sigue
-//! midiendo el dano y no la accionabilidad.
+//! Las reglas son **datos** (`rules/builtin.json`), no codigo: el evaluador
+//! interpreta el `id` y el `fix` sale del JSON. El producto son unos pocos
+//! hallazgos ordenados por severidad y truncados, repartidos en accionables
+//! (defecto en una linea concreta) e higiene (habito del robot entero).
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,17 +14,16 @@ use serde::{Deserialize, Deserializer};
 use crate::pathscan;
 use crate::tree::{self, Branch, FlatNode};
 
-/// Hallazgos que devuelve [`evaluate`] como maximo. Es el presupuesto de
-/// atencion: cinco cosas que arreglar valen mas que noventa que ignorar.
+/// Hallazgos maximos que devuelve [`evaluate`]: presupuesto de atencion.
 pub const MAX_FINDINGS: usize = 5;
 
-/// Niveles de anidamiento (depth 0 cuenta como 1) a partir de los cuales el
-/// flujo cuesta seguirlo.
+/// Anidamiento a partir del cual el flujo cuesta seguirlo (depth 0 cuenta 1).
 pub const DEPTH_LIMIT: usize = 4;
 
 /// JSON embebido: el binario no depende de rutas de instalacion.
 const BUILTIN_RULES: &str = include_str!("../rules/builtin.json");
 
+/// Severidad de una regla: un valor inventado en el JSON no parsea.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Alta,
@@ -46,9 +32,7 @@ pub enum Severity {
 }
 
 impl Severity {
-    /// No se puede derivar `Ord`: el orden de las variantes lo fija el contrato
-    /// (`Alta, Media, Baja`) y aqui Alta tiene que ser la mayor. El rango
-    /// explicito evita que un reordenamiento del enum cambie la prioridad.
+    /// Rango explicito: Alta es la mayor sin depender del orden del enum.
     fn rank(self) -> u8 {
         match self {
             Severity::Baja => 0,
@@ -57,11 +41,7 @@ impl Severity {
         }
     }
 
-    /// Etiqueta para el render, en espanol y en minusculas (`alta`, `media`, `baja`).
-    ///
-    /// El `Debug` del enum es ingles por convencion de codigo, pero el pack lo lee
-    /// un agente junto al resto del markdown, que esta en espanol; derivarlo del
-    /// enum en el render multiplicaria el `match` en cada modulo que lo muestre.
+    /// Etiqueta del render en espanol (`alta`, `media`, `baja`).
     pub fn severity_label(&self) -> &'static str {
         match self {
             Severity::Alta => "alta",
@@ -98,27 +78,16 @@ impl<'de> Deserialize<'de> for Severity {
 }
 
 /// Eje de la separacion util: si el defecto se arregla leyendo una linea.
-///
-/// El criterio objetivo es "tiene linea concreta", pero se declara por **regla**
-/// en `rules/builtin.json` y no se deduce del `line` de cada hallazgo: el render
-/// necesita saber el cubo para elegir seccion y tope antes de que exista la
-/// evaluacion, y una regla no debe cambiar de cubo porque hoy no dispare. Los
-/// accionables siempre llevan linea (hay test que lo fija); `IF_SIN_ELSE` es
-/// higiene aunque apunte a una linea, porque el defecto es el habito repetido y
-/// no ese `if` en concreto.
+/// Se declara por regla en `rules/builtin.json`, no se deduce del `line`:
+/// `IF_SIN_ELSE` apunta a una linea y aun asi es higiene.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// Senala una linea con un defecto concreto: se arregla en el sitio.
     Accionable,
-    /// Afecta al robot entero: cierto, pero generico y masivo.
     Higiene,
 }
 
 impl Kind {
-    /// Etiqueta para el render, en espanol y en minusculas (`accionable`, `higiene`).
-    ///
-    /// Misma razon que [`Severity::severity_label`]: derivarla del `Debug` en cada
-    /// modulo que muestre hallazgos multiplicaria el `match`.
+    /// Etiqueta del render en espanol (`accionable`, `higiene`).
     pub fn label(&self) -> &'static str {
         match self {
             Kind::Accionable => "accionable",
@@ -129,8 +98,6 @@ impl Kind {
 
 impl<'de> Deserialize<'de> for Kind {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        // Misma tolerancia que `Severity`: el JSON lo edita una persona y un
-        // espacio o una mayuscula de mas no deben tumbar el motor.
         let raw = String::deserialize(deserializer)?;
         match raw.trim().to_ascii_lowercase().as_str() {
             "accionable" => Ok(Kind::Accionable),
@@ -142,17 +109,13 @@ impl<'de> Deserialize<'de> for Kind {
     }
 }
 
-/// Una regla declarada en `rules/builtin.json`.
-///
-/// `scope` y `when` son metadata para la UI/CLI: el evaluador decide con `id` y
-/// redacta el mensaje con los datos del robot. `fix` es el texto que se copia en
-/// cada hallazgo.
+/// Una regla declarada en `rules/builtin.json`. `scope` y `when` son metadata;
+/// el evaluador decide por `id` y `fix` es el texto que se copia al hallazgo.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RuleSpec {
     pub id: String,
     pub severity: Severity,
-    /// Cubo al que pertenece la regla. Obligatorio: un `kind` ausente es un fallo
-    /// ruidoso al parsear (y en el primer test), no una regla mal clasificada.
+    /// Cubo al que pertenece la regla. Obligatorio: un `kind` ausente no parsea.
     pub kind: Kind,
     pub scope: String,
     pub when: String,
@@ -165,44 +128,26 @@ pub struct Finding {
     pub severity: Severity,
     /// Cubo heredado de la regla: el render agrupa y trunca por aqui.
     pub kind: Kind,
-    /// Linea de Studio del nodo implicado. Vacia cuando el hallazgo afecta al
-    /// robot entero (`SIN_TRY`, `ANIDAMIENTO`, `VAR_NO_USADA`).
-    ///
-    /// No es el eje de [`Kind`]: las accionables siempre traen linea, pero
-    /// `IF_SIN_ELSE` trae una y aun asi es higiene.
+    /// Linea de Studio del nodo implicado; vacia si afecta al robot entero.
     pub line: String,
     pub message: String,
     pub fix: String,
 }
 
-/// Carga las reglas embebidas.
-///
-/// Son siete objetos y ~2 KB: se parsea en cada evaluacion en vez de mantener
-/// una cache global. Si el JSON se rompe, el `expect` lo dice en el primer test
-/// en vez de degradar en silencio a un motor sin reglas.
+/// Carga las reglas embebidas; falla ruidosamente si el JSON no parsea.
 pub fn builtin_rules() -> Vec<RuleSpec> {
     serde_json::from_str(BUILTIN_RULES)
         .expect("rules/builtin.json embebido no parsea: revisa ids y severidades")
 }
 
-/// Una regla concreta por id.
-///
-/// Lo usan las evaluaciones que no viven en este modulo (por ejemplo
-/// `paths::RUTA_MIGRADA`, que necesita comprobar el disco y no puede ser pura).
+/// Una regla concreta por id, para evaluaciones fuera de este modulo.
 pub fn builtin_rule(id: &str) -> Option<RuleSpec> {
     builtin_rules().into_iter().find(|rule| rule.id == id)
 }
 
-/// Evalua todas las reglas y devuelve hasta [`MAX_FINDINGS`] hallazgos,
-/// ordenados de severidad mayor a menor.
-///
-/// Los dos cubos compiten aqui por el mismo presupuesto: para darle a cada uno su
-/// tope y su seccion, usa [`evaluate_split`].
-///
-/// - `collisions`: salida de [`crate::tree::collisions`].
-/// - `declared_unused`: variables sin uso ya filtradas por el grafo de llamadas;
-///   aqui no se decide que esta sin usar.
-/// - `vars_total`: variables declaradas en el robot, para dimensionar el aviso.
+/// Evalua todas las reglas y devuelve hasta [`MAX_FINDINGS`] hallazgos ordenados
+/// por severidad. Los dos cubos compiten por el mismo presupuesto: para topes por
+/// cubo usa [`evaluate_split`].
 pub fn evaluate(
     nodes: &[FlatNode],
     collisions: &BTreeMap<String, usize>,
@@ -230,30 +175,18 @@ pub fn evaluate_with_limit(
             "RUTA_ABSOLUTA" => absolute_paths(&rule, nodes, &mut out),
             "ANIDAMIENTO" => nesting(&rule, nodes, &mut out),
             "VAR_NO_USADA" => unused_vars(&rule, declared_unused, vars_total, &mut out),
-            // Una regla nueva en el JSON sin interprete aqui no inventa ruido:
-            // se ignora hasta que exista su evaluador.
             _ => {}
         }
     }
-    // Estable: dentro de la misma severidad se conserva el orden de generacion,
-    // que ya es deterministico (BTreeMap, pre-orden, BTreeSet).
+    // Estable: dentro de la misma severidad se conserva el orden de generacion.
     out.sort_by_key(|f| Reverse(f.severity));
     out.truncate(max_findings);
     out
 }
 
-/// Devuelve (accionables, higiene), cada cubo ordenado por severidad descendente
-/// y truncado a `max_por_cubo`.
-///
-/// Es la misma evaluacion que [`evaluate_with_limit`] sin tope, repartida por
-/// [`Kind`]: filtrar despues de ordenar conserva el orden relativo dentro de cada
-/// cubo y no duplica las siete reglas, que es donde vive el coste de mantener dos
-/// motores. El tope de [`MAX_FINDINGS`] sigue existiendo para quien quiera una
-/// sola lista; aqui cada cubo tiene su presupuesto porque un hallazgo de higiene
-/// no compite con uno accionable: con un tope comun, los de higiene (mas
-/// numerosos) se comen las lineas que un humano si miraria (44 de los 122
-/// hallazgos reales eran `SIN_TRY` e `IF_SIN_ELSE`, y de ahi el 64% de precision
-/// util).
+/// Devuelve (accionables, higiene), cada cubo ordenado por severidad y truncado a
+/// `max_por_cubo`. Filtrar tras ordenar sin tope conserva el orden relativo; un
+/// tope comun dejaria que la higiene (masiva) se coma lo accionable.
 pub fn evaluate_split(
     nodes: &[FlatNode],
     collisions: &BTreeMap<String, usize>,
@@ -263,8 +196,6 @@ pub fn evaluate_split(
 ) -> (Vec<Finding>, Vec<Finding>) {
     let mut accionables = Vec::new();
     let mut higiene = Vec::new();
-    // `usize::MAX` desactiva el tope interno (`truncate` con un limite mayor que
-    // la lista no hace nada): el recorte se aplica luego, una vez por cubo.
     for finding in evaluate_with_limit(nodes, collisions, declared_unused, vars_total, usize::MAX) {
         match finding.kind {
             Kind::Accionable => accionables.push(finding),
@@ -278,8 +209,6 @@ pub fn evaluate_split(
 
 fn line_collisions(rule: &RuleSpec, collisions: &BTreeMap<String, usize>, out: &mut Vec<Finding>) {
     for (line, count) in collisions {
-        // El mapa deberia venir ya filtrado, pero un llamador puede pasar el
-        // recuento completo: no convertimos una linea unica en un hallazgo.
         if *count < 2 {
             continue;
         }
@@ -364,8 +293,6 @@ fn unused_vars(
     vars_total: usize,
     out: &mut Vec<Finding>,
 ) {
-    // El mismo nombre puede llegar repetido si el llamador une varias fuentes:
-    // un hallazgo por variable, no por repeticion.
     let unused: BTreeSet<&str> = declared_unused
         .iter()
         .map(|s| s.trim())
@@ -383,15 +310,9 @@ fn unused_vars(
     }
 }
 
-/// ¿El nodo de `index` tiene algun hijo directo en su rama `else`?
-///
-/// El aplanado es pre-orden: el subarbol de un nodo acaba en el primer nodo con
-/// profundidad menor o igual. Dentro de ese tramo, un hijo directo de la rama
-/// `else` es el unico que cumple `depth == d + 1` y `branch == Else`: los hijos
-/// de `children` llevan `Then` y los nietos van a `d + 2`.
-///
-/// Mirar solo el nodo siguiente confundiria un try con cuerpo y sin catch (su
-/// primer hijo es `Then`) con un try bien cerrado.
+/// `true` si el nodo de `index` tiene un hijo directo en la rama `else`.
+/// El aplanado es pre-orden: lo es solo el que cumple `depth == d + 1` y
+/// `branch == Else`; mirar el nodo siguiente confunde un try con su primer hijo.
 fn has_else_branch(nodes: &[FlatNode], index: usize) -> bool {
     let depth = nodes[index].depth;
     nodes[index + 1..]
@@ -404,8 +325,6 @@ fn push_finding(rule: &RuleSpec, line: &str, message: String, out: &mut Vec<Find
     out.push(Finding {
         rule_id: rule.id.clone(),
         severity: rule.severity,
-        // El cubo lo decide la regla en el JSON, no la linea del hallazgo: asi
-        // una regla no cambia de seccion segun lo que encuentre hoy.
         kind: rule.kind,
         line: line.to_string(),
         message,
@@ -413,11 +332,8 @@ fn push_finding(rule: &RuleSpec, line: &str, message: String, out: &mut Vec<Find
     });
 }
 
-/// Primera ruta con letra de unidad (`C:\`, `C:/`) que no viva dentro de una URL.
-///
-/// La trampa es `https://`: la `s` va seguida de `:` y `/`, asi que el patron
-/// `X:/` la acepta. Se exige que la letra no continue un esquema y que el token
-/// no lleve `://` antes de la ruta.
+/// Primera ruta con letra de unidad (`C:\`, `C:/`) fuera de una URL. La trampa
+/// es `https://`: se exige que la letra no continue un esquema.
 fn absolute_path(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     (0..bytes.len().saturating_sub(2)).find_map(|i| {
@@ -432,10 +348,6 @@ fn absolute_path(text: &str) -> Option<String> {
 }
 
 /// Recorta la ruta para el mensaje: un parametro puede ser un JSON entero.
-///
-/// El tope es aqui y no en `pathscan` porque es formato del hallazgo, no deteccion:
-/// el pack de 60 corta tambien en la coma (un parametro puede ser un CSV) y el del
-/// diagnostico aguanta 260 porque la ruta entera se va a comprobar en disco.
 fn path_snippet(rest: &str) -> String {
     rest.chars()
         .take(PATH_SNIPPET_MAX)
