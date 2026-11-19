@@ -1,10 +1,8 @@
 //! Carga de los hechos del workspace y analisis por robot sobre esa foto.
 //!
-//! El grafo necesita los hechos de **todas** las dbs a la vez, y la misma entrega
-//! esta copiada en varias. Aqui se leen las filas necesarias de cada robot, se
-//! deduplica por contenido y se calculan los derivados comunes (aristas,
-//! contratos, variables muertas) **una sola vez**; el orquestador (`mod.rs`) solo
-//! decide que robot se analiza y con que extras (logs, probe de disco).
+//! Invariantes: dedupe por `(nombre, hash)` conservando la primera aparicion; el
+//! snapshot pedido fija solo el robot analizado, los demas aportan su ultimo
+//! guardado; las llamadas sin destino llevan linea y no se repiten.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -21,30 +19,16 @@ use crate::tree;
 
 use super::{errors_for, Analysis, ErrorReport};
 
-/// Carga los hechos del ultimo snapshot de cada robot de cada db, deduplicando
-/// por contenido: la misma entrega esta copiada en varias dbs y, medido, 31 filas
-/// son 20 robots distintos (sin dedupe, un workspace de 28 se cuenta como 50).
-///
-/// La clave es `(nombre, hash del raw_b64)`: mismo nombre y contenido es una
-/// copia, se queda un hecho y las demas etiquetas van a [`RobotFacts::also_in`]
-/// (una copia descartada no puede convertir una arista en ambigua). Contenido
-/// distinto o nombre distinto son dos hechos: un renombrado sigue siendo dos
-/// nombres en el grafo, y colapsarlo haria que sus llamadas parecieran
-/// inexistentes.
-///
-/// El hash es el `blake3` del `raw_b64` de [`crate::versions::VersionInfo::hash`]:
-/// aqui solo se compara, no se muestra.
+/// Hechos del ultimo snapshot de cada robot de cada db, deduplicados por
+/// `(nombre, hash)`: una copia identica conserva la primera aparicion y sus
+/// etiquetas van a [`RobotFacts::also_in`]; distinto nombre o contenido, dos hechos.
 pub fn load_workspace(dbs: &[(&Connection, &str)]) -> Result<Vec<RobotFacts>> {
     load_workspace_of(dbs, None)
 }
 
-/// [`load_workspace`] con una db y un robot que el consumidor **exige**.
-///
-/// `target` es el robot pedido y, opcionalmente, el snapshot del que deben salir
-/// sus hechos. De esa db el robot no puede faltar ([`Error::RobotNotFound`]) ni
-/// fallar al decodificar (el error se propaga): es la diferencia entre un pack
-/// degradado y un pack que miente. En las demas dbs un robot ilegible solo se
-/// omite, porque como mucho hara que falte su contrato.
+/// [`load_workspace`] con una db y un robot que el consumidor exige: en esa db no
+/// puede faltar ([`Error::RobotNotFound`]) ni fallar al decodificar; en las demas
+/// un robot ilegible solo se omite.
 pub(super) fn load_workspace_of(
     dbs: &[(&Connection, &str)],
     target: Option<Target>,
@@ -53,15 +37,11 @@ pub(super) fn load_workspace_of(
     let mut seen: BTreeMap<(String, String), usize> = BTreeMap::new();
 
     for (conn, label) in dbs {
-        // El pin viaja solo a la db del robot pedido. En las demas se sigue
-        // tomando el ultimo snapshot: es el que el runner resuelve hoy.
         let pinned = target.filter(|t| t.db_label == *label);
         for (fact, hash) in load_db_facts(conn, label, pinned)? {
             let key = (fact.name.clone(), hash);
             match seen.get(&key).copied() {
                 Some(idx) => {
-                    // Copia identica en otra db: el hecho ya existe y solo se
-                    // anota donde mas vive.
                     let kept = &mut facts[idx];
                     if !kept.lives_in(label) {
                         kept.also_in.push((*label).to_string());
@@ -75,7 +55,6 @@ pub(super) fn load_workspace_of(
         }
     }
 
-    // Sin conexion con la etiqueta pedida no se puede haber encontrado el robot.
     if let Some(t) = target {
         if !facts
             .iter()
@@ -88,11 +67,8 @@ pub(super) fn load_workspace_of(
     Ok(facts)
 }
 
-/// Robot del workspace cuyos hechos el consumidor **exige** y, si se indica, el
-/// snapshot exacto del que deben salir.
-///
-/// Existe en vez de un `Option<(&str, &str, Option<i64>)>` para que el pin no se
-/// pueda pasar sin nombrar al robot: el snapshot es una propiedad del robot
+/// Robot del workspace cuyos hechos el consumidor exige y, si se indica, el
+/// snapshot exacto del que deben salir: el snapshot es propiedad del robot
 /// analizado, no de la db ni del workspace.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Target<'a> {
@@ -102,13 +78,9 @@ pub(super) struct Target<'a> {
     pub(super) snapshot: Option<i64>,
 }
 
-/// Hechos de una db, con el hash del contenido que usa el dedupe.
-///
-/// El snapshot es el **ultimo** de cada robot, salvo para el robot exigido: si
-/// [`Target::snapshot`] trae un id, sus hechos salen de esa fila. Se lee solo la
-/// fila necesaria ([`db::load_latest_snapshot`] o [`db::load_snapshot`]), no el
-/// historial entero: el analisis no necesita las versiones anteriores y una
-/// version vieja corrupta no debe bloquear la ultima (issue #18).
+/// Hechos de una db, con el hash del contenido que usa el dedupe. El snapshot es
+/// el ultimo de cada robot, salvo el robot exigido: si [`Target::snapshot`] trae
+/// un id, sus hechos salen de esa fila.
 fn load_db_facts(
     conn: &Connection,
     db_label: &str,
@@ -117,13 +89,10 @@ fn load_db_facts(
     let mut out = Vec::new();
 
     for summary in db::list_robots(conn)? {
-        // El robot exigido es el unico que puede venir fijado a un snapshot; en
-        // los demas `pinned` queda en `None` y se toma el ultimo, como siempre.
         let required = target.is_some_and(|t| t.robot == summary.name.as_str());
         let pinned = target.filter(|_| required).and_then(|t| t.snapshot);
-        // Solo se decodifica la version que el analisis necesita: la fijada o la
-        // ultima. Cargar todo el historial por robot era O(versiones) por pasada
-        // (issue #18) y ademas una version vieja corrupta bloqueaba la ultima.
+        // Solo se decodifica la version necesaria: cargar el historial era
+        // O(versiones) por pasada (issue #18).
         let snap = match pinned {
             Some(id) => match db::load_snapshot(conn, &summary.name, id) {
                 Ok(snap) => snap,
@@ -133,8 +102,6 @@ fn load_db_facts(
             None => match db::load_latest_snapshot(conn, &summary.name) {
                 Ok(Some(snap)) => snap,
                 Ok(None) => continue,
-                // Un robot distinto e ilegible solo se omite: como mucho hara que
-                // su contrato no aparezca.
                 Err(_) if !required => continue,
                 Err(error) => return Err(error),
             },
@@ -161,11 +128,7 @@ fn load_db_facts(
     Ok(out)
 }
 
-/// Variables del panel del robot (`project.vars`).
-///
-/// Es la misma fuente que usa el contrato: el panel del padre es exactamente lo
-/// que hereda el hijo al ejecutarse dentro de su interprete. Se ignoran nombres
-/// vacios y repetidos para que el recuento no se infle.
+/// Variables del panel del robot (`project.vars`), sin nombres vacios ni repetidos.
 fn declared_of(root: &Value) -> BTreeSet<String> {
     let Some(arr) = root.get("vars").and_then(Value::as_array) else {
         return BTreeSet::new();
@@ -178,23 +141,14 @@ fn declared_of(root: &Value) -> BTreeSet<String> {
         .collect()
 }
 
-/// Hash del contenido de un snapshot: `blake3` del base64 tal cual esta en `bots`.
-///
-/// Se usa el base64 y no el JSON decodificado por la misma razon que
-/// [`crate::versions::VersionInfo::hash`]: es lo que se copia entre dbs de entrega
-/// y no depende de como se re-serialice el JSON.
+/// `blake3` del base64 tal cual esta en `bots`: es lo que se copia entre dbs y no
+/// depende de como se re-serialice el JSON.
 fn content_hash(raw_b64: &str) -> String {
     blake3::hash(raw_b64.as_bytes()).to_hex().to_string()
 }
 
 /// Hechos del workspace ya cargados, con los derivados comunes calculados una
-/// sola vez.
-///
-/// La bandeja recorre N robots de la misma db; antes cada uno llamaba a
-/// `analyse_with_workspace_at_and_paths` y volvia a decodificar todo: O(N^2)
-/// (issue #18).
-///
-/// `facts` es publico porque la bandeja cuenta nodos sin volver a decodificar.
+/// sola vez; `facts` es publico porque la bandeja cuenta nodos sin decodificar.
 pub struct Workspace {
     pub facts: Vec<RobotFacts>,
     edges: Vec<Edge>,
@@ -223,10 +177,7 @@ impl Workspace {
         }
     }
 
-    /// Analiza un robot sobre esta foto.
-    ///
-    /// `conn` es la conexion de la db del robot: solo se usa para leer **sus**
-    /// logs. No se vuelve a decodificar ni a cargar el workspace.
+    /// Analiza un robot sobre esta foto. `conn` solo se usa para leer sus logs.
     pub fn analyse(
         &self,
         conn: &Connection,
@@ -255,13 +206,10 @@ fn analyse_loaded(
         .find(|fact| fact.name == robot && fact.lives_in(db_label))
         .ok_or_else(|| Error::RobotNotFound(robot.to_string()))?;
 
-    // `unused_declared` se calculo una vez para todo el workspace; aqui solo se
-    // saca la entrada de este robot (vacia si no tiene variables muertas).
     let unused_declared = workspace.unused.get(robot).cloned().unwrap_or_default();
 
     let collisions = tree::collisions(&this.nodes);
-    // `usize::MAX`: no se recorta aqui. El render decide el tope por seccion y dice
-    // cuantos hallazgos quedaron fuera.
+    // `usize::MAX`: el render decide el tope por seccion y avisa de lo que queda fuera.
     let (mut findings, higiene) = rules::evaluate_split(
         &this.nodes,
         &collisions,
@@ -270,9 +218,8 @@ fn analyse_loaded(
         usize::MAX,
     );
 
-    // `RUTA_MIGRADA` no vive en `evaluate_split`: necesita comprobar el disco y
-    // solo se evalua cuando el consumidor pasa un probe. El orden por severidad
-    // se restablece despues de anadirla para que una alta no quede al final.
+    // `RUTA_MIGRADA` necesita el disco: solo se evalua con probe, y despues se
+    // restablece el orden por severidad.
     if path_probe.enabled() {
         let line_hints = variable_lines(this, &workspace.facts, &workspace.edges);
         findings.extend(paths::findings(
@@ -284,9 +231,8 @@ fn analyse_loaded(
         findings.sort_by_key(|finding| std::cmp::Reverse(finding.severity));
     }
 
-    // Los contratos se recalculan sobre las aristas de **este** hecho: las de un
-    // homologo con contenido distinto no son suyas y presentarlas juntas haria que
-    // el pack de un robot hablara de las llamadas de otro.
+    // Los contratos se recalculan sobre las aristas de este hecho: las de un
+    // homologo con contenido distinto no son suyas.
     let own_edges: Vec<Edge> = workspace
         .edges
         .iter()
@@ -302,8 +248,7 @@ fn analyse_loaded(
         .collect();
     let contracts_in = graph::contracts(&workspace.facts, &inbound_edges);
 
-    // Los logs se leen despues de resolver el robot: si no existe, el error tiene
-    // que ser el de siempre y no el de un directorio de logs ausente.
+    // Los logs se leen despues de resolver el robot: manda el error de robot ausente.
     let errors = match logs {
         Some((dir, max_files)) => errors_for(conn, robot, dir, max_files)?,
         None => ErrorReport::default(),
@@ -323,13 +268,9 @@ fn analyse_loaded(
 
 /// Primera linea donde se usa cada variable, mirando tambien los subrobots.
 ///
-/// Una variable del padre puede no aparecer en ningun nodo suyo y ser consumida
-/// por un hijo. En ese caso la linea util para el agente es la de la llamada
-/// `execRocketBotDB` que lleva al hijo, no `L-`: es donde se decide que ese
-/// contrato se ejecuta.
-///
-/// La resolucion del hijo usa la misma regla que el grafo (`lives_in`), asi que
-/// un homologo de otra db no aporta una linea que no es de esta llamada.
+/// Si solo la usa un hijo, la linea util es la de la llamada `execRocketBotDB`
+/// que lleva al hijo. El hijo se resuelve con la misma regla que el grafo
+/// (`lives_in`), asi que un homologo de otra db no aporta linea.
 fn variable_lines(
     this: &RobotFacts,
     facts: &[RobotFacts],
@@ -349,8 +290,7 @@ fn variable_lines(
         }
     }
 
-    // Las aristas vienen en el orden en que `build_edges` recorre los nodos: la
-    // primera llamada que use la variable es la que se queda.
+    // La primera llamada que use la variable es la que se queda.
     for edge in edges
         .iter()
         .filter(|edge| edge.parent == this.name && this.lives_in(&edge.parent_db))
@@ -377,12 +317,9 @@ fn variable_lines(
     out
 }
 
-/// Aristas ambiguas del robot, ya formateadas para el consumidor.
-///
-/// Se deduplican porque un hijo homologo en dos dbs ajenas genera una arista por
-/// db y el agente solo necesita saber que la llamada no esta resuelta aqui. El
-/// filtro es por hecho (`db` o copia), no solo por nombre: las llamadas de un
-/// homonimo de otra db no son las de este robot.
+/// Aristas ambiguas del robot, ya formateadas y sin repetir: un hijo homologo en
+/// dos dbs ajenas genera una arista por db. El filtro es por hecho (`db` o copia),
+/// no solo por nombre.
 fn ambiguous_calls(edges: &[Edge], this: &RobotFacts) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for edge in edges {
@@ -397,9 +334,7 @@ fn ambiguous_calls(edges: &[Edge], this: &RobotFacts) -> Vec<String> {
     out
 }
 
-/// Llamadas sin destino del robot, con la linea para que el aviso sea accionable.
-///
-/// Mismo criterio que [`ambiguous_calls`]: solo las de este hecho, sin repetir.
+/// Llamadas sin destino del robot, con linea y sin repetir; solo las de este hecho.
 fn missing_call_labels(calls: &[graph::MissingCall], this: &RobotFacts) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for call in calls {
