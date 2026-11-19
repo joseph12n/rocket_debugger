@@ -3,12 +3,6 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <!--
-    Sin red, sin CDN y sin build: todo lo que necesita la pagina viaja en este
-    fichero. La CSP lo hace explicito y convierte "no cargar nada de fuera" en una
-    regla que el navegador aplica, no en una promesa del autor. Es la segunda
-    defensa; la primera es no inyectar HTML que venga del servidor.
-  -->
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'none'; form-action 'none'; img-src 'self' data:; script-src 'self'; style-src 'self'">
   <title>Bandeja de entrada · rocket_debugger</title>

@@ -1,10 +1,3 @@
-//! Fachada MCP de `rocket_debugger`: tools de alto nivel sobre `robot.db` en
-//! solo lectura, por stdio o HTTP local.
-//!
-//! Invariante: toda apertura pasa por `db::open_readonly`; esta fachada no
-//! escribe nunca en `robot.db`. El unico fichero que escribe es el registro de
-//! problemas, si esta configurado.
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,14 +13,10 @@ mod tools;
 
 pub use http::{serve, MAX_BODY_BYTES};
 
-/// La ejecucion configurada en este servidor; vive en `Settings` para inyectar un broker falso en tests.
 #[derive(Clone)]
 pub struct ExecSettings {
-    /// Broker compartido por todas las conexiones HTTP del proceso.
     pub broker: Arc<Broker>,
-    /// Directorio donde el runner crea los logs de cada ejecucion; el pack lee el mismo.
     pub logs_dir: PathBuf,
-    /// Timeout cuando la peticion no trae uno.
     pub default_timeout: Duration,
 }
 
@@ -40,21 +29,12 @@ impl std::fmt::Debug for ExecSettings {
     }
 }
 
-/// Entorno que el servidor resuelve una vez al arrancar, no en cada peticion.
-/// La db y los logs son del entorno, no del mensaje.
 #[derive(Debug, Clone)]
 pub struct Settings {
-    /// Valor de `ROCKETBOT_DB`, si esta definido y no vacio.
     pub env_db: Option<PathBuf>,
-    /// Directorio de logs y cuantos ficheros leer; `None` deja la seccion de
-    /// errores vacia y las tools lo dicen en vez de fingir un robot limpio.
     pub logs: Option<(PathBuf, usize)>,
-    /// Fichero del registro de problemas: el unico sitio donde esta herramienta
-    /// escribe algo, y nunca es `robot.db`. `None` desactiva las tools `problems_*`.
     pub registry: Option<PathBuf>,
-    /// Raiz donde descubrir varias dbs para la vista de bandeja; `None` = solo `default_db()`.
     pub workspace: Option<PathBuf>,
-    /// Broker de ejecucion; `None` = `run_robot` no esta configurado y lo dice.
     pub exec: Option<ExecSettings>,
 }
 
@@ -77,8 +57,6 @@ fn logs_from_env() -> Option<PathBuf> {
         .filter(|p| !p.as_os_str().is_empty())
 }
 
-/// Configura el broker si hay un `rocketbot.exe` al que apuntar.
-/// `ROCKETBOT_EXE` definido activa la tool aunque la ruta no exista: el fallo se reporta al ejecutar.
 fn exec_from_env(logs_env: Option<PathBuf>) -> Option<ExecSettings> {
     let exe_env = std::env::var_os("ROCKETBOT_EXE")
         .map(PathBuf::from)
@@ -90,7 +68,6 @@ fn exec_from_env(logs_env: Option<PathBuf>) -> Option<ExecSettings> {
         return None;
     }
 
-    // Los logs de ejecucion van bajo el mismo directorio que lee el pack.
     let logs_dir = logs_env
         .or_else(|| exe.parent().map(|dir| dir.join("logs")))
         .unwrap_or_else(|| PathBuf::from(logs::DEFAULT_LOGS_DIR));
@@ -109,7 +86,6 @@ fn exec_from_env(logs_env: Option<PathBuf>) -> Option<ExecSettings> {
 }
 
 impl Settings {
-    /// Entorno vacio (ni db, ni logs, ni registro): lo usan los tests.
     pub fn hermetic() -> Self {
         Self {
             env_db: None,
@@ -120,7 +96,6 @@ impl Settings {
         }
     }
 
-    /// Lee el entorno del proceso; los logs se leen solo si el directorio existe.
     pub fn from_env() -> Self {
         let env_db = std::env::var_os("ROCKETBOT_DB")
             .map(PathBuf::from)
@@ -129,7 +104,6 @@ impl Settings {
         let logs_env = logs_from_env();
         let exec = exec_from_env(logs_env.clone());
 
-        // Si hay broker, su directorio de logs manda: el pack tiene que ver la ejecucion.
         let logs = if let Some(exec) = &exec {
             Some((exec.logs_dir.clone(), DEFAULT_LOG_FILES))
         } else if let Some(dir) = logs_env {
@@ -148,7 +122,6 @@ impl Settings {
         }
     }
 
-    /// Db que se usa cuando la peticion no trae `db`: `ROCKETBOT_DB` o la del Studio local.
     pub fn default_db(&self) -> PathBuf {
         self.env_db
             .clone()
@@ -156,14 +129,10 @@ impl Settings {
     }
 }
 
-/// Despacha una linea con el entorno del proceso.
-/// `main` usa `handle_line_with` con un `Settings` resuelto al arrancar.
 pub fn handle_line(line: &str) -> Option<String> {
     handle_line_with(line, &Settings::from_env())
 }
 
-/// Despacha una linea contra un entorno concreto, sin tocar stdin ni stdout.
-/// Devuelve `None` cuando no toca responder: linea vacia y notificaciones.
 pub fn handle_line_with(line: &str, settings: &Settings) -> Option<String> {
     protocol::handle(line, settings)
 }

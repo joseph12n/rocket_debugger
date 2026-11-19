@@ -1,26 +1,11 @@
     "use strict";
 
-    /*
-     * Rutas del servidor local. Son rutas HTTP, no rutas del sistema de ficheros:
-     * el contrato las documenta como `GET /api/review` y `GET /api/pack`, asi que
-     * aqui no se adivina un prefijo ni se compone una ruta de disco.
-     */
     const API_REVIEW = "/api/review";
     const API_PACK = "/api/pack";
 
-    /*
-     * Enlace profundo: `?robot=<nombre>&db=<etiqueta>` abre el panel de ese
-     * robot. Es el mismo par que viaja a `/api/pack`, asi que la URL se puede
-     * copiar y mandar a otro sin decirle que busque la fila y pulse.
-     */
     const LINK_ROBOT = "robot";
     const LINK_DB = "db";
 
-    /*
-     * Umbral de "rojo" para hallazgos accionables. El barrido real del proyecto
-     * mide ~2,7 accionables por robot afectado, asi que 5 es el doble de la media:
-     * a partir de ahi el robot no es "uno mas" y merece rojo en vez de ambar.
-     */
     const ACTIONABLE_HOT = 5;
 
     const NUMBER_FORMAT = new Intl.NumberFormat("es-ES", { maximumFractionDigits: 0 });
@@ -99,10 +84,6 @@
       panel: { robot: "", db: "", opener: null },
     };
 
-    /* ------------------------------------------------------------------ */
-    /* Utilidades                                                          */
-    /* ------------------------------------------------------------------ */
-
     function asCount(value) {
       return Number.isFinite(value) ? value : null;
     }
@@ -124,8 +105,6 @@
       return value === 1 ? "1 db" : `${NUMBER_FORMAT.format(value)} dbs`;
     }
 
-    /* El filtro ignora mayusculas y tildes: "gmail" tiene que encontrar
-       "ML_07_Gmail" y "Giménez" tiene que encontrar "Gimenez". */
     function normalise(text) {
       return String(text ?? "")
         .normalize("NFD")
@@ -147,12 +126,6 @@
       liveRegion.textContent = text;
     }
 
-    /*
-     * El mensaje de error lo escribe el servidor y se pinta como texto. Se
-     * prefiere el campo `error` del JSON porque es el que da el motivo real
-     * ("ruta desconocida: /api/review"), no el codigo HTTP; si el cuerpo no es
-     * JSON se muestra tal cual, recortado para no volcar una pagina entera.
-     */
     async function serverMessage(response, fallback) {
       let text;
       try {
@@ -168,14 +141,9 @@
           return payload.error.trim();
         }
       } catch (error) {
-        /* el cuerpo no es JSON: se usa como esta */
       }
       return trimmed.length > 400 ? `${trimmed.slice(0, 400)}…` : trimmed;
     }
-
-    /* ------------------------------------------------------------------ */
-    /* Estados de la bandeja                                               */
-    /* ------------------------------------------------------------------ */
 
     function showView(name) {
       if (name === "table") {
@@ -225,10 +193,6 @@
       showView("error");
       announce("No se pudo cargar la bandeja.");
     }
-
-    /* ------------------------------------------------------------------ */
-    /* Render                                                              */
-    /* ------------------------------------------------------------------ */
 
     function rowSeverity(row) {
       if ((row.live ?? 0) > 0) return "row--alert";
@@ -289,10 +253,6 @@
       rowsBody.replaceChildren(fragment);
     }
 
-    /*
-     * Orden por defecto: el del servidor. La pagina solo reordena cuando el
-     * usuario pulsa una cabecera, y ese orden se mantiene al filtrar.
-     */
     function sortRows(rows) {
       if (!state.sort.key) return rows;
       const key = state.sort.key;
@@ -370,15 +330,6 @@
       showView("table");
     }
 
-    /* ------------------------------------------------------------------ */
-    /* Carga de la bandeja                                                 */
-    /* ------------------------------------------------------------------ */
-
-    /*
-     * Valida la forma del contrato antes de tocar el DOM. Un JSON valido pero
-     * sin `rows`/`totals` es un fallo del servidor y se ensena como error, no
-     * como una bandeja vacia que pareceria "todo limpio".
-     */
     function parseReview(payload) {
       if (
         !payload ||
@@ -456,8 +407,6 @@
         render();
         announce(`${robotsLabel(state.rows.length)} en la bandeja.`);
       } catch (error) {
-        // Abortar es lo que hace un refresco nuevo con la peticion anterior: no
-        // es un fallo que merezca un estado de error.
         if (error.name === "AbortError") return;
         showError(messageOf(error));
       } finally {
@@ -467,22 +416,9 @@
         }
       }
 
-      // El enlace profundo espera a tener filas pintadas, asi que va aqui y no
-      // dentro del `try`: abrir el panel no es parte de cargar la bandeja, y su
-      // fallo no deberia pintarse como un fallo de la bandeja.
       applyUrlLink();
     }
 
-    /* ------------------------------------------------------------------ */
-    /* Enlace profundo                                                     */
-    /* ------------------------------------------------------------------ */
-
-    /*
-     * La URL es el estado del panel: si trae `robot`, ese robot esta abierto.
-     * Se lee con `URLSearchParams` porque decodifica `%5C` y `%20` por nosotros:
-     * la etiqueta de la db es una ruta relativa (`BBRE2\robot_run.db`) y el
-     * nombre del robot puede llevar espacios, acentos o un `&`.
-     */
     function readLink() {
       const params = new URLSearchParams(location.search);
       return {
@@ -491,12 +427,6 @@
       };
     }
 
-    /*
-     * Escribe el enlace sin recargar y sin apilar historial: cerrar el panel no
-     * puede costar un "atras". Un robot sin nombre no da un enlace util, asi que
-     * su caso es el de "ningun panel": se quitan los parametros en vez de dejar
-     * los del robot anterior mintiendo en la barra de direcciones.
-     */
     function writeLink(link) {
       const url = new URL(location.href);
       if (link && link.robot) {
@@ -514,17 +444,9 @@
       try {
         history.replaceState(history.state, "", url.href);
       } catch (error) {
-        // Safari limita `replaceState` a unas pocas llamadas seguidas: quedarse
-        // sin enlace molesta, pero romper el clic no es una opcion.
       }
     }
 
-    /*
-     * Fila a la que apunta un enlace. El nombre tiene que coincidir entero; la
-     * db solo desempata entre homonimos (el mismo robot en dos bandejas). Si el
-     * robot esta pero en otra db se abre igual: el panel ensena la db real y esa
-     * pasa a ser la del enlace, que es lo util cuando la db se ha movido.
-     */
     function rowForLink(link) {
       if (!link.robot) return null;
       const sameName = state.rows.filter((row) => row.robot === link.robot);
@@ -536,12 +458,6 @@
       return sameName[0];
     }
 
-    /*
-     * Pone el panel donde dice la URL. Se llama al terminar de cargar la bandeja
-     * (hacen falta las filas) y en `popstate` (no hace falta volver a pedirlas).
-     * Si ya esta abierto ese robot no se toca nada: un "atras" que vuelve al
-     * mismo sitio no debe recargar el context pack.
-     */
     function applyUrlLink() {
       if (!state.loaded) return;
 
@@ -562,18 +478,9 @@
       openPanel(row, rowLinkElement(row));
     }
 
-    /*
-     * El foco vuelve a la fila al cerrar, pero con un filtro puesto puede no
-     * estar pintada: en ese caso el panel se abre igual y al cerrar no se mueve
-     * el foco a ningun sitio raro.
-     */
     function rowLinkElement(row) {
       return rowsBody.querySelector(`tr[data-index="${row.index}"] .robot-link`);
     }
-
-    /* ------------------------------------------------------------------ */
-    /* Panel del context pack                                              */
-    /* ------------------------------------------------------------------ */
 
     function panelMetaFor(row) {
       return [
@@ -592,12 +499,6 @@
       panelBody.setAttribute("aria-busy", name === "loading" ? "true" : "false");
     }
 
-    /*
-     * Ensenar el panel con la cabecera ya puesta; el estado del cuerpo (cargando,
-     * error o contenido) lo decide quien llama. Aqui se limpia el pack anterior:
-     * al saltar de un robot a otro por la URL no puede quedar ni un instante el
-     * contenido del robot equivocado en el DOM.
-     */
     function mountPanel({ robot, db, title, meta, opener }) {
       state.panel.robot = robot;
       state.panel.db = db;
@@ -622,18 +523,10 @@
         opener,
       });
       setPanelView("loading");
-      // El enlace se escribe antes de pedir el pack: si la peticion tarda o
-      // falla, copiar la barra de direcciones sigue llevando a este robot.
       writeLink({ robot: row.robot, db: row.db || "" });
       void loadPack();
     }
 
-    /*
-     * Un enlace puede apuntar a un robot que ya no esta en la bandeja: se
-     * renombro, se borro o el servidor esta mirando otras dbs. Se abre el panel
-     * con el motivo; dejar la pagina como si no se hubiera pedido nada hace
-     * pensar que el enlace se ignoro.
-     */
     function openMissing(link) {
       mountPanel({
         robot: link.robot,
@@ -652,14 +545,10 @@
       if (panel.hidden) return;
       state.packController?.abort();
       state.packController = null;
-      // Cerrar deja la URL sin enlace: el enlace describe lo que se ve, y lo que
-      // se ve es la bandeja entera.
       if (updateUrl) writeLink(null);
       panel.hidden = true;
       scrim.hidden = true;
       document.body.classList.remove("panel-open");
-      // No dejar en el DOM el pack del robot anterior: si se reabre otro, no
-      // puede aparecer ni un instante el contenido equivocado.
       panelContent.textContent = "";
       panelSize.textContent = "";
       panelErrorMessage.textContent = "";
@@ -722,10 +611,6 @@
       ).filter((element) => element.getClientRects().length > 0);
     }
 
-    /* ------------------------------------------------------------------ */
-    /* Eventos                                                             */
-    /* ------------------------------------------------------------------ */
-
     refreshButton.addEventListener("click", () => {
       closePanel({ restoreFocus: false });
       void loadReview();
@@ -767,8 +652,6 @@
         state.sort.direction *= -1;
       } else {
         state.sort.key = key;
-        // Los numeros se ordenan de mayor a menor por defecto: lo que tiene mas
-        // trabajo es lo que se quiere ver arriba.
         state.sort.direction = numeric ? -1 : 1;
       }
       render();
@@ -798,8 +681,6 @@
 
       if (event.key !== "Tab") return;
 
-      // El panel es modal: sin trampa de foco, tabular se iria a la tabla del
-      // fondo, que el usuario no puede usar mientras el scrim este puesto.
       const focusable = focusableIn(panel);
       if (focusable.length === 0) {
         event.preventDefault();
@@ -820,12 +701,7 @@
       }
     });
 
-    // Atras/adelante mueven la URL sin recargar la pagina: hay que poner el
-    // panel donde diga esa URL (y cerrarlo si ya no trae robot).
     window.addEventListener("popstate", () => applyUrlLink());
 
-    // Primera carga. El HTML ya nace en estado "cargando"; esto solo lo hace
-    // explicito y arranca la peticion. Si la URL trae `?robot=…`, el panel se
-    // abre en cuanto `loadReview` termina de pintar la tabla.
     showView("loading");
     void loadReview();

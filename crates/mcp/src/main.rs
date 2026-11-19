@@ -1,10 +1,3 @@
-//! Servidor MCP de `rocket_debugger`: stdio (el cliente arranca el proceso) o
-//! `--http <PUERTO>` / `ROCKETDEBUG_MCP_HTTP` (la app escucha en `127.0.0.1`).
-//!
-//! stdout es solo protocolo: cualquier diagnostico va a stderr, porque una linea
-//! suelta en stdout rompe la sesion del cliente por stdio. `main` solo hace E/S;
-//! toda la logica vive en la libreria.
-
 use std::io::{self, BufRead, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::process::ExitCode;
@@ -40,14 +33,11 @@ fn main() -> ExitCode {
         }
         Err(message) => {
             eprintln!("{message}\n\n{USAGE}");
-            // Codigo 2 = uso invalido (el 1 queda para fallos del servidor).
             ExitCode::from(2)
         }
     }
 }
 
-/// Transporte pedido en la linea de comandos.
-/// El flag manda sobre la variable de entorno: lo explicito no queda pisado.
 fn parse_mode() -> Result<Mode, String> {
     let mut requested: Option<String> = None;
     let mut args = std::env::args().skip(1);
@@ -83,8 +73,6 @@ fn parse_port(value: &str) -> Result<u16, String> {
     })
 }
 
-/// Levanta el transporte HTTP local.
-/// Bind solo a `127.0.0.1`: el motor lee `robot.db` sin autenticacion.
 fn serve_http(port: u16, settings: Settings) -> ExitCode {
     let address = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = match TcpListener::bind(address) {
@@ -98,7 +86,6 @@ fn serve_http(port: u16, settings: Settings) -> ExitCode {
         }
     };
 
-    // Se anuncia la direccion real: con `--http 0` el SO elige el puerto.
     let local = listener.local_addr().unwrap_or(address);
     eprintln!(
         "rocket_debugger MCP v{} | http://{local}/mcp | db {} (solo lectura)",
@@ -115,7 +102,6 @@ fn serve_http(port: u16, settings: Settings) -> ExitCode {
     }
 }
 
-/// Transporte stdio: una linea, una respuesta, hasta EOF.
 fn serve_stdio(settings: &Settings) -> ExitCode {
     let logs = match &settings.logs {
         Some((dir, _)) => dir.display().to_string(),
@@ -132,7 +118,6 @@ fn serve_stdio(settings: &Settings) -> ExitCode {
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
-    // Sin EOF no hay otra senal de parada; un `write` roto (cliente ido) tambien corta.
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         let Some(response) = handle_line_with(&line, settings) else {

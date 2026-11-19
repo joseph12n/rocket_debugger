@@ -1,10 +1,3 @@
-    /* ---------------------------------------------------------------------
-       Tokens
-       Paleta oscura de herramienta de desarrollo. Los cuatro acentos son el
-       codigo de severidad de la bandeja: ambar (trabajo), rojo (error vivo),
-       azul (higiene) y gris (nada pendiente). Todos pasan contraste AA sobre
-       las superficies donde se usan.
-       --------------------------------------------------------------------- */
     :root {
       --bg: #0b1016;
       --surface: #121a24;
@@ -31,17 +24,12 @@
       color-scheme: dark;
     }
 
-    /* ---------------------------------------------------------------------
-       Base
-       --------------------------------------------------------------------- */
     *,
     *::before,
     *::after {
       box-sizing: border-box;
     }
 
-    /* El atributo `hidden` tiene que ganar a cualquier `display` de una clase:
-       los estados de la bandeja y el panel se encienden y apagan con el. */
     [hidden] {
       display: none !important;
     }
@@ -52,10 +40,6 @@
 
     body {
       margin: 0;
-      /* La ventana es el marco: la cabecera, los totales y el buscador se
-         quedan quietos y lo que se desplaza es la tabla. En una bandeja que se
-         filtra todo el rato, perder el buscador al bajar es peor que recortar
-         la lista. */
       height: 100%;
       overflow: hidden;
       display: flex;
@@ -69,8 +53,6 @@
     }
 
     body.panel-open {
-      /* Con el panel abierto no hay nada que hacer en el fondo; congelarlo evita
-         que la rueda del raton mueva la tabla por detras. */
       overflow: hidden;
     }
 
@@ -109,9 +91,6 @@
       font-family: var(--mono);
     }
 
-    /* ---------------------------------------------------------------------
-       Cabecera
-       --------------------------------------------------------------------- */
     .topbar {
       display: flex;
       align-items: flex-start;
@@ -198,9 +177,6 @@
       padding-top: 2px;
     }
 
-    /* ---------------------------------------------------------------------
-       Controles
-       --------------------------------------------------------------------- */
     .button {
       display: inline-flex;
       align-items: center;
@@ -243,8 +219,6 @@
       flex: none;
     }
 
-    /* El boton sigue diciendo "Refrescar" mientras gira el icono: cambiar el
-       texto por "cargando" moveria el boton bajo el puntero. */
     .button.is-busy .icon {
       animation: spin 1s linear infinite;
     }
@@ -269,9 +243,6 @@
       }
     }
 
-    /* ---------------------------------------------------------------------
-       Totales
-       --------------------------------------------------------------------- */
     .page {
       flex: 1;
       display: flex;
@@ -354,9 +325,6 @@
       font-size: 11px;
     }
 
-    /* ---------------------------------------------------------------------
-       Bandeja
-       --------------------------------------------------------------------- */
     .board {
       flex: 1;
       display: flex;
@@ -405,8 +373,6 @@
       box-shadow: 0 0 0 3px rgba(108, 182, 255, 0.18);
     }
 
-    /* El navegador pinta su propia "x" en los input de busqueda; aqui hay otra
-       que ademas limpia el filtro del estado y devuelve el foco. */
     .search input::-webkit-search-cancel-button {
       display: none;
     }
@@ -494,9 +460,6 @@
       box-shadow: 0 0 0 2px rgba(125, 139, 156, 0.14);
     }
 
-    /* ---------------------------------------------------------------------
-       Estados (cargando, error, vacio, filtro sin resultados)
-       --------------------------------------------------------------------- */
     .board__views {
       flex: 1 1 0;
       display: flex;
@@ -557,13 +520,7 @@
       color: var(--alert);
     }
 
-    /* ---------------------------------------------------------------------
-       Tabla
-       --------------------------------------------------------------------- */
     .table-wrap {
-      /* `flex-basis: 0` y no `auto`: con `auto` la altura del contenido
-         (17, 32 o 200 filas) estiraba el contenedor y el scroll acababa en la
-         pagina, con la cabecera de la tabla pegada arriba y sin quedarse fija. */
       flex: 1 1 0;
       min-height: 0;
       overflow: auto;
@@ -574,8 +531,6 @@
       min-width: 900px;
       border-collapse: separate;
       border-spacing: 0;
-      /* Columnas de ancho fijo: sin `fixed`, un nombre de robot larguisimo
-         ensancharia su columna y empujaria los contadores fuera de pantalla. */
       table-layout: fixed;
       font-size: 13px;
     }
@@ -670,9 +625,6 @@
       background: rgba(108, 182, 255, 0.075);
     }
 
-    /* La barra de la primera celda duplica el color de la peor severidad de la
-       fila: asi se distingue "vivos" de "accionables" incluso de reojo, cuando
-       los numeros pequenos no se leen. */
     .row--alert td:first-child {
       box-shadow: inset 3px 0 0 var(--alert);
     }
@@ -689,8 +641,6 @@
       box-shadow: inset 3px 0 0 var(--idle);
     }
 
-    /* "Todo a cero" no es un error: es una fila que hoy no pide nada. Se apaga
-       para que las que si piden trabajo destaquen, sin bajar del contraste AA. */
     .row--idle td,
     .row--idle .robot-link,
     .row--idle .db {
@@ -759,9 +709,6 @@
       color: var(--calm);
     }
 
-    /* ---------------------------------------------------------------------
-       Panel del context pack
-       --------------------------------------------------------------------- */
     .scrim {
       position: fixed;
       inset: 0;
@@ -896,8 +843,6 @@
       flex: 1;
       min-height: 0;
       margin: 0;
-      /* `pre-wrap` en vez de `pre`: el pack tiene parrafos y lineas largas, y
-         con scroll horizontal el panel se vuelve incomodo a 720 px de alto. */
       padding: 16px 20px 28px;
       overflow: auto;
       color: var(--text);
@@ -909,9 +854,6 @@
       tab-size: 2;
     }
 
-    /* ---------------------------------------------------------------------
-       Scrollbars y movimiento
-       --------------------------------------------------------------------- */
     * {
       scrollbar-width: thin;
       scrollbar-color: var(--border-strong) transparent;
@@ -974,11 +916,6 @@
       }
     }
 
-    /* ---------------------------------------------------------------------
-       Adaptaciones
-       A 1280x720 la tabla no debe pedir scroll horizontal; los cortes de aqui
-       solo entran por debajo de ese tamano.
-       --------------------------------------------------------------------- */
     @media (max-width: 860px) {
       .totals {
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1009,8 +946,6 @@
       }
     }
 
-    /* Por debajo de ~520 px de alto no caben cabecera, totales, buscador y una
-       tabla util: se devuelve el scroll a la pagina en vez de recortar filas. */
     @media (max-height: 520px) {
       body {
         height: auto;

@@ -1,9 +1,3 @@
-//! Protocolo JSON-RPC 2.0 delimitado por lineas: un documento JSON por linea.
-//!
-//! Invariante: una notificacion (sin `id`) no se responde nunca, aunque este mal
-//! formada; responderla descoloca a los clientes que emparejan por `id`. Un fallo
-//! de negocio no es error de protocolo: viaja como `isError` en el resultado.
-
 use serde_json::{json, Map, Value};
 
 use crate::tools::{self, CallError};
@@ -11,24 +5,19 @@ use crate::Settings;
 
 pub const JSONRPC_VERSION: &str = "2.0";
 
-/// Version MCP fija: el cliente incompatible falla en `initialize`, no a mitad de sesion.
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
 
-// Codigos estandar de JSON-RPC 2.0.
 pub const PARSE_ERROR: i64 = -32700;
 pub const INVALID_REQUEST: i64 = -32600;
 pub const METHOD_NOT_FOUND: i64 = -32601;
 pub const INVALID_PARAMS: i64 = -32602;
 pub const INTERNAL_ERROR: i64 = -32603;
 
-/// Respuesta de ultimo recurso si `serde_json` no puede serializar un `Value`:
-/// dejar al cliente sin respuesta lo deja colgado.
 const FALLBACK_INTERNAL: &str = concat!(
     r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"#,
     r#""message":"fallo interno: no pude serializar la respuesta"}}"#
 );
 
-/// Una linea del cliente ya interpretada.
 enum Line {
     Ignore,
     Invalid { id: Value, error: ProtocolError },
@@ -56,13 +45,11 @@ impl ProtocolError {
     }
 }
 
-/// Despacha una linea: `Some(respuesta)` o `None` si no toca responder.
 pub fn handle(line: &str, settings: &Settings) -> Option<String> {
     match parse(line) {
         Line::Ignore => None,
         Line::Invalid { id, error } => Some(error_response(&id, &error)),
         Line::Request(request) => {
-            // Toda notificacion se corta aqui, incluidas las mal formadas: no hay respuesta.
             let id = request.id.as_ref()?;
             Some(match dispatch(&request, settings) {
                 Ok(result) => result_response(id, result),
@@ -73,7 +60,6 @@ pub fn handle(line: &str, settings: &Settings) -> Option<String> {
 }
 
 fn parse(line: &str) -> Line {
-    // El cliente de Windows puede dejar CR; JSON no lo admite fuera del documento.
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return Line::Ignore;
@@ -98,12 +84,10 @@ fn parse(line: &str) -> Line {
 
     let id = object.get("id").cloned();
     let Some(method) = object.get("method").and_then(Value::as_str) else {
-        // Una notificacion mal formada sigue siendo una notificacion: silencio.
         if id.is_none() {
             return Line::Ignore;
         }
         return Line::Invalid {
-            // Se responde con el `id` del cliente: el error tambien tiene que emparejarse.
             id: id.unwrap_or(Value::Null),
             error: ProtocolError::new(INVALID_REQUEST, "falta `method` en la peticion"),
         };
@@ -163,7 +147,6 @@ fn call_tool(params: &Value, settings: &Settings) -> Result<Value, ProtocolError
             "falta `name` en tools/call",
         ));
     };
-    // `arguments` ausente equivale a `{}`: cada tool valida sus propios argumentos.
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
 
     tools::call(name, &arguments, settings)
@@ -171,8 +154,6 @@ fn call_tool(params: &Value, settings: &Settings) -> Result<Value, ProtocolError
         .map_err(tool_error)
 }
 
-/// Un argumento mal formado es `-32602`; una tool que se rompe es `-32603`.
-/// El error de negocio no pasa por aqui: viaja como `isError`.
 fn tool_error(error: CallError) -> ProtocolError {
     match error {
         CallError::InvalidParams(message) => ProtocolError::new(INVALID_PARAMS, message),
@@ -180,7 +161,6 @@ fn tool_error(error: CallError) -> ProtocolError {
     }
 }
 
-/// `params` puede faltar (`Null`) o ser objeto; cualquier otra cosa es `-32602`.
 fn params_object(params: &Value) -> Result<Option<&Map<String, Value>>, ProtocolError> {
     match params {
         Value::Null => Ok(None),
