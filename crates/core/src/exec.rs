@@ -1,23 +1,9 @@
 //! Broker de ejecucion: lanza `rocketbot.exe`, serializa las ejecuciones y no se
 //! fia del `exit_code`.
 //!
-//! Con Studio abierto —o sin licencia de produccion— el runner CLI puede devolver
-//! `exit_code 0` sin ejecutar el robot (fase 0: `eventos_del_robot: 0`,
-//! `docs/CICLO.md`). Por eso [`Broker`]:
-//!
-//! 1. admite una sola ejecucion a la vez (cola FIFO con mutex y condvar),
-//! 2. detecta Studio abierto antes de lanzar y se niega,
-//! 3. exige al menos un **evento del robot** en los logs: sin eventos el
-//!    resultado es fallo, aunque el proceso haya salido con 0,
-//! 4. atribuye cada error de esa ejecucion al snapshot que estaba vivo.
-//!
-//! Evento = entrada de log con `request: <robot> : line ...` (el filtro exacto es
-//! [`crate::logs::of_robot`]); contadores de bucle y ruido del motor no cuentan.
-//! Los logs se buscan en el directorio nuevo de la ejecucion (`--log=<dir>`) y,
-//! si la version instalada lo ignora, en el `Log path:` que anuncia el CLI o en el
-//! directorio de respaldo; los tres caminos filtran por la hora de arranque. Sin
-//! dependencias nuevas: cola con `Mutex`+`Condvar` de std, timeout con
-//! `try_wait`, deteccion con `tasklist`.
+//! Con Studio abierto o sin licencia de produccion el runner puede devolver 0 sin
+//! ejecutar: el resultado exige eventos del robot. Una ejecucion a la vez (FIFO
+//! con mutex+condvar), deteccion con `tasklist` y timeout con kill tree.
 
 use std::collections::VecDeque;
 use std::io::Read;
@@ -35,13 +21,9 @@ use crate::db;
 use crate::logs;
 use crate::signature;
 
-/// `rocketbot.exe` del Studio instalado en la ruta estandar.
-///
-/// Es solo un valor por defecto: en una instalacion portatil (la de este equipo,
-/// por ejemplo) hay que apuntar `ROCKETBOT_EXE` al ejecutable real.
+/// Valor por defecto; en una instalacion portatil hay que apuntar `ROCKETBOT_EXE` al ejecutable real.
 pub const DEFAULT_EXE: &str = r"C:\Rocketbot\rocketbot.exe";
 
-/// Timeout de ejecucion por defecto, en segundos.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 180;
 
 /// Timeout minimo y maximo aceptados por la fachada.
@@ -54,50 +36,33 @@ pub fn timeout_from_secs(secs: i64) -> Duration {
     Duration::from_secs(secs as u64)
 }
 
-/// Directorios de ejecucion que se conservan. Los logs son evidencia, pero un
-/// daemon que vive semanas no puede crecer sin limite.
+/// Directorios de ejecucion que se conservan: los logs son evidencia, pero un daemon no puede crecer sin limite.
 pub const KEEP_RUN_DIRS: usize = 20;
 
-/// Errores distintos que se guardan en el informe. Un bucle que falla 500 veces
-/// es un error con 500 ocurrencias, no 500 lineas.
+/// Un bucle que falla 500 veces es un error con 500 ocurrencias, no 500 lineas.
 pub const MAX_REPORT_ERRORS: usize = 50;
 
 /// Bytes de stdout/stderr que se conservan por ejecucion.
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
-/// Ficheros de log que se miran en el directorio de respaldo.
 const FALLBACK_LOG_FILES: usize = 20;
 
-/// Ficheros de log que se miran en el directorio de la ejecucion (es nuevo, con
-/// uno basta, pero un runner puede crear un fichero por dia/subcarpeta).
 const RUN_LOG_FILES: usize = 64;
 
-/// Margen al comparar la hora del log con la del arranque: los dos relojes son
-/// el mismo, pero el redondeo a milisegundos de Windows y los microsegundos del
-/// log pueden dejar una entrada del primer comando unos microsegundos "antes".
+/// Windows redondea el arranque a milisegundos y el log trae microsegundos: una entrada del primer comando puede parecer anterior.
 const CLOCK_SLACK_SECS: i64 = 2;
 
-/// Como se detecta que Studio esta abierto.
-///
-/// Es un enum y no un trait para que los tests no dependan del `tasklist` de la
-/// maquina: `Closed` convierte la comprobacion en una constante.
+/// Es un enum y no un trait para que los tests no dependan del `tasklist` de la maquina.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StudioProbe {
-    /// Enumera procesos `rocketbot.exe` del sistema (Windows).
     System,
-    /// Simula que no hay ninguno. Solo tests y entornos sin Rocketbot.
     Closed,
 }
 
-/// Configuracion del runner de procesos.
 #[derive(Debug, Clone)]
 pub struct ExecConfig {
-    /// Ruta a `rocketbot.exe`.
     pub exe: PathBuf,
-    /// Directorio donde el pack busca logs y bajo el que se crean los
-    /// subdirectorios de ejecucion.
     pub logs_dir: PathBuf,
-    /// Como decidir si Studio esta abierto.
     pub probe: StudioProbe,
 }
 
@@ -112,18 +77,10 @@ impl ExecConfig {
 
     /// Linea de comandos que se le pasa al runner.
     ///
-    /// `--log=` va con `=`: la version instalida (2026.10.26) revienta con
-    /// `--log <ruta>` separado (`IndexError: list index out of range`), asi que
-    /// la forma no es un detalle de estilo.
-    ///
-    /// No se pasa `--nodebug`: el CLI lo documenta como "disable terminal logs"
-    /// y no esta verificado que conserve el log de fichero. El stdout se captura
-    /// acotado y solo se muestra si la ejecucion falla.
+    /// `--log=` va con `=` (la version 2026.10.26 revienta con `--log <ruta>`); no
+    /// se pasa `--nodebug` porque no esta probado que conserve el log de fichero.
     pub fn command_spec(&self, db: &Path, robot: &str, log_dir: &Path) -> CommandSpec {
-        // Las dos rutas se absolutizan antes de pasarlas: el proceso hijo corre
-        // con `cwd` en el directorio de la db, asi que una ruta relativa
-        // (`BBRE2\robot.db`) se resolveria contra si misma y el runner abriria
-        // `BBRE2\BBRE2\robot.db`.
+        // Las rutas se absolutizan: el hijo corre con cwd en la db y una ruta relativa se resolveria contra si misma.
         let db = absolute(db);
         let log_dir = absolute(log_dir);
         CommandSpec {
@@ -142,8 +99,7 @@ impl ExecConfig {
     }
 }
 
-/// Programa, argumentos y cwd de una ejecucion. Separado del lanzamiento para
-/// poder probar la linea de comandos sin arrancar Rocketbot.
+/// Programa, argumentos y cwd, separados del lanzamiento para poder probar la linea sin lanzar Rocketbot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandSpec {
     pub program: PathBuf,
@@ -152,8 +108,7 @@ pub struct CommandSpec {
 }
 
 impl CommandSpec {
-    /// Representacion de una linea, para el informe. Las rutas se enmascaran al
-    /// renderizar, no aqui: el dato original sirve para diagnosticar.
+    /// Representacion para el informe; el enmascarado de rutas es del render, no de aqui.
     pub fn display(&self) -> String {
         let mut out = format!("\"{}\"", self.program.display());
         for arg in &self.args {
@@ -164,7 +119,6 @@ impl CommandSpec {
     }
 }
 
-/// Una peticion de ejecucion.
 #[derive(Debug, Clone)]
 pub struct RunRequest {
     pub robot: String,
@@ -183,33 +137,24 @@ impl RunRequest {
     }
 }
 
-/// Lo que devuelve un runner. Es el hecho bruto; la verificacion de eventos y la
-/// atribucion son del [`Broker`], no del runner, para que un runner falso en un
-/// test pase por el mismo control que el real.
+/// Hecho bruto del lanzamiento; la verificacion de eventos y la atribucion son del [`Broker`].
 #[derive(Debug, Clone)]
 pub struct RunOutcome {
     pub exit_code: Option<i32>,
     pub timed_out: bool,
     pub duration: Duration,
-    /// Hora local del arranque. Se compara con las horas del log, que tambien
-    /// son locales.
+    /// Hora local del arranque, comparable con las horas del log.
     pub started_at: NaiveDateTime,
-    /// Directorio nuevo de logs de esta ejecucion.
     pub log_dir: PathBuf,
-    /// Directorio de logs configurado, como respaldo si `--log` se ignora.
     pub log_fallback: Option<PathBuf>,
-    /// Fichero de log que el propio CLI anuncio en stdout, si se pudo resolver.
     pub reported_log: Option<PathBuf>,
     pub stdout_tail: String,
     pub stderr_tail: String,
-    /// Error al lanzar el proceso (no llego a ejecutarse).
     pub spawn_error: Option<String>,
-    /// Linea de comandos efectiva, para el informe.
     pub command: String,
 }
 
 impl RunOutcome {
-    /// Resultado de un lanzamiento que ni siquiera empezo.
     fn not_launched(started_at: NaiveDateTime, log_dir: PathBuf, error: String) -> Self {
         Self {
             exit_code: None,
@@ -227,8 +172,7 @@ impl RunOutcome {
     }
 }
 
-/// Quien sabe ejecutar un robot. El broker solo aporta la serializacion y las
-/// garantias; el proceso real lo pone [`ProcessRunner`] y los tests un doble.
+/// Quien ejecuta un robot: el broker pone la serializacion y las garantias, el runner el proceso.
 pub trait Runner: Send + Sync {
     /// PIDs de `rocketbot.exe` ya en ejecucion. Vacio = se puede lanzar.
     fn studio_open(&self) -> Vec<u32> {
@@ -238,7 +182,6 @@ pub trait Runner: Send + Sync {
     fn run(&self, request: &RunRequest) -> RunOutcome;
 }
 
-/// Runner real: `rocketbot.exe` como proceso hijo.
 #[derive(Debug, Clone)]
 pub struct ProcessRunner {
     config: ExecConfig,
@@ -309,9 +252,7 @@ impl Runner for ProcessRunner {
                     if Instant::now() >= deadline {
                         timed_out = true;
                         kill_tree(child.id());
-                        // `wait` despues de matar no puede quedarse colgado: el
-                        // arbol ya recibio la senal. Si falla, el codigo es
-                        // desconocido y el informe lo dice.
+                        // El arbol ya recibio la senal: `wait` no debe colgarse; si falla, el codigo es desconocido.
                         break child.wait().ok().and_then(|status| status.code());
                     }
                     std::thread::sleep(Duration::from_millis(50));
@@ -351,21 +292,15 @@ impl Runner for ProcessRunner {
 /// Por que una ejecucion no cuenta como exitosa.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunFailure {
-    /// Studio (u otra instancia) ya esta corriendo: el CLI delegaria sin ejecutar.
     StudioOpen(Vec<u32>),
-    /// No se pudo lanzar el proceso.
     Spawn(String),
-    /// Se agoto el timeout y se mato el arbol.
     Timeout,
-    /// El proceso termino con un codigo distinto de cero.
     Exit(Option<i32>),
-    /// Termino "bien" pero no hay ni un evento del robot: no ejecuto.
     NoEvents,
 }
 
 impl RunFailure {
-    /// Explicacion para el agente. Vive aqui, junto al dato, para que el CLI y la
-    /// fachada MCP no inventen dos redacciones del mismo fallo.
+    /// Explicacion para el agente, junto al dato, para que CLI y MCP no inventen dos redacciones.
     pub fn explain(&self) -> String {
         match self {
             Self::StudioOpen(pids) => {
@@ -401,7 +336,6 @@ impl RunFailure {
     }
 }
 
-/// Un error de la ejecucion, ya atribuido.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunErrorItem {
     /// Linea de Studio en el snapshot atribuido. Vacia si el nodo no existe alli.
@@ -427,10 +361,8 @@ pub struct RunReport {
     pub duration_ms: u64,
     /// Tiempo esperando turno en la cola.
     pub queue_wait_ms: u64,
-    /// Entradas de log del robot (peticiones), incluidas las de error.
     pub events: usize,
     pub errors: Vec<RunErrorItem>,
-    /// Snapshot vivo al terminar, para que el agente sepa que codigo juzgo.
     pub snapshot_id: Option<i64>,
     pub snapshot_at: Option<NaiveDateTime>,
     pub log_files: Vec<PathBuf>,
@@ -451,16 +383,13 @@ impl RunReport {
     }
 }
 
-/// Una ejecucion vista desde fuera (para `run_status`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrokerRunInfo {
     pub robot: String,
     pub db_label: String,
-    /// Tiempo desde que arranco (si corre) o desde que llego a la cola.
     pub elapsed_ms: u64,
 }
 
-/// Ultima ejecucion terminada, resumida.
 #[derive(Debug, Clone)]
 pub struct BrokerLast {
     pub robot: String,
@@ -469,7 +398,6 @@ pub struct BrokerLast {
     pub at: Instant,
 }
 
-/// Estado visible del broker.
 #[derive(Debug, Clone, Default)]
 pub struct BrokerStatus {
     pub running: Option<BrokerRunInfo>,
@@ -497,12 +425,8 @@ struct State {
     last: Option<BrokerLast>,
 }
 
-/// Serializa las ejecuciones del workspace.
-///
-/// El broker es un objeto compartido (`Arc`) por todas las conexiones del
-/// servidor: el candado y la cola son de proceso, no de peticion. Como el
-/// transporte HTTP atiende cada conexion en su hilo, dos agentes pueden pedir
-/// ejecucion a la vez; el segundo espera y su turno es visible en [`status`].
+/// Serializa las ejecuciones del workspace: el candado y la cola son de proceso, no
+/// de peticion. Cada peticion espera su turno, visible en [`status`].
 pub struct Broker {
     runner: Arc<dyn Runner>,
     state: Mutex<State>,
@@ -549,11 +473,8 @@ impl Broker {
         }
     }
 
-    /// Encola y ejecuta. Bloquea hasta que le toca el turno y termina.
-    ///
-    /// La comprobacion de Studio se hace **dos veces**: antes de encolar (para
-    /// responder rapido y no ocupar un turno) y justo antes de lanzar (por si
-    /// Studio se abrio mientras esperaba).
+    /// Encola y ejecuta; bloquea hasta que le toca el turno y termina.
+    /// La comprobacion de Studio se repite antes de lanzar (pudo abrirse esperando).
     pub fn execute(&self, request: RunRequest) -> RunReport {
         let db_label = db::label(&request.db);
         let queued_at = Instant::now();
@@ -590,8 +511,7 @@ impl Broker {
             });
         }
 
-        // Si el runner entra en panico, el `Drop` libera el turno: un bug no
-        // puede dejar el broker bloqueado para siempre.
+        // El `Drop` de `Slot` libera el turno si el runner entra en panico: un bug no puede bloquear el broker.
         let slot = Slot { broker: self };
         let queue_wait_ms = elapsed(&Instant::now(), queued_at);
 
@@ -614,7 +534,6 @@ impl Broker {
         report
     }
 
-    /// Fallo detectado antes de encolar: no se toca la cola.
     fn failed_without_slot(
         &self,
         request: &RunRequest,
@@ -664,9 +583,7 @@ impl Broker {
                     None => (None, None, errors),
                 }
             }
-            // La db existia antes de lanzar (la fachada lo comprueba), pero
-            // puede desaparecer durante la ejecucion. El hecho bruto de la
-            // ejecucion no se pierde: solo falta la atribucion.
+            // La db puede desaparecer durante la ejecucion: el hecho bruto se conserva, solo falta la atribucion.
             Err(_) => (None, None, Vec::new()),
         };
 
@@ -749,18 +666,13 @@ fn elapsed(now: &Instant, since: Instant) -> u64 {
     now.saturating_duration_since(since).as_millis() as u64
 }
 
-/// Logs de la ejecucion ya leidos.
 #[derive(Debug, Clone, Default)]
 pub struct CollectedEvents {
     pub entries: Vec<logs::LogEntry>,
     pub files: Vec<PathBuf>,
 }
 
-/// Lee los eventos del robot de **esta** ejecucion.
-///
-/// Orden de busqueda: directorio nuevo -> fichero anunciado por el CLI ->
-/// directorio configurado. En cuanto un camino aporta eventos no se sigue: los
-/// demas son respaldos para versiones del CLI que ignoran `--log`.
+/// Lee los eventos del robot de esta ejecucion; sin eventos no hay prueba de que ejecutara.
 pub fn collect_events(outcome: &RunOutcome, robot: &str) -> CollectedEvents {
     let since = outcome.started_at - chrono::Duration::seconds(CLOCK_SLACK_SECS);
 
@@ -796,8 +708,6 @@ fn collect_from_dir(
         out.entries.extend(from_file.entries);
         out.files.extend(from_file.files);
     }
-    // `recent_files` devuelve del mas nuevo al mas viejo; el informe quiere el
-    // orden en que ocurrieron.
     out.entries.sort_by_key(|entry| entry.timestamp);
     out
 }
@@ -824,8 +734,6 @@ fn attribute_run_errors(
     robot: &str,
     entries: &[logs::LogEntry],
 ) -> Vec<RunErrorItem> {
-    // Sin snapshots no hay linea ni version que dar; el error sigue siendo
-    // evidencia y se conserva con `version: None`.
     let snapshots = analysis::snapshot_views(conn, robot).unwrap_or_default();
 
     let mut raws = Vec::new();
@@ -856,8 +764,7 @@ fn attribute_run_errors(
             .find(|item| item.signature == raw.signature && item.line == line)
         {
             item.occurrences += 1;
-            // La version maxima: si la misma firma se repitio en dos versiones,
-            // la ultima es la unica que puede seguir viva.
+            // La version maxima: si la firma se repitio en dos versiones, la ultima es la unica que puede seguir viva.
             if attribution.version > item.version {
                 item.version = attribution.version;
                 item.verdict = attribution.verdict;
@@ -888,10 +795,7 @@ fn first_line(message: &str) -> String {
     out
 }
 
-/// Ruta de un directorio de ejecucion nuevo bajo `base`.
-///
-/// El nombre empieza por la fecha (`AAAAMMDD-HHMMSS`) para que ordenar por
-/// nombre sea ordenar por antiguedad y [`prune_run_dirs`] no necesite metadata.
+/// Directorio de ejecucion nuevo; el nombre empieza por la fecha para que ordenar por nombre ordene por antiguedad.
 pub fn new_run_dir(base: &Path, robot: &str) -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let stamp = now_local().format("%Y%m%d-%H%M%S");
@@ -904,9 +808,7 @@ pub fn new_run_dir(base: &Path, robot: &str) -> PathBuf {
 }
 
 /// Borra los directorios de ejecucion mas viejos, conservando `keep`.
-///
-/// Devuelve cuantos borro. Es best-effort: un fichero abierto en Windows no se
-/// puede borrar y eso no puede tumbar una ejecucion.
+/// Best-effort: un fichero abierto en Windows no se puede borrar y eso no puede tumbar una ejecucion.
 pub fn prune_run_dirs(base: &Path, keep: usize) -> usize {
     let root = base.join("rocketdebug-runs");
     let Ok(entries) = std::fs::read_dir(&root) else {
@@ -951,11 +853,7 @@ fn slug(text: &str) -> String {
     }
 }
 
-/// `true` si `text` es el nombre del proceso de Rocketbot. Aislado para probar
-/// la deteccion sin `tasklist`.
-///
-/// Solo la usa el codigo de Windows, pero se prueba en todas las plataformas:
-/// fuera de Windows se marca para que `dead_code` no la reclame.
+/// Nombre exacto del proceso, aislado para probar la deteccion sin `tasklist`.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn is_rocketbot_process(name: &str) -> bool {
     name.trim_matches('"')
@@ -963,12 +861,7 @@ fn is_rocketbot_process(name: &str) -> bool {
         .eq_ignore_ascii_case("rocketbot.exe")
 }
 
-/// Interpreta la salida CSV de `tasklist /FI "IMAGENAME eq rocketbot.exe"`.
-///
-/// Cuando no hay coincidencias, `tasklist` imprime una linea localizada
-/// ("INFO: No tasks are running...") que no empieza por el nombre del proceso y
-/// se ignora sola. Igual que [`is_rocketbot_process`]: probada en todas las
-/// plataformas, usada solo en Windows.
+/// La linea localizada de "No tasks..." no empieza por el nombre y se ignora sola; probada en todas las plataformas.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn parse_tasklist(output: &str) -> Vec<u32> {
     let mut pids = Vec::new();
@@ -997,8 +890,7 @@ fn rocketbot_pids() -> Vec<u32> {
         .output();
     match output {
         Ok(output) => parse_tasklist(&String::from_utf8_lossy(&output.stdout)),
-        // Si `tasklist` no esta o falla, no se inventa una deteccion: la
-        // verificacion de eventos sigue siendo la red de seguridad.
+        // Si `tasklist` falla no se inventa deteccion: la verificacion de eventos sigue siendo la red de seguridad.
         Err(_) => Vec::new(),
     }
 }
@@ -1032,10 +924,7 @@ fn kill_tree(pid: u32) {
     }
 }
 
-/// Convierte una ruta relativa en absoluta usando el cwd del proceso.
-///
-/// No se usa `canonicalize`: resuelve enlaces y exige que el fichero exista, y
-/// aqui solo hace falta que el hijo no dependa de su propio `cwd`.
+/// Absolutiza contra el cwd; `canonicalize` resolveria enlaces y exigiria que el fichero exista.
 fn absolute(path: &Path) -> PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();
@@ -1047,9 +936,7 @@ fn absolute(path: &Path) -> PathBuf {
 
 fn spawn_reader(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<String> {
     std::thread::spawn(move || {
-        // Se drena hasta EOF aunque solo se conserven los ultimos 64 KiB: si se
-        // dejara de leer, el hijo se bloquearia al llenar el pipe y la ejecucion
-        // moriria por timeout sin motivo.
+        // Se drena hasta EOF aunque solo se conserve la cola: si el pipe se llena, el hijo se bloquea y muere por timeout.
         let mut tail: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 8192];
         loop {
@@ -1070,11 +957,7 @@ fn spawn_reader(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle
     })
 }
 
-/// Resuelve el `Log path: ...` que imprime el CLI.
-///
-/// La ruta suele ser relativa (`logs\261118\logfile...`). Se prueba contra el cwd
-/// del proceso y contra el directorio del ejecutable; si ninguna existe, se
-/// devuelve la del cwd y `collect_events` la descartara por no ser fichero.
+/// Resuelve el `Log path: ...` del CLI contra el cwd y el directorio del ejecutable.
 fn reported_log_path(stdout: &str, cwd: &Path, exe: &Path) -> Option<PathBuf> {
     let line = stdout
         .lines()
@@ -1113,19 +996,15 @@ struct WinSystemTime {
     milliseconds: u16,
 }
 
-// `GetLocalTime` con enlazado explicito: el CI de Windows usa MSVC y no conviene
-// fiarse de que `kernel32` llegue por defecto en la linea de enlazado.
+// `GetLocalTime` con enlazado explicito: el CI de Windows usa MSVC y no conviene fiarse de `kernel32` por defecto.
 #[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {
     fn GetLocalTime(system_time: *mut WinSystemTime);
 }
 
-/// Hora local del sistema.
-///
-/// `chrono` va sin la feature `clock` en todo el workspace (quien necesita la
-/// hora la inyecta), y los logs de Rocketbot estan en hora local. En Windows se
-/// pregunta al SO con `GetLocalTime`; en el resto se usa UTC.
+/// Hora local: `chrono` va sin la feature `clock` en el workspace y los logs de
+/// Rocketbot estan en hora local. En Windows se pregunta con `GetLocalTime`; en el resto, UTC.
 #[cfg(windows)]
 fn now_local() -> NaiveDateTime {
     let mut time = WinSystemTime {
